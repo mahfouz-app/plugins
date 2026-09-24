@@ -1,0 +1,97 @@
+// Run with `npm test` (node --test) from the repo root. The sidecar's pure
+// parts (ported from the app's former slidev.rs tests); the server and
+// export need a real install, see the README's smoke test.
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+import {
+  deckUrl,
+  entryModuleSrc,
+  ensureLink,
+  exportEntryContent,
+  linkVault,
+  methods,
+  nodeVersionOk,
+  safeJoin,
+  stubContent,
+  vaultLinkId,
+} from "./sidecar.js";
+
+function tempDir(name) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `mahfouz-slidev-${name}-`));
+}
+
+test("the stub quotes src, and the idle placeholder imports nothing", () => {
+  assert.equal(stubContent('./vaults/abc/Plain "Talk".md'), '---\nsrc: "./vaults/abc/Plain \\"Talk\\".md"\n---\n');
+  assert.doesNotMatch(stubContent(null), /src:/);
+});
+
+test("the export entry sets an aspect ratio only for portrait", () => {
+  assert.equal(exportEntryContent("./vaults/abc/n/a.md", false), '---\nsrc: "./vaults/abc/n/a.md"\n---\n');
+  assert.equal(exportEntryContent("./vaults/abc/n/a.md", true), '---\nsrc: "./vaults/abc/n/a.md"\naspectRatio: "3/4"\n---\n');
+});
+
+test("the vault link id is stable and filename-safe", () => {
+  assert.equal(vaultLinkId("/Users/o/Notes"), vaultLinkId("/Users/o/Notes"));
+  assert.notEqual(vaultLinkId("/Users/o/Notes"), vaultLinkId("/Users/o/Other"));
+  assert.match(vaultLinkId("/a b/ç"), /^[0-9a-f]{16}$/);
+});
+
+test("vault and files links are created, kept, and repointed", () => {
+  const base = tempDir("links");
+  const ws = path.join(base, "ws");
+  const v1 = path.join(base, "v1");
+  const v2 = path.join(base, "v2");
+  for (const d of [ws, path.join(v1, "files"), path.join(v2, "files")]) fs.mkdirSync(d, { recursive: true });
+
+  const id = linkVault(ws, v1);
+  assert.equal(fs.readlinkSync(path.join(ws, "vaults", id)), v1);
+  assert.equal(fs.readlinkSync(path.join(ws, "public", "files")), path.join(v1, "files"));
+  assert.equal(linkVault(ws, v1), id);
+  linkVault(ws, v2);
+  assert.equal(fs.readlinkSync(path.join(ws, "public", "files")), path.join(v2, "files"));
+
+  const stale = path.join(ws, "vaults", id);
+  fs.unlinkSync(stale);
+  fs.symlinkSync(v2, stale);
+  ensureLink(stale, v1);
+  assert.equal(fs.readlinkSync(stale), v1);
+
+  const blocker = path.join(ws, "vaults", "real-dir");
+  fs.mkdirSync(blocker);
+  assert.throws(() => ensureLink(blocker, v1), /not a symlink/);
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+test("note paths can't leave the vault", () => {
+  assert.equal(safeJoin("/v", "a/b.md"), path.resolve("/v/a/b.md"));
+  assert.throws(() => safeJoin("/v", "../etc/passwd"), /leaves the vault/);
+  assert.throws(() => safeJoin("/v", "/etc/passwd"), /must be relative/);
+});
+
+test("the Vite entry module is found in index.html", () => {
+  assert.equal(entryModuleSrc('<html><script type="module" src="/@fs/x/main.ts"></script></html>'), "/@fs/x/main.ts");
+  assert.equal(entryModuleSrc('<script src="/y.ts" type="module"></script>'), "/y.ts");
+  assert.equal(entryModuleSrc("<html></html>"), null);
+});
+
+test("Node version floor", () => {
+  assert.equal(nodeVersionOk("v22.12.0"), true);
+  assert.equal(nodeVersionOk("v24.0.0"), true);
+  assert.equal(nodeVersionOk("v22.11.9"), false);
+  assert.equal(nodeVersionOk("v20.19.0"), false);
+});
+
+test("deck URLs go through localhost", () => {
+  assert.equal(deckUrl(3999), "http://localhost:3999/");
+});
+
+test("start and export refuse missing notes and paths with '#'", async () => {
+  const vault = tempDir("vault");
+  fs.writeFileSync(path.join(vault, "a#b.md"), "# x");
+  await assert.rejects(methods.start({ vaultPath: vault, relPath: "missing.md" }), /note file not found/);
+  await assert.rejects(methods.start({ vaultPath: vault, relPath: "a#b.md" }), /can't be presented/);
+  fs.rmSync(vault, { recursive: true, force: true });
+});

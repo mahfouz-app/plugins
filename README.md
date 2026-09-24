@@ -8,13 +8,58 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 > in the app's webview and its optional background process (a "sidecar"). Only add
 > registries you trust.
 
+## Plugins
+
+| Plugin | What it does | Installs |
+|---|---|---|
+| `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
+| `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, and edits one in a draw.io tab | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
+| `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`) | Slidev, its default theme and playwright-chromium, with `npm ci` from the committed lockfile. Needs Node.js 22.12+ |
+| `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
+| `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
+
+`npm test` runs the plugins' tests and the registry checker's with `node --test` (no
+dependencies).
+
+## Releasing
+
+`main` is the release: every Mahfouz install pulls this repository at launch, and shows **Update
+available** for any plugin whose `version` differs from the one it installed. So:
+
+1. **Change a plugin → raise its `version`** (semver) in the same PR. Without it, nobody gets the
+   change. CI fails a PR that changes anything under `plugins/<id>/` without raising that
+   plugin's version above the base branch's.
+2. **Needs something new from the app → raise `mahfouz`** to the first app release that has it,
+   so older apps show "Requires Mahfouz …" instead of a broken plugin. It's a Rust `semver` range:
+   comparators separated by commas (`">=0.5.0, <1.0.0"`), not spaces or `||`.
+3. **Merge.** Users see the update the next time their app pulls the registry (at launch, or
+   **Check for updates**), and it's applied only when they approve it.
+
+There's no build step and nothing to publish: every artifact a manifest downloads comes from its
+upstream (npm, GitHub releases) and is pinned by sha256.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every PR, on `main`, and weekly:
+
+- `npm test`
+- `node scripts/check.mjs --base <base branch>`: every manifest against the rules the app's
+  parser enforces (fields, slugs, versions, the `mahfouz` range, paths staying inside the plugin,
+  dependencies, the files `frontend`/`sidecar`/npm steps name), plus the version-bump rule
+- `npm ci --ignore-scripts` wherever there's a lockfile, so it's known to match its `package.json`
+- `node scripts/check.mjs --artifacts`: downloads each artifact and checks its sha256 (on a PR,
+  only for plugins whose manifest changed; weekly, all of them, in case an upstream URL breaks)
+
+Run the same locally with `npm test && node scripts/check.mjs --base origin/main`.
+
 ## Layout
 
 ```
 registry.json               { "schema": 1, "name": "mahfouz", "description": "…" }
 plugins/<id>/plugin.json    the plugin's manifest
 plugins/<id>/…              frontend module, sidecar script, package-lock.json, …
-api.ts, embed.ts            host API types (vendored from the app; keep in sync)
+api.ts, embed.ts, tabs.ts,  host API types (vendored from the app; keep in sync)
+host.ts
 ```
 
 - **Registry `name`:** lowercase letters, digits and `-`, up to 32 characters, and unique on
@@ -64,8 +109,8 @@ relative and stay inside the plugin's directory.
 | `apiVersion` | Host API major version (`api.ts`). Currently `1`. |
 | `dependencies` | Qualified ids installed first. A dependency from a registry the user hasn't added blocks the install. |
 | `install` | Steps run in order inside the plugin's installed directory. |
-| `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Needs Node.js on the user's machine. |
-| `install[].type: "download"` | Fetches the artifact for the user's platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `windows-x64`). A **sha256 mismatch aborts the install**. `extract` is `tar.gz`, `zip`, or `none` (the default; with `none`, `to` is the saved file's path). A platform missing from `artifacts` shows "Not available on this platform". |
+| `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Needs Node.js on the user's machine. `"progress": "npm-fetch"` shows a percentage by counting npm's package downloads against the lockfile. |
+| `install[].type: "download"` | Fetches the artifact for the user's platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `windows-x64`), or the `"any"` one for platform-independent files. A **sha256 mismatch aborts the install**. `extract` is `tar.gz`, `zip`, or `none` (the default; with `none`, `to` is the saved file's path). `include` optionally limits unpacking to those archive paths (a directory unpacks its contents). A platform with no artifact and no `"any"` shows "Not available on this platform". |
 | `gitPath` | Directories put on `PATH` for every git command Mahfouz runs (e.g. a `git-lfs` binary). |
 | `frontend` | ES module the app imports. It must export `activate(host)` and may export `deactivate()`. **Ship a single bundled file**: relative imports aren't refreshed on update until the app restarts. |
 | `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the user's Node. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
@@ -91,9 +136,46 @@ Everything a plugin registers is disposed when the user turns it off for the vau
 to a vault that doesn't use it, updates it, or uninstalls it. `host.plugin.baseUrl` is the URL
 of the plugin's installed directory. Load assets relative to it.
 
-API v1 covers embeds (`registerEmbed`), the sidecar (`sidecar.call` and `sidecar.onNotify`),
-`progress`, `toast`, and `isEnabled`. Commands and tab types arrive, additively, when the
-built-in Slidev and PDF plugins move here.
+Embed renderers also get a fourth `render` argument, `{ ordinal, note }`: which block of their
+language this is in the note, and the note itself. Read `note` when the user acts (e.g. on
+click), not while rendering. `onInsertedAt(view, from, note)` runs right after the toolbar
+inserts your snippet.
+
+### Tabs
+
+A plugin can open tabs with `host.registerTabType({ id, icon, render(container, ctx) })` and
+`host.openTab(type, note, arg)`. Every plugin tab shows one note. The app draws the toolbar
+(icon, note title, Close), keeps the tab in its tab strip, and closes it if the note is
+deleted. `render` fills the area below; the function it returns runs when the tab unmounts,
+including on a tab switch, so flush unsaved work there. `ctx` has `note`, your `arg`,
+`readBody()`, `writeBody(body)` (the app's normal save path) and `close()`. `openTab` saves
+the note's pending edits first, so `readBody()` sees them.
+
+### Commands, overlays, export formats, and other plugins
+
+- `host.registerCommand({ id, label, icon?, noteMenu?, shortcut?, run(note) })` adds a command to
+  note menus (`noteMenu`) and/or a keyboard shortcut. `shortcut` is only the default: users rebind
+  or disable it in `.config/settings.md` under `## Shortcuts`, row `<registry>/<plugin>:<command id>`.
+- `host.ui.openOverlay({ title, render(container, { close }) })` covers the whole window (native
+  full screen). The app handles Esc, View → Stop Presenting and the close button.
+- `host.registerExportFormat({ id, label, export(request, progress) })` adds a format to the Export
+  dialog. You get the note and, when the dialog's options changed it, the Markdown to render; you
+  return a file you rendered in the OS temp dir, and the app asks where to save it.
+- `host.notes.get(note)` gives the note's title, path, vault path, attributes and body;
+  `host.notes.updateAttributes(note, update)` rewrites its frontmatter.
+- `host.provide(api)` makes an API available to plugins that list yours in `dependencies`; they call
+  `await host.use("<registry>/<plugin>")`. A dependency is loaded first, even when the vault has it
+  turned off — then `host.isEnabled()` is false, and it should only `provide`.
+- A plugin tab's `ctx.setToolbar(buttons)` puts buttons in the app's toolbar;
+  `host.ui.openExternal(url)` opens an http(s) URL in the browser.
+- Plugin UI can use the app's `presentation-*` classes (`presentation-status`,
+  `presentation-status-title`, `presentation-spinner`, `presentation-log`, `presentation-cta`,
+  `presentation-frame`) to match the app's own panes.
+
+API v1 covers embeds (`registerEmbed`), tabs (`registerTabType`, `openTab`), commands, overlays,
+export formats, notes, `provide`/`use`, the sidecar (`sidecar.call` and `sidecar.onNotify`),
+`progress`, `toast`, `isEnabled`, and `ui.attachPanZoom` / `ui.showError` so embeds look like
+the app's own.
 
 ## Sidecar protocol
 

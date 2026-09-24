@@ -1,0 +1,66 @@
+# `main` is the release: every Mahfouz install pulls it at launch. So
+# nothing gets there without these checks. See scripts/check.mjs and the
+# README's "Releasing" section.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Weekly: an artifact URL can stop resolving (or change) after it merged.
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The version check diffs against the base branch.
+          fetch-depth: 0
+
+      # The Slidev plugin's floor (Vite and its plugins need 22.12+).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Tests
+        run: npm test
+
+      - name: Manifests and version bumps
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            node scripts/check.mjs --base "origin/${{ github.base_ref }}"
+          else
+            node scripts/check.mjs
+          fi
+
+      # `npm ci` refuses a lockfile that doesn't match its package.json, which
+      # is exactly what the plugin's install step would hit on users' machines.
+      # --ignore-scripts: the lockfile is what's under test, not postinstall
+      # downloads (e.g. playwright's browser).
+      - name: Lockfiles
+        run: |
+          for lock in plugins/*/package-lock.json; do
+            [ -e "$lock" ] || continue
+            dir=$(dirname "$lock")
+            echo "::group::npm ci in $dir"
+            (cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund)
+            echo "::endgroup::"
+          done
+
+      # On a PR: the artifacts of plugins whose manifest changed. On main and
+      # weekly: all of them.
+      - name: Artifacts
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            node scripts/check.mjs --artifacts --base "origin/${{ github.base_ref }}"
+          else
+            node scripts/check.mjs --artifacts
+          fi
