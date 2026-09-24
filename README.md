@@ -1,0 +1,111 @@
+# Mahfouz plugins
+
+The official plugin registry for [Mahfouz](https://github.com/mahfouz-app). Mahfouz has it built in
+as the `mahfouz` registry. Other registries use the same layout and can be added in
+**Preferences → Plugins → Registries** with a git URL or a GitHub `owner/repo`.
+
+> **Trust:** a plugin runs with the user's full permissions. That covers its frontend module
+> in the app's webview and its optional background process (a "sidecar"). Only add
+> registries you trust.
+
+## Layout
+
+```
+registry.json               { "schema": 1, "name": "mahfouz", "description": "…" }
+plugins/<id>/plugin.json    the plugin's manifest
+plugins/<id>/…              frontend module, sidecar script, package-lock.json, …
+api.ts, embed.ts            host API types (vendored from the app; keep in sync)
+```
+
+- **Registry `name`:** lowercase letters, digits and `-`, up to 32 characters, and unique on
+  the user's machine. `mahfouz` is reserved for this repo.
+- **Plugin `id`:** follows the same rules. Everywhere outside its manifest, a plugin is referred
+  to by its **qualified id**, `<registry>/<id>` (e.g. `mahfouz/mermaid`). That is also the key
+  vaults use in `.config/settings.md` under `## Plugins`.
+
+Mahfouz clones a registry with `git clone --depth 1` and refreshes it at every launch. An
+installed plugin is a **copy** of `plugins/<id>/` taken at install time. Pushing a new version
+here only shows users an "Update available" button; nothing changes on their machine until they
+approve the update.
+
+## `plugin.json` (schema 1)
+
+```json
+{
+  "schema": 1,
+  "id": "example",
+  "version": "1.0.0",
+  "label": "Example",
+  "description": "One line shown next to the toggle",
+  "mahfouz": ">=0.4.0",
+  "apiVersion": 1,
+  "dependencies": ["mahfouz/other"],
+  "install": [
+    { "type": "npm", "dir": "." },
+    { "type": "download", "extract": "tar.gz", "to": "bin",
+      "artifacts": {
+        "darwin-arm64": { "url": "https://…/tool-darwin-arm64.tar.gz", "sha256": "<64 hex>" }
+      } }
+  ],
+  "gitPath": ["bin"],
+  "frontend": "index.js",
+  "sidecar": { "runtime": "node", "entry": "sidecar.js" }
+}
+```
+
+Only `schema`, `id`, `version`, `label`, `description`, `mahfouz` and `apiVersion` are required.
+Unknown fields are rejected, so a typo fails loudly instead of being ignored. Every path must be
+relative and stay inside the plugin's directory.
+
+| Field | Meaning |
+|---|---|
+| `version` | Semver. The user sees an update whenever it differs from the installed version. |
+| `mahfouz` | Semver range the app version must satisfy. Otherwise the plugin shows "Requires Mahfouz …". |
+| `apiVersion` | Host API major version (`api.ts`). Currently `1`. |
+| `dependencies` | Qualified ids installed first. A dependency from a registry the user hasn't added blocks the install. |
+| `install` | Steps run in order inside the plugin's installed directory. |
+| `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Needs Node.js on the user's machine. |
+| `install[].type: "download"` | Fetches the artifact for the user's platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `windows-x64`). A **sha256 mismatch aborts the install**. `extract` is `tar.gz`, `zip`, or `none` (the default; with `none`, `to` is the saved file's path). A platform missing from `artifacts` shows "Not available on this platform". |
+| `gitPath` | Directories put on `PATH` for every git command Mahfouz runs (e.g. a `git-lfs` binary). |
+| `frontend` | ES module the app imports. It must export `activate(host)` and may export `deactivate()`. **Ship a single bundled file**: relative imports aren't refreshed on update until the app restarts. |
+| `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the user's Node. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
+
+Checksums live in this repo's git history, so a release asset swapped after the fact can't be
+installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).
+
+## Frontend (`api.ts`)
+
+```js
+export function activate(host) {
+  host.registerEmbed("example", {
+    label: "Example block",
+    snippet: "hello",
+    render(container, source) {
+      container.textContent = source.toUpperCase();
+    },
+  });
+}
+```
+
+Everything a plugin registers is disposed when the user turns it off for the vault, switches
+to a vault that doesn't use it, updates it, or uninstalls it. `host.plugin.baseUrl` is the URL
+of the plugin's installed directory. Load assets relative to it.
+
+API v1 covers embeds (`registerEmbed`), the sidecar (`sidecar.call` and `sidecar.onNotify`),
+`progress`, `toast`, and `isEnabled`. Commands and tab types arrive, additively, when the
+built-in Slidev and PDF plugins move here.
+
+## Sidecar protocol
+
+Newline-delimited JSON-RPC 2.0 over stdin and stdout:
+
+- **The app sends requests:** `{"jsonrpc":"2.0","id":1,"method":"render","params":{…}}`. Answer
+  each with `{"jsonrpc":"2.0","id":1,"result":…}` or `{"jsonrpc":"2.0","id":1,"error":{"code":1,"message":"…"}}`.
+- **The sidecar can send notifications:** `{"jsonrpc":"2.0","method":"progress","params":{…}}`.
+  They're delivered to `host.sidecar.onNotify(method, fn)`.
+- **stderr** is shown in the plugin's page in Settings (the last 200 lines).
+- **Environment:** `MAHFOUZ_PLUGIN_DIR` (installed directory, also the cwd),
+  `MAHFOUZ_PLUGIN_DATA_DIR` (survives updates, deleted on uninstall) and `MAHFOUZ_API_VERSION`.
+- **Lifecycle:** the process starts on the first call and runs in its own process group. It is
+  stopped when the plugin is disabled, updated or uninstalled, and when the app quits. After 3
+  crashes within 60 seconds it isn't restarted until the next launch.
