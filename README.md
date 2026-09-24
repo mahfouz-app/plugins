@@ -18,7 +18,39 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 
-`npm test` runs the plugins' tests with `node --test` (no dependencies).
+`npm test` runs the plugins' tests and the registry checker's with `node --test` (no
+dependencies).
+
+## Releasing
+
+`main` is the release: every Mahfouz install pulls this repository at launch, and shows **Update
+available** for any plugin whose `version` differs from the one it installed. So:
+
+1. **Change a plugin → raise its `version`** (semver) in the same PR. Without it, nobody gets the
+   change. CI fails a PR that changes anything under `plugins/<id>/` without raising that
+   plugin's version above the base branch's.
+2. **Needs something new from the app → raise `mahfouz`** to the first app release that has it,
+   so older apps show "Requires Mahfouz …" instead of a broken plugin. It's a Rust `semver` range:
+   comparators separated by commas (`">=0.5.0, <1.0.0"`), not spaces or `||`.
+3. **Merge.** Users see the update the next time their app pulls the registry (at launch, or
+   **Check for updates**), and it's applied only when they approve it.
+
+There's no build step and nothing to publish: every artifact a manifest downloads comes from its
+upstream (npm, GitHub releases) and is pinned by sha256.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every PR, on `main`, and weekly:
+
+- `npm test`
+- `node scripts/check.mjs --base <base branch>`: every manifest against the rules the app's
+  parser enforces (fields, slugs, versions, the `mahfouz` range, paths staying inside the plugin,
+  dependencies, the files `frontend`/`sidecar`/npm steps name), plus the version-bump rule
+- `npm ci --ignore-scripts` wherever there's a lockfile, so it's known to match its `package.json`
+- `node scripts/check.mjs --artifacts`: downloads each artifact and checks its sha256 (on a PR,
+  only for plugins whose manifest changed; weekly, all of them, in case an upstream URL breaks)
+
+Run the same locally with `npm test && node scripts/check.mjs --base origin/main`.
 
 ## Layout
 
