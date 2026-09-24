@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "drawio",
+  "version": "1.0.0",
+  "label": "Draw.io diagrams",
+  "description": "Embed and edit draw.io diagrams",
+  "mahfouz": ">=0.3.0",
+  "apiVersion": 1,
+  "install": [
+    {
+      "type": "download",
+      "extract": "tar.gz",
+      "to": "webapp",
+      "include": ["drawio-31.4.6/src/main/webapp"],
+      "artifacts": {
+        "any": {
+          "url": "https://github.com/jgraph/drawio/archive/refs/tags/v31.4.6.tar.gz",
+          "sha256": "c0b72c9ab5f0d7c735ac062de022a005b6513c3bea5e4cd10e9dfa19f42c2278"
+        }
+      }
+    }
+  ],
+  "frontend": "index.js"
+}
