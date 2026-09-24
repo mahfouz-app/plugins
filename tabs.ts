@@ -5,6 +5,13 @@ export interface NoteRef {
   noteId: string;
 }
 
+export interface ToolbarButton {
+  label: string;
+  title?: string;
+  disabled?: boolean;
+  onClick(): void;
+}
+
 export interface PluginTabContext {
   note: NoteRef & { title: string };
   /** The plugin-defined argument the tab was opened with. */
@@ -15,6 +22,9 @@ export interface PluginTabContext {
   writeBody(body: string): Promise<void>;
   /** Closes this tab. */
   close(): void;
+  /** Buttons shown in the app's toolbar, before Close. Call again to update
+   * them (e.g. enable once loaded). */
+  setToolbar(buttons: ToolbarButton[]): void;
 }
 
 export interface PluginTabType {

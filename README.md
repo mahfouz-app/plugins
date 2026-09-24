@@ -14,6 +14,8 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 |---|---|---|
 | `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
 | `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, and edits one in a draw.io tab | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
+| `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`) | Slidev, its default theme and playwright-chromium, with `npm ci` from the committed lockfile. Needs Node.js 22.12+ |
+| `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 
 `npm test` runs the plugins' tests with `node --test` (no dependencies).
@@ -24,7 +26,8 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 registry.json               { "schema": 1, "name": "mahfouz", "description": "…" }
 plugins/<id>/plugin.json    the plugin's manifest
 plugins/<id>/…              frontend module, sidecar script, package-lock.json, …
-api.ts, embed.ts, tabs.ts   host API types (vendored from the app; keep in sync)
+api.ts, embed.ts, tabs.ts,  host API types (vendored from the app; keep in sync)
+host.ts
 ```
 
 - **Registry `name`:** lowercase letters, digits and `-`, up to 32 characters, and unique on
@@ -74,7 +77,7 @@ relative and stay inside the plugin's directory.
 | `apiVersion` | Host API major version (`api.ts`). Currently `1`. |
 | `dependencies` | Qualified ids installed first. A dependency from a registry the user hasn't added blocks the install. |
 | `install` | Steps run in order inside the plugin's installed directory. |
-| `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Needs Node.js on the user's machine. |
+| `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Needs Node.js on the user's machine. `"progress": "npm-fetch"` shows a percentage by counting npm's package downloads against the lockfile. |
 | `install[].type: "download"` | Fetches the artifact for the user's platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `windows-x64`), or the `"any"` one for platform-independent files. A **sha256 mismatch aborts the install**. `extract` is `tar.gz`, `zip`, or `none` (the default; with `none`, `to` is the saved file's path). `include` optionally limits unpacking to those archive paths (a directory unpacks its contents). A platform with no artifact and no `"any"` shows "Not available on this platform". |
 | `gitPath` | Directories put on `PATH` for every git command Mahfouz runs (e.g. a `git-lfs` binary). |
 | `frontend` | ES module the app imports. It must export `activate(host)` and may export `deactivate()`. **Ship a single bundled file**: relative imports aren't refreshed on update until the app restarts. |
@@ -116,10 +119,31 @@ including on a tab switch, so flush unsaved work there. `ctx` has `note`, your `
 `readBody()`, `writeBody(body)` (the app's normal save path) and `close()`. `openTab` saves
 the note's pending edits first, so `readBody()` sees them.
 
-API v1 covers embeds (`registerEmbed`), tabs (`registerTabType`, `openTab`), the sidecar (`sidecar.call` and `sidecar.onNotify`),
+### Commands, overlays, export formats, and other plugins
+
+- `host.registerCommand({ id, label, icon?, noteMenu?, shortcut?, run(note) })` adds a command to
+  note menus (`noteMenu`) and/or a keyboard shortcut. `shortcut` is only the default: users rebind
+  or disable it in `.config/settings.md` under `## Shortcuts`, row `<registry>/<plugin>:<command id>`.
+- `host.ui.openOverlay({ title, render(container, { close }) })` covers the whole window (native
+  full screen). The app handles Esc, View → Stop Presenting and the close button.
+- `host.registerExportFormat({ id, label, export(request, progress) })` adds a format to the Export
+  dialog. You get the note and, when the dialog's options changed it, the Markdown to render; you
+  return a file you rendered in the OS temp dir, and the app asks where to save it.
+- `host.notes.get(note)` gives the note's title, path, vault path, attributes and body;
+  `host.notes.updateAttributes(note, update)` rewrites its frontmatter.
+- `host.provide(api)` makes an API available to plugins that list yours in `dependencies`; they call
+  `await host.use("<registry>/<plugin>")`. A dependency is loaded first, even when the vault has it
+  turned off — then `host.isEnabled()` is false, and it should only `provide`.
+- A plugin tab's `ctx.setToolbar(buttons)` puts buttons in the app's toolbar;
+  `host.ui.openExternal(url)` opens an http(s) URL in the browser.
+- Plugin UI can use the app's `presentation-*` classes (`presentation-status`,
+  `presentation-status-title`, `presentation-spinner`, `presentation-log`, `presentation-cta`,
+  `presentation-frame`) to match the app's own panes.
+
+API v1 covers embeds (`registerEmbed`), tabs (`registerTabType`, `openTab`), commands, overlays,
+export formats, notes, `provide`/`use`, the sidecar (`sidecar.call` and `sidecar.onNotify`),
 `progress`, `toast`, `isEnabled`, and `ui.attachPanZoom` / `ui.showError` so embeds look like
-the app's own. Commands arrive, additively, when the built-in
-Slidev and PDF plugins move here.
+the app's own.
 
 ## Sidecar protocol
 

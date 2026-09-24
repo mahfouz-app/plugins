@@ -1,0 +1,11 @@
+{
+  "name": "mahfouz-plugin-slidev",
+  "private": true,
+  "type": "module",
+  "description": "Slidev and the headless browser its PDF export renders with; installed by the plugin's npm step.",
+  "dependencies": {
+    "@slidev/cli": "^52.19.1",
+    "@slidev/theme-default": "^0.25.0",
+    "playwright-chromium": "^1.55.0"
+  }
+}
