@@ -11,10 +11,11 @@
 // is a breaking change and needs a new `apiVersion`; adding one is not.
 
 // Vendored from mahfouz-app/app src/app/src/plugins/api.ts — keep in sync.
-import type { EmbedRenderer } from "./embed";
-export type PluginId = `${string}/${string}`;
+import type { EmbedContext, EmbedRenderer } from "./embed";
+import type { NoteRef, PluginTabContext, PluginTabType } from "./tabs";
 
-export type { EmbedRenderer };
+export type PluginId = `${string}/${string}`;
+export type { EmbedContext, EmbedRenderer, NoteRef, PluginTabContext, PluginTabType };
 
 export const API_VERSION = 1;
 
@@ -36,6 +37,14 @@ export interface MahfouzPluginHost {
   plugin: PluginInfo;
   /** Render fenced code blocks tagged `language` with `renderer`. */
   registerEmbed(language: string, renderer: EmbedRenderer): Disposable;
+  /** A kind of tab this plugin can open. Every plugin tab shows one note;
+   * the app draws its toolbar (icon, note title, Close) and the plugin
+   * renders the area below. */
+  registerTabType(type: PluginTabType): Disposable;
+  /** Opens (or focuses) one of this plugin's tabs for `note`. `arg` is
+   * handed back as `ctx.arg` (e.g. which block to edit). Pending note saves
+   * are flushed first. */
+  openTab(type: string, note: NoteRef, arg: string): Promise<void>;
   sidecar: {
     /** JSON-RPC request to this plugin's sidecar process, started on first use. */
     call<T = unknown>(method: string, params?: unknown): Promise<T>;

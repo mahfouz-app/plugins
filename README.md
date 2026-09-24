@@ -13,6 +13,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | Plugin | What it does | Installs |
 |---|---|---|
 | `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
+| `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, and edits one in a draw.io tab | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 
 `npm test` runs the plugins' tests with `node --test` (no dependencies).
@@ -23,7 +24,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 registry.json               { "schema": 1, "name": "mahfouz", "description": "…" }
 plugins/<id>/plugin.json    the plugin's manifest
 plugins/<id>/…              frontend module, sidecar script, package-lock.json, …
-api.ts, embed.ts            host API types (vendored from the app; keep in sync)
+api.ts, embed.ts, tabs.ts   host API types (vendored from the app; keep in sync)
 ```
 
 - **Registry `name`:** lowercase letters, digits and `-`, up to 32 characters, and unique on
@@ -100,10 +101,25 @@ Everything a plugin registers is disposed when the user turns it off for the vau
 to a vault that doesn't use it, updates it, or uninstalls it. `host.plugin.baseUrl` is the URL
 of the plugin's installed directory. Load assets relative to it.
 
-API v1 covers embeds (`registerEmbed`), the sidecar (`sidecar.call` and `sidecar.onNotify`),
+Embed renderers also get a fourth `render` argument, `{ ordinal, note }`: which block of their
+language this is in the note, and the note itself. Read `note` when the user acts (e.g. on
+click), not while rendering. `onInsertedAt(view, from, note)` runs right after the toolbar
+inserts your snippet.
+
+### Tabs
+
+A plugin can open tabs with `host.registerTabType({ id, icon, render(container, ctx) })` and
+`host.openTab(type, note, arg)`. Every plugin tab shows one note. The app draws the toolbar
+(icon, note title, Close), keeps the tab in its tab strip, and closes it if the note is
+deleted. `render` fills the area below; the function it returns runs when the tab unmounts,
+including on a tab switch, so flush unsaved work there. `ctx` has `note`, your `arg`,
+`readBody()`, `writeBody(body)` (the app's normal save path) and `close()`. `openTab` saves
+the note's pending edits first, so `readBody()` sees them.
+
+API v1 covers embeds (`registerEmbed`), tabs (`registerTabType`, `openTab`), the sidecar (`sidecar.call` and `sidecar.onNotify`),
 `progress`, `toast`, `isEnabled`, and `ui.attachPanZoom` / `ui.showError` so embeds look like
-the app's own. Commands and tab types arrive, additively, when the
-built-in Slidev and PDF plugins move here.
+the app's own. Commands arrive, additively, when the built-in
+Slidev and PDF plugins move here.
 
 ## Sidecar protocol
 
