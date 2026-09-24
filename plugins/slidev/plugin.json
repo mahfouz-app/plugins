@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "label": "Slidev presentations",
   "description": "Present notes as slides",
-  "mahfouz": ">=0.3.0",
+  "mahfouz": ">=0.5.0",
   "apiVersion": 1,
   "install": [{ "type": "npm", "dir": ".", "progress": "npm-fetch" }],
   "frontend": "index.js",
