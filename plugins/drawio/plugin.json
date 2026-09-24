@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "label": "Draw.io diagrams",
   "description": "Embed and edit draw.io diagrams",
-  "mahfouz": ">=0.3.0",
+  "mahfouz": ">=0.5.0",
   "apiVersion": 1,
   "install": [
     {
