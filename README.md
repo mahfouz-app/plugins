@@ -8,6 +8,15 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 > in the app's webview and its optional background process (a "sidecar"). Only add
 > registries you trust.
 
+## Plugins
+
+| Plugin | What it does | Installs |
+|---|---|---|
+| `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
+| `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
+
+`npm test` runs the plugins' tests with `node --test` (no dependencies).
+
 ## Layout
 
 ```
@@ -65,7 +74,7 @@ relative and stay inside the plugin's directory.
 | `dependencies` | Qualified ids installed first. A dependency from a registry the user hasn't added blocks the install. |
 | `install` | Steps run in order inside the plugin's installed directory. |
 | `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Needs Node.js on the user's machine. |
-| `install[].type: "download"` | Fetches the artifact for the user's platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `windows-x64`). A **sha256 mismatch aborts the install**. `extract` is `tar.gz`, `zip`, or `none` (the default; with `none`, `to` is the saved file's path). A platform missing from `artifacts` shows "Not available on this platform". |
+| `install[].type: "download"` | Fetches the artifact for the user's platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `windows-x64`), or the `"any"` one for platform-independent files. A **sha256 mismatch aborts the install**. `extract` is `tar.gz`, `zip`, or `none` (the default; with `none`, `to` is the saved file's path). `include` optionally limits unpacking to those archive paths (a directory unpacks its contents). A platform with no artifact and no `"any"` shows "Not available on this platform". |
 | `gitPath` | Directories put on `PATH` for every git command Mahfouz runs (e.g. a `git-lfs` binary). |
 | `frontend` | ES module the app imports. It must export `activate(host)` and may export `deactivate()`. **Ship a single bundled file**: relative imports aren't refreshed on update until the app restarts. |
 | `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the user's Node. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
@@ -92,7 +101,8 @@ to a vault that doesn't use it, updates it, or uninstalls it. `host.plugin.baseU
 of the plugin's installed directory. Load assets relative to it.
 
 API v1 covers embeds (`registerEmbed`), the sidecar (`sidecar.call` and `sidecar.onNotify`),
-`progress`, `toast`, and `isEnabled`. Commands and tab types arrive, additively, when the
+`progress`, `toast`, `isEnabled`, and `ui.attachPanZoom` / `ui.showError` so embeds look like
+the app's own. Commands and tab types arrive, additively, when the
 built-in Slidev and PDF plugins move here.
 
 ## Sidecar protocol

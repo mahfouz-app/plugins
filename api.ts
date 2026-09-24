@@ -47,6 +47,15 @@ export interface MahfouzPluginHost {
   toast(message: string, kind?: "info" | "error"): void;
   /** Whether this plugin is turned on for the current vault. */
   isEnabled(): boolean;
+  /** Small pieces of the app's own embed UI, so plugin embeds look native. */
+  ui: {
+    /** Drag-to-pan and wheel-zoom on a rendered embed that overflows its
+     * container; a plain click still falls through. Returns an undo, to call
+     * from the renderer's `dispose`. */
+    attachPanZoom(container: HTMLElement): () => void;
+    /** Replaces `container`'s content with the app's embed error box. */
+    showError(container: HTMLElement, message: string): void;
+  };
 }
 
 /** Shape of a plugin's frontend module. */
