@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "lfs",
+  "version": "1.0.0",
+  "label": "Git LFS",
+  "description": "Store dropped media as Git LFS pointers instead of full binaries",
+  "mahfouz": ">=0.3.0",
+  "apiVersion": 1,
+  "install": [
+    {
+      "type": "download",
+      "extract": "zip",
+      "to": "bin",
+      "include": ["git-lfs-3.8.0/git-lfs"],
+      "artifacts": {
+        "darwin-arm64": {
+          "url": "https://github.com/git-lfs/git-lfs/releases/download/v3.8.0/git-lfs-darwin-arm64-v3.8.0.zip",
+          "sha256": "caff76a7d070d8160c89bc39b6e85d98f24135b6fed038a3b4de2590d25102d8"
+        },
+        "darwin-x64": {
+          "url": "https://github.com/git-lfs/git-lfs/releases/download/v3.8.0/git-lfs-darwin-amd64-v3.8.0.zip",
+          "sha256": "f1c17aeca0b4eaab9ea606226477dbed3b84b56fe0811a9f967d2ea2b2393c53"
+        }
+      }
+    }
+  ],
+  "gitPath": ["bin/git-lfs-3.8.0"]
+}
