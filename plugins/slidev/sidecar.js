@@ -34,7 +34,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const WORKSPACE = process.env.MAHFOUZ_PLUGIN_DIR ?? path.dirname(fileURLToPath(import.meta.url));
 const START_TIMEOUT_MS = 90_000;
@@ -360,4 +360,16 @@ function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+/** Whether this file is the script node was started with (not imported by a
+ * test). Real paths, since either side may go through a symlink (e.g.
+ * macOS's /var → /private/var). */
+function isEntryScript() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryScript()) main();
