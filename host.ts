@@ -74,7 +74,17 @@ export interface ResolvedSlidesTemplate {
   font?: string;
   logo?: string;
   logoPosition: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  /** One line of inline Markdown drawn at the top of every slide. Fields
+   * are expanded by `resolveSlidesTemplateForNote`; `{page}`/`{total}` are
+   * left for the Slidev plugin. */
+  header?: string;
+  /** One line of inline Markdown drawn at the bottom of every slide. Fields
+   * are expanded by `resolveSlidesTemplateForNote`; `{page}`/`{total}` are
+   * left for the Slidev plugin. */
   footer?: string;
+  /** Slide 1 is a title slide: the plugin draws no header or footer on it
+   * (the note's `title_slide` attribute). */
+  titleSlide?: boolean;
   /** Overrides for the first slide. */
   cover: {
     background?: string;

@@ -41,6 +41,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { escapeHtml } from "./header-footer.js";
 
 const WORKSPACE = process.env.MAHFOUZ_PLUGIN_DIR ?? path.dirname(fileURLToPath(import.meta.url));
 const START_TIMEOUT_MS = 90_000;
@@ -116,8 +117,10 @@ export function templateCss(t) {
   return rules.filter(Boolean).join("\n");
 }
 
-/** Headmatter lines for a template (JSON is valid YAML), or "" for none. */
-export function templateHeadmatter(t) {
+/** Headmatter lines for a template (JSON is valid YAML), or "" for none.
+ * `header`/`footer` are inline Markdown rendered with `renderInline`
+ * (markdown-it in the sidecar; plain escaping by default). */
+export function templateHeadmatter(t, renderInline = escapeHtml) {
   if (!t) return "";
   const data = Object.fromEntries(
     Object.entries({
@@ -125,7 +128,9 @@ export function templateHeadmatter(t) {
       logo: t.logo,
       coverLogo: t.cover?.logo,
       logoPosition: t.logoPosition,
-      footer: t.footer,
+      header: t.header && renderInline(t.header),
+      footer: t.footer && renderInline(t.footer),
+      titleSlide: t.titleSlide,
     }).filter(([, v]) => v)
   );
   let out = `mahfouz: ${JSON.stringify(data)}\n`;
@@ -133,19 +138,42 @@ export function templateHeadmatter(t) {
   return out;
 }
 
+/** Inline Markdown → HTML for a template's header and footer. Loaded lazily:
+ * the sidecar also runs before the npm install that provides markdown-it.
+ * Raw HTML is allowed, as in the note body Slidev renders. If markdown-it
+ * can't be loaded (e.g. the install hasn't completed yet), falls back to
+ * escaped plain text so Present/export still work, just without Markdown
+ * formatting in the header/footer. */
+let markdown = null;
+let markdownUnavailable = false;
+async function markdownInline() {
+  if (markdownUnavailable) return escapeHtml;
+  if (!markdown) {
+    try {
+      const { default: MarkdownIt } = await import("markdown-it");
+      markdown = new MarkdownIt({ html: true });
+    } catch (err) {
+      markdownUnavailable = true;
+      console.error("markdown-it unavailable; header/footer text will be escaped, not rendered as Markdown:", err);
+      return escapeHtml;
+    }
+  }
+  return (s) => markdown.renderInline(s);
+}
+
 /** The stub entry deck: imports `src` (relative to the workspace, through
  * the vault symlink), or without one, the placeholder an idle server shows. */
-export function stubContent(src, template = null) {
+export function stubContent(src, template = null, renderInline = escapeHtml) {
   return src
-    ? `---\nsrc: ${quote(src)}\n${templateHeadmatter(template)}---\n`
+    ? `---\nsrc: ${quote(src)}\n${templateHeadmatter(template, renderInline)}---\n`
     : "---\ntitle: Mahfouz\n---\n\n# Mahfouz\n\nOpen a note and choose Present.\n";
 }
 
 /** Headmatter for the one-shot export entry. The deck's `aspectRatio`
  * (default 16/9) sets the PDF's page shape, and `slidev export` has no
  * orientation flag of its own, so portrait means a taller ratio. */
-export function exportEntryContent(src, portrait, template = null) {
-  return `---\nsrc: ${quote(src)}\n${portrait ? 'aspectRatio: "3/4"\n' : ""}${templateHeadmatter(template)}---\n`;
+export function exportEntryContent(src, portrait, template = null, renderInline = escapeHtml) {
+  return `---\nsrc: ${quote(src)}\n${portrait ? 'aspectRatio: "3/4"\n' : ""}${templateHeadmatter(template, renderInline)}---\n`;
 }
 
 /** The Export dialog's formats → `slidev export --format` values (and the
@@ -344,7 +372,10 @@ export const methods = {
   async start({ vaultPath, relPath, template }) {
     checkNote(vaultPath, relPath, "presented");
     const id = linkVault(WORKSPACE, vaultPath);
-    fs.writeFileSync(path.join(WORKSPACE, "deck.md"), stubContent(`./vaults/${id}/${relPath}`, template ?? null));
+    fs.writeFileSync(
+      path.join(WORKSPACE, "deck.md"),
+      stubContent(`./vaults/${id}/${relPath}`, template ?? null, template ? await markdownInline() : undefined)
+    );
     const port = await ensureServer();
     const fresh = server.cold;
     server.cold = false;
@@ -371,7 +402,10 @@ export const methods = {
       src = "./export-src.md";
     }
     const entry = path.join(WORKSPACE, "export.md");
-    fs.writeFileSync(entry, exportEntryContent(src, orientation === "portrait", template ?? null));
+    fs.writeFileSync(
+      entry,
+      exportEntryContent(src, orientation === "portrait", template ?? null, template ? await markdownInline() : undefined)
+    );
     const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.${format}`);
     const log = tail();
     const child = spawn(
