@@ -126,7 +126,7 @@ installed silently. Pin artifacts to immutable URLs (release assets, not `latest
 
 `icon` and `logo` are plain files: the app never executes them or inserts their markup as-is (it's
 read and re-rendered through the same `dangerouslySetInnerHTML` path as `PluginCommand.icon` and
-`ToolbarButton.icon`, below). A manifest that sets either needs `"mahfouz": ">=0.6.0"`, the first
+`ToolbarButton.icon`, below). A manifest that sets either needs `"mahfouz": ">=0.8.0"`, the first
 release that reads them — older apps ignore unknown fields but won't show the icon.
 
 ## Frontend (`api.ts`)
