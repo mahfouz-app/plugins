@@ -14,7 +14,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 |---|---|---|
 | `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
 | `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, and edits one in a draw.io tab | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
-| `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`) | Slidev, its default theme and playwright-chromium, with `npm ci` from the committed lockfile. Needs Node.js 22.12+ |
+| `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), styled by the vault's slides template (`.config/slides.md`) when it has one | Slidev, its default theme and playwright-chromium, with `npm ci` from the committed lockfile. Needs Node.js 22.12+ |
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 

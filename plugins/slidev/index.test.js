@@ -11,8 +11,14 @@ function fakeEngine(over = {}) {
   const engine = {
     ready: async () => void calls.push("ready"),
     warm: async () => (calls.push("warm"), null),
-    start: async (vaultPath, relPath) => (calls.push(`start ${vaultPath} ${relPath}`), { url: "http://localhost:3030/", fresh: false }),
-    exportPdf: async (_vaultPath, relPath, { orientation }) => (calls.push(`export ${relPath} ${orientation}`), "/tmp/out.pdf"),
+    start: async (vaultPath, relPath, template) => (
+      calls.push(`start ${vaultPath} ${relPath}${template ? ` ${template.name}` : ""}`),
+      { url: "http://localhost:3030/", fresh: false }
+    ),
+    exportPdf: async (_vaultPath, relPath, { orientation, template }) => (
+      calls.push(`export ${relPath} ${orientation}${template ? ` ${template.name}` : ""}`),
+      "/tmp/out.pdf"
+    ),
     stop: async () => void calls.push("stop"),
     log: async () => "server log tail",
     ...over,
@@ -20,7 +26,7 @@ function fakeEngine(over = {}) {
   return { engine, calls };
 }
 
-function fakeHost(enabled) {
+function fakeHost(enabled, slides) {
   const reg = { provided: undefined, tabs: [], commands: [], overlays: [], tabsOpened: [], attributeUpdates: [], sidecarCalls: [] };
   const host = {
     isEnabled: () => enabled,
@@ -34,6 +40,7 @@ function fakeHost(enabled) {
     },
     ui: { openOverlay: (spec) => (reg.overlays.push(spec), () => {}), openExternal: async () => {} },
     sidecar: { call: async (method, params) => (reg.sidecarCalls.push([method, params]), null) },
+    ...(slides ? { slides } : {}),
   };
   return { host, reg };
 }
@@ -132,11 +139,12 @@ test("a missing Node.js gets its own title and no server log; other failures get
 test("the engine is the sidecar's methods", async () => {
   const { host, reg } = fakeHost(true);
   const engine = sidecarEngine(host);
-  await engine.start("/v", "a.md");
-  await engine.exportPdf("/v", "a.md", { orientation: "portrait", content: "# x" });
+  const template = { name: "Brand" };
+  await engine.start("/v", "a.md", template);
+  await engine.exportPdf("/v", "a.md", { orientation: "portrait", content: "# x", template });
   assert.deepEqual(reg.sidecarCalls, [
-    ["start", { vaultPath: "/v", relPath: "a.md" }],
-    ["export", { vaultPath: "/v", relPath: "a.md", orientation: "portrait", content: "# x" }],
+    ["start", { vaultPath: "/v", relPath: "a.md", template }],
+    ["export", { vaultPath: "/v", relPath: "a.md", orientation: "portrait", content: "# x", template }],
   ]);
 });
 
@@ -145,4 +153,39 @@ test("the presentation tag is added once, keeping other types", () => {
   assert.deepEqual(withPresentationType({ type: "reference" }), { type: "reference, presentation" });
   const tagged = { type: "presentation, reference" };
   assert.equal(withPresentationType(tagged), tagged);
+});
+
+test("the note's slides template goes to the export and to Present", async () => {
+  const brand = { name: "Brand" };
+  const asked = [];
+  const slides = { resolveTemplate: async (n) => (asked.push(n.noteId), brand) };
+  const ok = fakeEngine();
+  const a = fakeHost(true, slides);
+  activate(a.host, ok.engine);
+  await a.reg.provided.exportPdf(note, { orientation: "landscape" }, () => {});
+  assert.ok(ok.calls.includes("export talks/deck.md landscape Brand"));
+  assert.deepEqual(asked, ["n"]);
+
+  const phases = [];
+  const started = fakeEngine();
+  startDeck(started.engine, async () => ({ vaultPath: "/v", relPath: "a.md", template: brand }), (p) => phases.push(p.kind));
+  await flush();
+  await flush();
+  assert.deepEqual(started.calls, ["ready", "start /v a.md Brand"]);
+});
+
+test("no template support on the host, or a failing lookup, means no template", async () => {
+  const quiet = console.warn;
+  console.warn = () => {};
+  const old = fakeEngine();
+  const a = fakeHost(false);
+  activate(a.host, old.engine);
+  await a.reg.provided.exportPdf(note, { orientation: "portrait" }, () => {});
+  const broken = fakeEngine();
+  const b = fakeHost(false, { resolveTemplate: async () => Promise.reject(new Error("no vault")) });
+  activate(b.host, broken.engine);
+  await b.reg.provided.exportPdf(note, { orientation: "portrait" }, () => {});
+  console.warn = quiet;
+  assert.deepEqual(old.calls, ["ready", "export talks/deck.md portrait"]);
+  assert.deepEqual(broken.calls, ["ready", "export talks/deck.md portrait"]);
 });

@@ -114,12 +114,12 @@ const BRAND = {
 
 test("template CSS styles every slide, then the cover, then the raw CSS", () => {
   const css = templateCss(BRAND);
-  assert.match(css, /\.slidev-page \.slidev-layout \{[^}]*background-color: #0B1F3A;/);
+  assert.match(css, /\.slidev-page \{[^}]*background-color: #0B1F3A;/);
   assert.match(css, /background-image: url\("\/files\/bg\.png"\);/);
   assert.match(css, /color: #fff;/);
   assert.match(css, /--slidev-theme-primary: #F5A623;/);
-  assert.match(css, /\.slidev-page \.slidev-layout a \{ color: #F5A623; \}/);
-  assert.match(css, /\.slidev-page\.slidev-page-1 \.slidev-layout \{[^}]*background-color: #F5A623;/);
+  assert.match(css, /\.slidev-page a \{ color: #F5A623; \}/);
+  assert.match(css, /\.slidev-page\.slidev-page-1 \{[^}]*background-color: #F5A623;/);
   assert.ok(css.trimEnd().endsWith("h1 { color: red; }"));
 });
 

@@ -4,6 +4,7 @@
 // - "Present full screen" (Mod+Shift+P by default) shows the note over the
 //   whole app.
 // - An API for the PDF export plugin (`host.use("mahfouz/slidev")`).
+// - Both apply the note's slides template, when the vault defines one.
 //
 // Slidev itself runs in this plugin's sidecar (sidecar.js); this module
 // only shows what it serves. Loaded only as PDF export's dependency (the
@@ -26,9 +27,9 @@ export function sidecarEngine(host) {
   return {
     ready: () => call("ready"),
     warm: () => call("warm"),
-    start: (vaultPath, relPath) => call("start", { vaultPath, relPath }),
-    exportPdf: (vaultPath, relPath, { orientation, content }) =>
-      call("export", { vaultPath, relPath, orientation, content }),
+    start: (vaultPath, relPath, template = null) => call("start", { vaultPath, relPath, template }),
+    exportPdf: (vaultPath, relPath, { orientation, content, template = null }) =>
+      call("export", { vaultPath, relPath, orientation, content, template }),
     stop: () => call("stop"),
     log: () => call("log"),
   };
@@ -51,6 +52,24 @@ export function withPresentationType(attributes) {
   return { ...attributes, type: [...types, "presentation"].join(", ") };
 }
 
+// ---- slides templates ----------------------------------------------------------
+
+/**
+ * The note's slides template (backgrounds, colors, font, logo, footer, CSS
+ * from the vault's `.config/slides.md`), or null. The sidecar turns it into
+ * the entry's headmatter; `global-top.vue` and `slide-top.vue` apply it. An
+ * app without `host.slides`, or a failed lookup, just means no template.
+ */
+export async function slidesTemplate(host, note) {
+  if (!host.slides?.resolveTemplate) return null;
+  try {
+    return (await host.slides.resolveTemplate(note)) ?? null;
+  } catch (err) {
+    console.warn("resolving the slides template failed", err);
+    return null;
+  }
+}
+
 // ---- getting a note on screen ------------------------------------------------
 
 /**
@@ -68,8 +87,8 @@ export function startDeck(engine, target, onPhase) {
       set({ kind: "checking" });
       await engine.ready();
       set({ kind: "starting" });
-      const { vaultPath, relPath } = await target();
-      const running = await engine.start(vaultPath, relPath);
+      const { vaultPath, relPath, template } = await target();
+      const running = await engine.start(vaultPath, relPath, template ?? null);
       set({ kind: "running", url: running.url, fresh: running.fresh });
     } catch (err) {
       console.error("slidev start failed", err);
@@ -311,18 +330,19 @@ function renderOverlay(engine, container, target) {
 
 export function activate(host, engine = sidecarEngine(host)) {
   const target = (note) => async () => {
-    const info = await host.notes.get(note);
-    return { vaultPath: info.vaultPath, relPath: info.path };
+    const [info, template] = await Promise.all([host.notes.get(note), slidesTemplate(host, note)]);
+    return { vaultPath: info.vaultPath, relPath: info.path, template };
   };
+
 
   host.provide({
     /** Renders a note to a PDF in the temp dir; returns the file's path. */
     async exportPdf(note, options, progress) {
       await engine.ready();
       progress("Exporting…");
-      const { vaultPath, relPath } = await target(note)();
+      const { vaultPath, relPath, template } = await target(note)();
       try {
-        return await engine.exportPdf(vaultPath, relPath, options);
+        return await engine.exportPdf(vaultPath, relPath, { ...options, template });
       } catch (err) {
         let message = err instanceof Error ? err.message : String(err);
         const log = String((await Promise.resolve(engine.log()).catch(() => "")) ?? "").trim();

@@ -96,21 +96,22 @@ function slideRule(selector, { background, backgroundImage, textColor }) {
 }
 
 /** The CSS a template stands for: every slide, then the cover (slide 1),
- * then the template's own CSS. Selectors are specific enough to win over
- * the default theme without `!important`. */
+ * then the template's own CSS. It styles each slide's wrapper, which covers
+ * the whole slide (the layout inside is padded) and is what the footer
+ * inherits its color from; the default theme sets neither there. */
 export function templateCss(t) {
   if (!t) return "";
-  const rules = [slideRule(".slidev-page .slidev-layout", t)];
+  const rules = [slideRule(".slidev-page", t)];
   if (t.accentColor) {
     rules.push(
-      `.slidev-page .slidev-layout { ${declarations([
+      `.slidev-page { ${declarations([
         ["--mahfouz-accent", t.accentColor],
         ["--slidev-theme-primary", t.accentColor],
       ])} }`,
-      `.slidev-page .slidev-layout a { color: ${t.accentColor}; }`
+      `.slidev-page a { color: ${t.accentColor}; }`
     );
   }
-  rules.push(slideRule(".slidev-page.slidev-page-1 .slidev-layout", t.cover ?? {}));
+  rules.push(slideRule(".slidev-page.slidev-page-1", t.cover ?? {}));
   if (t.css?.trim()) rules.push(t.css.trim());
   return rules.filter(Boolean).join("\n");
 }
