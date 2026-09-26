@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "slidev",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "label": "Slidev presentations",
   "description": "Present notes as slides",
   "mahfouz": ">=0.5.0",

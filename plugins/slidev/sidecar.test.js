@@ -11,6 +11,7 @@ import {
   entryModuleSrc,
   ensureLink,
   exportEntryContent,
+  slidevExportFormat,
   linkVault,
   methods,
   nodeVersionOk,
@@ -31,6 +32,14 @@ test("the stub quotes src, and the idle placeholder imports nothing", () => {
 test("the export entry sets an aspect ratio only for portrait", () => {
   assert.equal(exportEntryContent("./vaults/abc/n/a.md", false), '---\nsrc: "./vaults/abc/n/a.md"\n---\n');
   assert.equal(exportEntryContent("./vaults/abc/n/a.md", true), '---\nsrc: "./vaults/abc/n/a.md"\naspectRatio: "3/4"\n---\n');
+});
+
+test("export formats map to slidev's; PowerPoint is the editable export", () => {
+  assert.equal(slidevExportFormat(undefined), "pdf");
+  assert.equal(slidevExportFormat("pdf"), "pdf");
+  assert.equal(slidevExportFormat("pptx"), "pptx-editable");
+  assert.throws(() => slidevExportFormat("png"), /unsupported export format "png"/);
+  assert.throws(() => slidevExportFormat("toString"), /unsupported export format/);
 });
 
 test("the vault link id is stable and filename-safe", () => {

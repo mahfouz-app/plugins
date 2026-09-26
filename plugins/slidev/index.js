@@ -3,6 +3,7 @@
 // - "Present" in a note's menu opens a presentation tab.
 // - "Present full screen" (Mod+Shift+P by default) shows the note over the
 //   whole app.
+// - "PowerPoint / Google Slides" in the Export dialog.
 // - An API for the PDF export plugin (`host.use("mahfouz/slidev")`).
 //
 // Slidev itself runs in this plugin's sidecar (sidecar.js); this module
@@ -27,11 +28,18 @@ export function sidecarEngine(host) {
     ready: () => call("ready"),
     warm: () => call("warm"),
     start: (vaultPath, relPath) => call("start", { vaultPath, relPath }),
-    exportPdf: (vaultPath, relPath, { orientation, content }) =>
-      call("export", { vaultPath, relPath, orientation, content }),
+    exportDeck: (vaultPath, relPath, { orientation, content, format }) =>
+      call("export", { vaultPath, relPath, orientation, content, format }),
     stop: () => call("stop"),
     log: () => call("log"),
   };
+}
+
+// ---- export ------------------------------------------------------------------
+
+/** The save dialog's suggested file name for a note title. */
+export function deckFileName(title, extension) {
+  return `${(title || "Untitled").replace(/[\\/:*?"<>|]/g, "-")}.${extension}`;
 }
 
 // ---- presentation tag --------------------------------------------------------
@@ -315,25 +323,39 @@ export function activate(host, engine = sidecarEngine(host)) {
     return { vaultPath: info.vaultPath, relPath: info.path };
   };
 
+  /** Renders a note with `slidev export` into the temp dir; returns the file's path. */
+  const exportDeck = async (note, options, progress) => {
+    await engine.ready();
+    progress("Exporting…");
+    const { vaultPath, relPath } = await target(note)();
+    try {
+      return await engine.exportDeck(vaultPath, relPath, options);
+    } catch (err) {
+      let message = err instanceof Error ? err.message : String(err);
+      const log = String((await Promise.resolve(engine.log()).catch(() => "")) ?? "").trim();
+      if (log) message += `\n\n${log}`;
+      throw new Error(message);
+    }
+  };
+
   host.provide({
     /** Renders a note to a PDF in the temp dir; returns the file's path. */
-    async exportPdf(note, options, progress) {
-      await engine.ready();
-      progress("Exporting…");
-      const { vaultPath, relPath } = await target(note)();
-      try {
-        return await engine.exportPdf(vaultPath, relPath, options);
-      } catch (err) {
-        let message = err instanceof Error ? err.message : String(err);
-        const log = String((await Promise.resolve(engine.log()).catch(() => "")) ?? "").trim();
-        if (log) message += `\n\n${log}`;
-        throw new Error(message);
-      }
-    },
+    exportPdf: (note, options, progress) => exportDeck(note, { ...options, format: "pdf" }, progress),
   });
 
   // Only here for PDF export, which runs its own one-shot render.
   if (!host.isEnabled()) return;
+
+  host.registerExportFormat({
+    id: "pptx",
+    label: "PowerPoint / Google Slides (.pptx)",
+    async export({ note, content }, progress) {
+      // Same page shape as PDF export: the note's `orientation` attribute.
+      const orientation = note.attributes.orientation === "portrait" ? "portrait" : "landscape";
+      const path = await exportDeck(note, { orientation, content, format: "pptx" }, progress);
+      return { path, suggestedName: deckFileName(note.title, "pptx"), filter: { name: "PowerPoint", extensions: ["pptx"] } };
+    },
+  });
 
   // Start the server now and load the hidden deck frame, so the first
   // Present of the session doesn't load anything in front of the user.
