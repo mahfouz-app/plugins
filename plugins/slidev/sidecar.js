@@ -24,6 +24,12 @@
 // - Edits to the imported note and rewrites of the stub both hot-reload.
 // - A theme that isn't installed makes the CLI `process.exit(1)` when
 //   stdin isn't a TTY, so the default theme is installed up front.
+// - Headmatter is the entry's own first frontmatter, and keys Slidev doesn't
+//   know are kept in `configs` — how a slides template (`mahfouz:`) reaches
+//   the layer components even though the note itself comes in by `src:`.
+// - `slide-top.vue` in the project root renders inside every slide, in the
+//   dev server and in `slidev export` alike; each slide's wrapper carries
+//   `slidev-page-<n>`.
 // - The dev server listens on `localhost`, which on modern Node resolves to
 //   `::1` first; readiness polling goes through `localhost` too.
 
@@ -62,19 +68,84 @@ function quote(value) {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+// ---- slides templates ----------------------------------------------------------
+//
+// A template (the app's `host.slides.resolveTemplate`, from the vault's
+// `.config/slides.md`) reaches the deck as a `mahfouz:` key in the entry's
+// headmatter, which Slidev spreads into `configs`. The static layer
+// components shipped here read it: `global-top.vue` injects the CSS and
+// `slide-top.vue` draws the logo and footer on every slide. Being part of
+// each entry (not a shared project file), a template can't leak between a
+// Present and a concurrent export.
+
+function declarations(parts) {
+  return parts.filter(([, v]) => v).map(([k, v]) => `${k}: ${v};`).join(" ");
+}
+
+const url = (p) => (p ? `url(${JSON.stringify(p)})` : "");
+
+function slideRule(selector, { background, backgroundImage, textColor }) {
+  const body = declarations([
+    ["background-color", background],
+    ["background-image", url(backgroundImage)],
+    ["background-size", backgroundImage && "cover"],
+    ["background-position", backgroundImage && "center"],
+    ["color", textColor],
+  ]);
+  return body ? `${selector} { ${body} }` : "";
+}
+
+/** The CSS a template stands for: every slide, then the cover (slide 1),
+ * then the template's own CSS. It styles each slide's wrapper, which covers
+ * the whole slide (the layout inside is padded) and is what the footer
+ * inherits its color from; the default theme sets neither there. */
+export function templateCss(t) {
+  if (!t) return "";
+  const rules = [slideRule(".slidev-page", t)];
+  if (t.accentColor) {
+    rules.push(
+      `.slidev-page { ${declarations([
+        ["--mahfouz-accent", t.accentColor],
+        ["--slidev-theme-primary", t.accentColor],
+      ])} }`,
+      `.slidev-page a { color: ${t.accentColor}; }`
+    );
+  }
+  rules.push(slideRule(".slidev-page.slidev-page-1", t.cover ?? {}));
+  if (t.css?.trim()) rules.push(t.css.trim());
+  return rules.filter(Boolean).join("\n");
+}
+
+/** Headmatter lines for a template (JSON is valid YAML), or "" for none. */
+export function templateHeadmatter(t) {
+  if (!t) return "";
+  const data = Object.fromEntries(
+    Object.entries({
+      css: templateCss(t),
+      logo: t.logo,
+      coverLogo: t.cover?.logo,
+      logoPosition: t.logoPosition,
+      footer: t.footer,
+    }).filter(([, v]) => v)
+  );
+  let out = `mahfouz: ${JSON.stringify(data)}\n`;
+  if (t.font) out += `fonts: ${JSON.stringify({ sans: t.font })}\n`;
+  return out;
+}
+
 /** The stub entry deck: imports `src` (relative to the workspace, through
  * the vault symlink), or without one, the placeholder an idle server shows. */
-export function stubContent(src) {
+export function stubContent(src, template = null) {
   return src
-    ? `---\nsrc: ${quote(src)}\n---\n`
+    ? `---\nsrc: ${quote(src)}\n${templateHeadmatter(template)}---\n`
     : "---\ntitle: Mahfouz\n---\n\n# Mahfouz\n\nOpen a note and choose Present.\n";
 }
 
 /** Headmatter for the one-shot export entry. The deck's `aspectRatio`
  * (default 16/9) sets the PDF's page shape, and `slidev export` has no
  * orientation flag of its own, so portrait means a taller ratio. */
-export function exportEntryContent(src, portrait) {
-  return `---\nsrc: ${quote(src)}\n${portrait ? 'aspectRatio: "3/4"\n' : ""}---\n`;
+export function exportEntryContent(src, portrait, template = null) {
+  return `---\nsrc: ${quote(src)}\n${portrait ? 'aspectRatio: "3/4"\n' : ""}${templateHeadmatter(template)}---\n`;
 }
 
 /** The Export dialog's formats → `slidev export --format` values (and the
@@ -270,10 +341,10 @@ export const methods = {
   },
 
   /** Points the server at a note; returns where to load it. */
-  async start({ vaultPath, relPath }) {
+  async start({ vaultPath, relPath, template }) {
     checkNote(vaultPath, relPath, "presented");
     const id = linkVault(WORKSPACE, vaultPath);
-    fs.writeFileSync(path.join(WORKSPACE, "deck.md"), stubContent(`./vaults/${id}/${relPath}`));
+    fs.writeFileSync(path.join(WORKSPACE, "deck.md"), stubContent(`./vaults/${id}/${relPath}`, template ?? null));
     const port = await ensureServer();
     const fresh = server.cold;
     server.cold = false;
@@ -286,9 +357,10 @@ export const methods = {
    * entry (`export.md`, so a concurrent Present rewriting `deck.md` can't
    * race it), run to completion as a one-shot process. `content`, when
    * given, is rendered instead of the note file (the Export dialog's
-   * children/attachment options).
+   * children/attachment options). `template` is the note's slides
+   * template, or null.
    */
-  async export({ vaultPath, relPath, orientation, content, format = "pdf" }) {
+  async export({ vaultPath, relPath, orientation, content, template, format = "pdf" }) {
     const slidevFormat = slidevExportFormat(format);
     assertInstalled();
     checkNote(vaultPath, relPath, "exported");
@@ -299,7 +371,7 @@ export const methods = {
       src = "./export-src.md";
     }
     const entry = path.join(WORKSPACE, "export.md");
-    fs.writeFileSync(entry, exportEntryContent(src, orientation === "portrait"));
+    fs.writeFileSync(entry, exportEntryContent(src, orientation === "portrait", template ?? null));
     const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.${format}`);
     const log = tail();
     const child = spawn(

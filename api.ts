@@ -12,7 +12,16 @@
 
 // Vendored from mahfouz-app/app src/app/src/plugins/api.ts — keep in sync.
 import type { EmbedContext, EmbedRenderer } from "./embed";
-import type { CommandNote, ExportFormat, ExportRequest, ExportResult, NoteInfo, OverlaySpec, PluginCommand } from "./host";
+import type {
+  CommandNote,
+  ExportFormat,
+  ExportRequest,
+  ExportResult,
+  NoteInfo,
+  OverlaySpec,
+  PluginCommand,
+  ResolvedSlidesTemplate,
+} from "./host";
 import type { NoteRef, PluginTabContext, PluginTabType, ToolbarButton } from "./tabs";
 
 export type PluginId = `${string}/${string}`;
@@ -28,6 +37,7 @@ export type {
   OverlaySpec,
   PluginCommand,
   PluginTabContext,
+  ResolvedSlidesTemplate,
   PluginTabType,
   ToolbarButton,
 };
@@ -74,6 +84,13 @@ export interface MahfouzPluginHost {
       note: NoteRef,
       update: (attributes: Record<string, string>) => Record<string, string>
     ): Promise<void>;
+  };
+  slides: {
+    /** The slides template that applies to `note` — its `slides_template`
+     * attribute, else the vault default from `.config/slides.md` — or null
+     * (none defined, or the note opted out with `none`). Image paths are
+     * root-absolute `/files/<name>`. Absent before Mahfouz 0.8.0. */
+    resolveTemplate(note: NoteRef): Promise<ResolvedSlidesTemplate | null>;
   };
   /** Makes `api` available to plugins that declare this one as a dependency. */
   provide(api: object): void;

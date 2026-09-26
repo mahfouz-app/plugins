@@ -60,3 +60,27 @@ export interface OverlaySpec {
   /** Renders into the overlay; the returned function runs when it closes. */
   render(container: HTMLElement, ctx: { close(): void }): void | (() => void);
 }
+
+/** A note's slides template (`host.slides.resolveTemplate`), from the
+ * vault's `.config/slides.md`. Unset fields are omitted; image paths are
+ * root-absolute `/files/<name>`. */
+export interface ResolvedSlidesTemplate {
+  name: string;
+  background?: string;
+  backgroundImage?: string;
+  textColor?: string;
+  accentColor?: string;
+  /** A Google Fonts family, e.g. `Inter`. */
+  font?: string;
+  logo?: string;
+  logoPosition: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  footer?: string;
+  /** Overrides for the first slide. */
+  cover: {
+    background?: string;
+    backgroundImage?: string;
+    textColor?: string;
+    logo?: string;
+  };
+  css: string;
+}
