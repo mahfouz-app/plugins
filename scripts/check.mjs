@@ -113,7 +113,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
 
   onlyKeys(
     m,
-    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node"],
+    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo"],
     where,
     errors
   );
@@ -219,6 +219,29 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
     if (isContained(m.frontend) && !fs.existsSync(path.join(dir, m.frontend))) {
       errors.push(`${where}: frontend ${m.frontend} doesn't exist`);
     }
+  }
+
+  for (const field of ["icon", "logo"]) {
+    if (!(field in m)) continue;
+    const rel = m[field];
+    if (typeof rel !== "string" || !rel.endsWith(".svg")) {
+      errors.push(`${where}: ${field} must be an .svg file`);
+      continue;
+    }
+    paths.push(rel);
+    if (!isContained(rel)) continue;
+    const file = path.join(dir, rel);
+    if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) {
+      errors.push(`${where}: ${field} ${rel} doesn't exist`);
+      continue;
+    }
+    const buf = fs.readFileSync(file);
+    if (buf.length > 32 * 1024) errors.push(`${where}: ${field} ${rel} is larger than 32 KB`);
+    const body = buf
+      .toString("utf8")
+      .replace(/^﻿/, "")
+      .replace(/^(\s*(<\?[\s\S]*?\?>|<!--[\s\S]*?-->))*\s*/, "");
+    if (!/^<svg[\s>/]/.test(body)) errors.push(`${where}: ${field} ${rel} isn't an SVG`);
   }
 
   if ("sidecar" in m) {

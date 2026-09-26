@@ -258,3 +258,22 @@ test("the registry file itself is checked", async () => {
   assert.match((await check(root, { log: quiet }))[0], /registry\.json: name must be a slug/);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("icon and logo: optional .svg files inside the plugin, under 32 KB, with an <svg> root", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "icons-"));
+  fs.writeFileSync(path.join(dir, "icon.svg"), '<svg viewBox="0 0 24 24"><path d="M1 1"/></svg>');
+  fs.writeFileSync(path.join(dir, "bad.svg"), "<html></html>");
+  fs.writeFileSync(path.join(dir, "big.svg"), `<svg>${"a".repeat(33 * 1024)}</svg>`);
+  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.6.0", apiVersion: 1 };
+  const ctx = { dir, id: "p", registry: "mahfouz", pluginIds: ["p"] };
+  assert.deepEqual(validateManifest({ ...base, icon: "icon.svg" }, ctx), []);
+  const errs = (m) => validateManifest({ ...base, ...m }, ctx).join("\n");
+  assert.match(errs({ icon: "../icon.svg" }), /inside the plugin/);
+  assert.match(errs({ logo: "logo.png" }), /must be an \.svg/);
+  assert.match(errs({ logo: "missing.svg" }), /doesn't exist/);
+  assert.match(errs({ icon: "bad.svg" }), /isn't an SVG/);
+  assert.match(errs({ icon: "big.svg" }), /larger than 32 KB/);
+
+  fs.symlinkSync(path.join(dir, "icon.svg"), path.join(dir, "icon-link.svg"));
+  assert.match(errs({ icon: "icon-link.svg" }), /doesn't exist/);
+});
