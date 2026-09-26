@@ -173,7 +173,8 @@ function parseErrorOf(doc) {
  * Draws the diagram XML `source` into `holder` with draw.io's viewer
  * (`window.GraphViewer`), throwing a readable error for the failures the
  * viewer would otherwise swallow or leave as an empty box: no viewer, XML
- * that doesn't parse, or XML that isn't a diagram.
+ * that doesn't parse, or XML that isn't a diagram. Returns false when the
+ * diagram drew but has no shapes, which would otherwise look like nothing.
  *
  * Draws only `holder`, via `createViewerForElement`: `processElements`
  * would redraw every `.mxgraph` element on the page, and catches its own
@@ -188,8 +189,17 @@ export function drawDiagram(holder, source, viewer, parseXml) {
   if (root !== "mxfile" && root !== "mxGraphModel") {
     throw new Error(`expected an <mxfile> or <mxGraphModel> diagram, found <${root}>`);
   }
-  holder.setAttribute("data-mxgraph", JSON.stringify({ xml: source }));
-  viewer.createViewerForElement(holder);
+  // Draw now: by default the viewer waits until the element has a width,
+  // which an empty holder in the app's fit-content embed never has until
+  // something unrelated changes — so the diagram came late or not at all,
+  // and any error it hit was thrown outside this call.
+  holder.setAttribute("data-mxgraph", JSON.stringify({ xml: source, "check-visible-state": false }));
+  let drawn = null;
+  // Calls back synchronously for inline XML.
+  viewer.createViewerForElement(holder, (v) => (drawn = v));
+  const model = drawn?.graph?.getModel();
+  if (!model) return true;
+  return model.getDescendants(model.getRoot()).some((cell) => model.isVertex(cell) || model.isEdge(cell));
 }
 
 // ---- the app's side: embed + tab -------------------------------------------
@@ -235,8 +245,9 @@ function createRenderer(host) {
         openEditor(context?.note ?? null, context?.ordinal ?? -1);
       });
 
+      const EMPTY = "Empty diagram — click to open the editor";
       if (!source.trim()) {
-        preview.textContent = "Empty diagram — click to open the editor";
+        preview.textContent = EMPTY;
         return;
       }
       // viewer.min.js renders a static SVG from the XML without a full
@@ -247,7 +258,8 @@ function createRenderer(host) {
       preview.appendChild(holder);
       try {
         await loadViewerScript(host.plugin.baseUrl);
-        drawDiagram(holder, source, window.GraphViewer, (xml) => new DOMParser().parseFromString(xml, "text/xml"));
+        const parse = (xml) => new DOMParser().parseFromString(xml, "text/xml");
+        if (!drawDiagram(holder, source, window.GraphViewer, parse)) preview.textContent = EMPTY;
       } catch (err) {
         host.ui.showError(preview, `Draw.io preview failed: ${err instanceof Error ? err.message : String(err)}`);
       }
