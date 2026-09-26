@@ -140,12 +140,23 @@ export function templateHeadmatter(t, renderInline = escapeHtml) {
 
 /** Inline Markdown → HTML for a template's header and footer. Loaded lazily:
  * the sidecar also runs before the npm install that provides markdown-it.
- * Raw HTML is allowed, as in the note body Slidev renders. */
+ * Raw HTML is allowed, as in the note body Slidev renders. If markdown-it
+ * can't be loaded (e.g. the install hasn't completed yet), falls back to
+ * escaped plain text so Present/export still work, just without Markdown
+ * formatting in the header/footer. */
 let markdown = null;
+let markdownUnavailable = false;
 async function markdownInline() {
+  if (markdownUnavailable) return escapeHtml;
   if (!markdown) {
-    const { default: MarkdownIt } = await import("markdown-it");
-    markdown = new MarkdownIt({ html: true });
+    try {
+      const { default: MarkdownIt } = await import("markdown-it");
+      markdown = new MarkdownIt({ html: true });
+    } catch (err) {
+      markdownUnavailable = true;
+      console.error("markdown-it unavailable; header/footer text will be escaped, not rendered as Markdown:", err);
+      return escapeHtml;
+    }
   }
   return (s) => markdown.renderInline(s);
 }
