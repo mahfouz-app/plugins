@@ -60,7 +60,7 @@ registry.json               { "schema": 1, "name": "mahfouz", "description": "�
 plugins/<id>/plugin.json    the plugin's manifest
 plugins/<id>/…              frontend module, sidecar script, package-lock.json, …
 api.ts, embed.ts, tabs.ts,  host API types (vendored from the app; keep in sync)
-host.ts
+host.ts, toolbar.ts
 ```
 
 - **Registry `name`:** lowercase letters, digits and `-`, up to 32 characters, and unique on
@@ -85,6 +85,8 @@ approve the update.
   "description": "One line shown next to the toggle",
   "mahfouz": ">=0.4.0",
   "apiVersion": 1,
+  "icon": "icon.svg",
+  "logo": "logo.svg",
   "dependencies": ["mahfouz/other"],
   "install": [
     { "type": "npm", "dir": "." },
@@ -108,6 +110,8 @@ relative and stay inside the plugin's directory.
 | `version` | Semver. The user sees an update whenever it differs from the installed version. |
 | `mahfouz` | Semver range the app version must satisfy. Otherwise the plugin shows "Requires Mahfouz …". |
 | `apiVersion` | Host API major version (`api.ts`). Currently `1`. |
+| `icon` | Optional `.svg` file (≤32 KB), shown as the plugin's toolbar/menu icon. Monochrome and stroke-based: its root element needs `fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"` and a `0 0 24 24` viewBox. The app uses its shape as a mask and tints it with the current text color, so any fill or stroke color in the file itself is ignored. |
+| `logo` | Optional `.svg` file (≤32 KB), shown next to the plugin in **Settings**. Unlike `icon`, it may be colored — it's drawn as-is, not masked. |
 | `dependencies` | Qualified ids installed first. A dependency from a registry the user hasn't added blocks the install. |
 | `install` | Steps run in order inside the plugin's installed directory. |
 | `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Runs with the plugin's own Node.js when `node` names one for the user's platform, otherwise needs Node.js on the user's machine. `"progress": "npm-fetch"` shows a percentage by counting npm's package downloads against the lockfile. |
@@ -119,6 +123,11 @@ relative and stay inside the plugin's directory.
 
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
 installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).
+
+`icon` and `logo` are plain files: the app never executes them or inserts their markup as-is (it's
+read and re-rendered through the same `dangerouslySetInnerHTML` path as `PluginCommand.icon` and
+`ToolbarButton.icon`, below). A manifest that sets either needs `"mahfouz": ">=0.6.0"`, the first
+release that reads them — older apps ignore unknown fields but won't show the icon.
 
 ## Frontend (`api.ts`)
 
@@ -158,6 +167,32 @@ the note's pending edits first, so `readBody()` sees them. `ctx.theme` is the ap
 unsubscribe. A toolbar button with `menu: [{ label, onSelect }]` is a dropdown and needs no
 `onClick`.
 
+### Toolbar
+
+`host.registerToolbarItem(item)` adds a button, toggle or dropdown to the editor toolbar, acting
+on the selected note:
+
+- `{ kind: "button", id, label, icon?, shortcut?, when?(note), run(note) }`
+- `{ kind: "toggle", id, label, icon?, shortcut?, when?(note), isActive(note), onChange(fn): Disposable, toggle(note) }` —
+  `onChange` should call `fn` whenever `isActive` may have changed, so the app can re-render it.
+- `{ kind: "dropdown", id, label, icon?, shortcut?, when?(note), options(note) }`, where each
+  option is `{ id, label, icon?, run(note) }`. `options` is recomputed every time the menu opens.
+
+`icon` is inline SVG markup (24×24 viewBox, stroke-based) rendered the same way as
+`PluginCommand.icon`; omit it to fall back to the plugin's manifest `icon`. `when(note)` hides the
+item for notes it doesn't apply to. `shortcut` is only the default binding (e.g. `Mod+Shift+D`):
+users rebind or disable it in `.config/settings.md` under `## Shortcuts`, row
+`<registry>/<plugin>:<item id>` — the same row format a command uses, because toolbar item ids and
+command ids **share one namespace per plugin**: registering an item with an id a command (or
+another item) already holds throws. Only plugins the vault has **enabled** contribute toolbar
+items; a plugin loaded solely as another one's dependency contributes none. A `when`, `isActive` or
+`options` that throws, or a button/toggle/option `run` that rejects, is toasted to the user.
+
+`host.editor.insertEmbed(language)` inserts one of this plugin's registered embeds at the cursor,
+exactly like picking it from the toolbar's Embed menu (including firing its `onInsertedAt`). It
+only works for embeds this plugin itself registered, and returns `false` with no effect when no
+note editor is focused.
+
 ### Commands, overlays, export formats, and other plugins
 
 - `host.registerCommand({ id, label, icon?, noteMenu?, shortcut?, run(note) })` adds a command to
@@ -173,8 +208,9 @@ unsubscribe. A toolbar button with `menu: [{ label, onSelect }]` is a dropdown a
 - `host.provide(api)` makes an API available to plugins that list yours in `dependencies`; they call
   `await host.use("<registry>/<plugin>")`. A dependency is loaded first, even when the vault has it
   turned off — then `host.isEnabled()` is false, and it should only `provide`.
-- A plugin tab's `ctx.setToolbar(buttons)` puts buttons in the app's toolbar;
-  `host.ui.openExternal(url)` opens an http(s) URL in the browser.
+- A plugin tab's `ctx.setToolbar(buttons)` puts buttons in the app's toolbar — each
+  `ToolbarButton` may set `icon` (same inline-SVG convention as `registerToolbarItem`'s `icon`,
+  above); `host.ui.openExternal(url)` opens an http(s) URL in the browser.
 - Optional members, absent in older apps, so feature-detect each (`if (host.ui.createCodeEditor)`)
   and keep a fallback:
   - `host.markdown.fencedBlocks(body, lang)` finds a note's fenced blocks the way the editor does;
@@ -190,10 +226,10 @@ unsubscribe. A toolbar button with `menu: [{ label, onSelect }]` is a dropdown a
   `presentation-status-title`, `presentation-spinner`, `presentation-log`, `presentation-cta`,
   `presentation-frame`) to match the app's own panes.
 
-API v1 covers embeds (`registerEmbed`), tabs (`registerTabType`, `openTab`), commands, overlays,
-export formats, notes, `provide`/`use`, the sidecar (`sidecar.call` and `sidecar.onNotify`),
-`progress`, `toast`, `isEnabled`, and `ui.attachPanZoom` / `ui.showError` so embeds look like
-the app's own.
+API v1 covers embeds (`registerEmbed`, `editor.insertEmbed`), tabs (`registerTabType`, `openTab`),
+the toolbar (`registerToolbarItem`), commands, overlays, export formats, notes, `provide`/`use`,
+the sidecar (`sidecar.call` and `sidecar.onNotify`), `progress`, `toast`, `isEnabled`, and
+`ui.attachPanZoom` / `ui.showError` so embeds look like the app's own.
 
 ## Sidecar protocol
 

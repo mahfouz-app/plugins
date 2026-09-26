@@ -24,6 +24,7 @@ import type {
   ResolvedSlidesTemplate,
 } from "./host";
 import type { NoteRef, PluginTabContext, PluginTabType, ToolbarButton } from "./tabs";
+import type { ToolbarItem } from "./toolbar";
 
 export type PluginId = `${string}/${string}`;
 export type {
@@ -43,6 +44,7 @@ export type {
   PluginTabType,
   ToolbarButton,
 };
+export type { ToolbarItem, ToolbarDropdownOption } from "./toolbar";
 
 export const API_VERSION = 1;
 
@@ -154,6 +156,17 @@ export interface MahfouzPluginHost {
   /** A format in the Export dialog. The app collects the dialog's options,
    * passes the content to render, and offers to save the file you return. */
   registerExportFormat(format: ExportFormat): Disposable;
+  /** A button, toggle or dropdown on the editor toolbar, acting on the
+   * selected note. Only plugins the vault has enabled show items (a plugin
+   * loaded only as a dependency gets a no-op). With `shortcut`, users
+   * rebind it in `.config/settings.md` under `<plugin>:<item id>`, like a
+   * command; item and command ids share one namespace. */
+  registerToolbarItem(item: ToolbarItem): Disposable;
+  editor: {
+    /** Inserts one of this plugin's registered embeds at the cursor, as
+     * the Embed menu does. False when no note editor is focused. */
+    insertEmbed(language: string): boolean;
+  };
   notes: {
     get(note: NoteRef): Promise<NoteInfo>;
     /** Rewrites the note's attributes (frontmatter) and saves it. */
