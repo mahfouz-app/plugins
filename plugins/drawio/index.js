@@ -265,6 +265,12 @@ function createRenderer(host) {
       }
     },
 
+    // The embed's edit button opens the editor too, rather than revealing
+    // the raw XML. (Older apps ignore this and still reveal the XML.)
+    edit(context) {
+      openEditor(context.note, context.ordinal);
+    },
+
     // A draw.io block is unusable hand-edited, so inserting one from the
     // toolbar goes straight to the editor instead.
     onInsertedAt(view, from, note) {

@@ -54,6 +54,19 @@ test("countDrawioBlocksBefore gives a just-inserted block its ordinal", () => {
   assert.equal(countDrawioBlocksBefore(body, 0), 0);
 });
 
+test("the embed's edit button opens the editor tab for that block", () => {
+  let renderer;
+  const opened = [];
+  activate({
+    registerEmbed: (_lang, r) => (renderer = r),
+    registerTabType: () => {},
+    openTab: (type, note, arg) => opened.push([type, note, arg]),
+  });
+  const note = { vaultId: "v", noteId: "n" };
+  renderer.edit({ ordinal: 2, note });
+  assert.deepEqual(opened, [["editor", note, "2"]]);
+});
+
 test("activate registers the embed and the editor tab", () => {
   const registered = {};
   activate({

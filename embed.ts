@@ -32,4 +32,8 @@ export interface EmbedRenderer {
   // the user to discover the click-to-edit affordance on a block they have
   // no reason to hand-edit. `note` is the note it was inserted into.
   onInsertedAt?(view: EditorView, from: number, note: { vaultId: string; noteId: string } | null): void;
+  // Called by the rendered block's edit button instead of revealing its raw
+  // source, for an embed edited somewhere else (e.g. drawio's editor tab).
+  // The source stays reachable by moving the cursor into the block.
+  edit?(context: EmbedContext): void;
 }
