@@ -264,7 +264,7 @@ test("icon and logo: optional .svg files inside the plugin, under 32 KB, with an
   fs.writeFileSync(path.join(dir, "icon.svg"), '<svg viewBox="0 0 24 24"><path d="M1 1"/></svg>');
   fs.writeFileSync(path.join(dir, "bad.svg"), "<html></html>");
   fs.writeFileSync(path.join(dir, "big.svg"), `<svg>${"a".repeat(33 * 1024)}</svg>`);
-  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.6.0", apiVersion: 1 };
+  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.8.0", apiVersion: 1 };
   const ctx = { dir, id: "p", registry: "mahfouz", pluginIds: ["p"] };
   assert.deepEqual(validateManifest({ ...base, icon: "icon.svg" }, ctx), []);
   const errs = (m) => validateManifest({ ...base, ...m }, ctx).join("\n");
@@ -284,7 +284,7 @@ test("icon and logo: a leading XML declaration or comment before <svg> is allowe
   fs.writeFileSync(path.join(dir, "comment.svg"), '<!-- c --><svg viewBox="0 0 24 24"><path d="M1 1"/></svg>');
   fs.writeFileSync(path.join(dir, "svgx.svg"), '<svgx viewBox="0 0 24 24"></svgx>');
   fs.writeFileSync(path.join(dir, "html.svg"), "<html></html>");
-  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.6.0", apiVersion: 1 };
+  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.8.0", apiVersion: 1 };
   const ctx = { dir, id: "p", registry: "mahfouz", pluginIds: ["p"] };
   const errs = (m) => validateManifest({ ...base, ...m }, ctx).join("\n");
   assert.deepEqual(validateManifest({ ...base, icon: "decl.svg" }, ctx), []);
@@ -293,11 +293,34 @@ test("icon and logo: a leading XML declaration or comment before <svg> is allowe
   assert.match(errs({ icon: "html.svg" }), /isn't an SVG/);
 });
 
+test("icon and logo: a stray BOM between the prolog and <svg> is not whitespace (matches Rust, not JS \\s)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "icons-bom-"));
+  fs.writeFileSync(path.join(dir, "bom.svg"), '<?xml version="1.0"?>﻿<svg/>');
+  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.8.0", apiVersion: 1 };
+  const ctx = { dir, id: "p", registry: "mahfouz", pluginIds: ["p"] };
+  assert.match(validateManifest({ ...base, icon: "bom.svg" }, ctx).join("\n"), /isn't an SVG/);
+});
+
 test("icon and logo: invalid UTF-8 is rejected", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "icons-utf8-"));
   fs.writeFileSync(path.join(dir, "bad-utf8.svg"), Buffer.from([0x3c, 0x73, 0x76, 0x67, 0x3e, 0xff, 0x3c, 0x2f, 0x73, 0x76, 0x67, 0x3e]));
-  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.6.0", apiVersion: 1 };
+  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.8.0", apiVersion: 1 };
   const ctx = { dir, id: "p", registry: "mahfouz", pluginIds: ["p"] };
   const errs = (m) => validateManifest({ ...base, ...m }, ctx).join("\n");
   assert.match(errs({ icon: "bad-utf8.svg" }), /isn't UTF-8/);
+});
+
+test("icon/logo require a mahfouz range that excludes versions before 0.8.0", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "icons-since-"));
+  fs.writeFileSync(path.join(dir, "icon.svg"), '<svg viewBox="0 0 24 24"><path d="M1 1"/></svg>');
+  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", apiVersion: 1 };
+  const ctx = { dir, id: "p", registry: "mahfouz", pluginIds: ["p"] };
+  const errs = (mahfouz) => validateManifest({ ...base, mahfouz, icon: "icon.svg" }, ctx).join("\n");
+
+  assert.equal(errs(">=0.8.0"), "");
+  for (const bad of [">=0.5.0", "*", "^0.7.0"]) {
+    assert.match(errs(bad), /"icon" needs Mahfouz 0\.8\.0/, bad);
+  }
+  // No icon/logo set: the guard doesn't apply, even on an old range.
+  assert.deepEqual(validateManifest({ ...base, mahfouz: ">=0.4.0" }, ctx), []);
 });

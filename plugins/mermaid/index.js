@@ -1193,7 +1193,7 @@ export function activate(host) {
       id: "insert-diagram",
       label: "Insert Mermaid diagram",
       run: () => {
-        if (!host.editor.insertEmbed("mermaid")) host.toast("Click into the note first, then add the diagram.");
+        if (!host.editor.insertEmbed("mermaid")) host.toast("Open a note in the editor first, then add the diagram.");
       },
     });
   }

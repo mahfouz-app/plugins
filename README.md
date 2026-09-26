@@ -83,7 +83,7 @@ approve the update.
   "version": "1.0.0",
   "label": "Example",
   "description": "One line shown next to the toggle",
-  "mahfouz": ">=0.4.0",
+  "mahfouz": ">=0.8.0",
   "apiVersion": 1,
   "icon": "icon.svg",
   "logo": "logo.svg",
@@ -124,10 +124,11 @@ relative and stay inside the plugin's directory.
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
 installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).
 
-`icon` and `logo` are plain files: the app never executes them or inserts their markup as-is (it's
-read and re-rendered through the same `dangerouslySetInnerHTML` path as `PluginCommand.icon` and
-`ToolbarButton.icon`, below). A manifest that sets either needs `"mahfouz": ">=0.8.0"`, the first
-release that reads them — older apps ignore unknown fields but won't show the icon.
+`icon` and `logo` are plain files: the app never inlines their markup. They're only ever used as
+a data URL — an `<img src>` for `logo`, a CSS mask for `icon` — so nothing in either file runs.
+A manifest that sets either needs `"mahfouz": ">=0.8.0"`, the first release that reads them —
+apps before 0.8.0 reject the unknown field outright and show the plugin as broken (see "Unknown
+fields are rejected" above), rather than ignoring it and simply not showing the icon.
 
 ## Frontend (`api.ts`)
 
@@ -185,13 +186,14 @@ users rebind or disable it in `.config/settings.md` under `## Shortcuts`, row
 `<registry>/<plugin>:<item id>` — the same row format a command uses, because toolbar item ids and
 command ids **share one namespace per plugin**: registering an item with an id a command (or
 another item) already holds throws. Only plugins the vault has **enabled** contribute toolbar
-items; a plugin loaded solely as another one's dependency contributes none. A `when`, `isActive` or
-`options` that throws, or a button/toggle/option `run` that rejects, is toasted to the user.
+items; a plugin loaded solely as another one's dependency contributes none. A button/toggle/option
+`run` that throws or rejects is toasted every time it happens; a `when`, `isActive` or `options`
+that throws is toasted only once per item.
 
 `host.editor.insertEmbed(language)` inserts one of this plugin's registered embeds at the cursor,
 exactly like picking it from the toolbar's Embed menu (including firing its `onInsertedAt`). It
 only works for embeds this plugin itself registered, and returns `false` with no effect when no
-note editor is focused.
+note editor is open.
 
 ### Commands, overlays, export formats, and other plugins
 

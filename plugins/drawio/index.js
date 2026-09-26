@@ -342,7 +342,7 @@ export function activate(host) {
       id: "new-diagram",
       label: "New diagram",
       run: () => {
-        if (!host.editor.insertEmbed("drawio")) host.toast("Click into the note first, then add the diagram.");
+        if (!host.editor.insertEmbed("drawio")) host.toast("Open a note in the editor first, then add the diagram.");
       },
     });
   }

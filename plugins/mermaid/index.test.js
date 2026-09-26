@@ -113,12 +113,12 @@ test("an Insert Mermaid diagram toolbar button inserts a mermaid block", () => {
   assert.deepEqual(inserted, ["mermaid"]);
 });
 
-test("Insert Mermaid diagram toasts instead of inserting when there's no focused editor", () => {
+test("Insert Mermaid diagram toasts instead of inserting when there's no note editor open", () => {
   const host = fakeHost({ enabled: true });
   host.editor.insertEmbed = () => false;
   activate(host);
   host.toolbar[0].run({ vaultId: "v", noteId: "n", path: "n.md", title: "N" });
-  assert.deepEqual(host.toasts, ["Click into the note first, then add the diagram."]);
+  assert.deepEqual(host.toasts, ["Open a note in the editor first, then add the diagram."]);
 });
 
 test("mounts the rendered SVG, no error box", async () => {

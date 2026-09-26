@@ -31,11 +31,17 @@ const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$
 // (a space after it is fine), then a version that may use x / * wildcards.
 const COMPARATOR = /^(?:\*|x|X|(?:(?:[<>]=?|=|\^|~)\s*)?\d+(?:\.(?:\d+|x|X|\*)){0,2}(?:-[0-9A-Za-z.-]+)?)$/;
 const SHA256 = /^[0-9a-f]{64}$/i;
+// Rust's `char::is_whitespace` (Unicode White_Space) as a regex class. JS's
+// `\s` isn't the same set — notably it also matches U+FEFF (BOM/ZWNBSP),
+// which Rust does not treat as whitespace, so a stray BOM inside an SVG
+// prolog would be silently skipped by `\s*` here but not by the app's own
+// parser. Built from the same code points Rust's std lists for White_Space.
+const RUST_WS = "\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
 
 // Top-level fields newer than the app's first plugin release, and the first
 // app version that understands each. An older app rejects an unknown field, so
 // the plugin's `mahfouz` range must start at that version or later.
-export const FIELD_SINCE = { node: "0.9.0" };
+export const FIELD_SINCE = { node: "0.9.0", icon: "0.8.0", logo: "0.8.0" };
 // The same for fields of a download step's artifact.
 export const ARTIFACT_FIELD_SINCE = { extract: "0.9.0" };
 const EXTRACTS = ["none", "tar.gz", "zip"];
@@ -248,8 +254,10 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
       errors.push(`${where}: ${field} ${rel} isn't UTF-8`);
       continue;
     }
-    const body = text.replace(/^﻿/, "").replace(/^(\s*(<\?[\s\S]*?\?>|<!--[\s\S]*?-->))*\s*/, "");
-    if (!/^<svg[\s>/]/.test(body)) errors.push(`${where}: ${field} ${rel} isn't an SVG`);
+    const body = text
+      .replace(/^﻿/, "")
+      .replace(new RegExp(`^([${RUST_WS}]*(<\\?[\\s\\S]*?\\?>|<!--[\\s\\S]*?-->))*[${RUST_WS}]*`), "");
+    if (!new RegExp(`^<svg[${RUST_WS}>/]`).test(body)) errors.push(`${where}: ${field} ${rel} isn't an SVG`);
   }
 
   if ("sidecar" in m) {

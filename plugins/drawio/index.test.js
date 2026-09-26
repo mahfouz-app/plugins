@@ -95,7 +95,7 @@ test("a New diagram toolbar button inserts a drawio block", () => {
   assert.deepEqual(inserted, ["drawio"]);
 });
 
-test("New diagram toasts instead of inserting when there's no focused editor", () => {
+test("New diagram toasts instead of inserting when there's no note editor open", () => {
   const toasts = [];
   const toolbar = [];
   activate({
@@ -107,7 +107,7 @@ test("New diagram toasts instead of inserting when there's no focused editor", (
     toast: (message) => toasts.push(message),
   });
   toolbar[0].run({ vaultId: "v", noteId: "n", path: "n.md", title: "N" });
-  assert.deepEqual(toasts, ["Click into the note first, then add the diagram."]);
+  assert.deepEqual(toasts, ["Open a note in the editor first, then add the diagram."]);
 });
 
 test("adds no toolbar item when loaded only as a dependency", () => {
