@@ -231,16 +231,24 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
     paths.push(rel);
     if (!isContained(rel)) continue;
     const file = path.join(dir, rel);
-    if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) {
+    if (!fs.existsSync(file)) {
       errors.push(`${where}: ${field} ${rel} doesn't exist`);
+      continue;
+    }
+    if (!fs.lstatSync(file).isFile()) {
+      errors.push(`${where}: ${field} ${rel} isn't a regular file`);
       continue;
     }
     const buf = fs.readFileSync(file);
     if (buf.length > 32 * 1024) errors.push(`${where}: ${field} ${rel} is larger than 32 KB`);
-    const body = buf
-      .toString("utf8")
-      .replace(/^﻿/, "")
-      .replace(/^(\s*(<\?[\s\S]*?\?>|<!--[\s\S]*?-->))*\s*/, "");
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+    } catch {
+      errors.push(`${where}: ${field} ${rel} isn't UTF-8`);
+      continue;
+    }
+    const body = text.replace(/^﻿/, "").replace(/^(\s*(<\?[\s\S]*?\?>|<!--[\s\S]*?-->))*\s*/, "");
     if (!/^<svg[\s>/]/.test(body)) errors.push(`${where}: ${field} ${rel} isn't an SVG`);
   }
 

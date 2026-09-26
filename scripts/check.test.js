@@ -275,5 +275,29 @@ test("icon and logo: optional .svg files inside the plugin, under 32 KB, with an
   assert.match(errs({ icon: "big.svg" }), /larger than 32 KB/);
 
   fs.symlinkSync(path.join(dir, "icon.svg"), path.join(dir, "icon-link.svg"));
-  assert.match(errs({ icon: "icon-link.svg" }), /doesn't exist/);
+  assert.match(errs({ icon: "icon-link.svg" }), /isn't a regular file/);
+});
+
+test("icon and logo: a leading XML declaration or comment before <svg> is allowed", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "icons-decl-"));
+  fs.writeFileSync(path.join(dir, "decl.svg"), '<?xml version="1.0"?><svg viewBox="0 0 24 24"><path d="M1 1"/></svg>');
+  fs.writeFileSync(path.join(dir, "comment.svg"), '<!-- c --><svg viewBox="0 0 24 24"><path d="M1 1"/></svg>');
+  fs.writeFileSync(path.join(dir, "svgx.svg"), '<svgx viewBox="0 0 24 24"></svgx>');
+  fs.writeFileSync(path.join(dir, "html.svg"), "<html></html>");
+  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.6.0", apiVersion: 1 };
+  const ctx = { dir, id: "p", registry: "mahfouz", pluginIds: ["p"] };
+  const errs = (m) => validateManifest({ ...base, ...m }, ctx).join("\n");
+  assert.deepEqual(validateManifest({ ...base, icon: "decl.svg" }, ctx), []);
+  assert.deepEqual(validateManifest({ ...base, icon: "comment.svg" }, ctx), []);
+  assert.match(errs({ icon: "svgx.svg" }), /isn't an SVG/);
+  assert.match(errs({ icon: "html.svg" }), /isn't an SVG/);
+});
+
+test("icon and logo: invalid UTF-8 is rejected", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "icons-utf8-"));
+  fs.writeFileSync(path.join(dir, "bad-utf8.svg"), Buffer.from([0x3c, 0x73, 0x76, 0x67, 0x3e, 0xff, 0x3c, 0x2f, 0x73, 0x76, 0x67, 0x3e]));
+  const base = { schema: 1, id: "p", version: "1.0.0", label: "P", description: "", mahfouz: ">=0.6.0", apiVersion: 1 };
+  const ctx = { dir, id: "p", registry: "mahfouz", pluginIds: ["p"] };
+  const errs = (m) => validateManifest({ ...base, ...m }, ctx).join("\n");
+  assert.match(errs({ icon: "bad-utf8.svg" }), /isn't UTF-8/);
 });
