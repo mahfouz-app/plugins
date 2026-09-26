@@ -159,11 +159,47 @@ export function createEditorSession({
   return { handle, flush };
 }
 
+// ---- rendering a preview -------------------------------------------------
+
+/** The text of the parse error in `doc` (a DOMParser result), or null. WebKit
+ * wraps the message in a `<div>` between two headings; Gecko doesn't. */
+function parseErrorOf(doc) {
+  const el = doc.getElementsByTagName("parsererror")[0];
+  if (!el) return null;
+  return ((el.getElementsByTagName("div")[0] ?? el).textContent ?? "").trim() || "unknown parse error";
+}
+
+/**
+ * Draws the diagram XML `source` into `holder` with draw.io's viewer
+ * (`window.GraphViewer`), throwing a readable error for the failures the
+ * viewer would otherwise swallow or leave as an empty box: no viewer, XML
+ * that doesn't parse, or XML that isn't a diagram.
+ *
+ * Draws only `holder`, via `createViewerForElement`: `processElements`
+ * would redraw every `.mxgraph` element on the page, and catches its own
+ * errors instead of reporting them.
+ */
+export function drawDiagram(holder, source, viewer, parseXml) {
+  if (!viewer?.createViewerForElement) throw new Error("draw.io's viewer didn't load");
+  const doc = parseXml(source);
+  const parseError = parseErrorOf(doc);
+  if (parseError) throw new Error(`the diagram isn't valid XML: ${parseError}`);
+  const root = doc.documentElement?.nodeName;
+  if (root !== "mxfile" && root !== "mxGraphModel") {
+    throw new Error(`expected an <mxfile> or <mxGraphModel> diagram, found <${root}>`);
+  }
+  holder.setAttribute("data-mxgraph", JSON.stringify({ xml: source }));
+  viewer.createViewerForElement(holder);
+}
+
 // ---- the app's side: embed + tab -------------------------------------------
 
 let viewerScript = null;
 function loadViewerScript(baseUrl) {
   if (viewerScript) return viewerScript;
+  // Once loaded, the viewer draws every `.mxgraph` element on the page
+  // unless this hook is set; each preview draws its own (`drawDiagram`).
+  window.onDrawioViewerLoad ??= () => {};
   viewerScript = new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = `${baseUrl}${WEBAPP}js/viewer.min.js`;
@@ -204,16 +240,14 @@ function createRenderer(host) {
         return;
       }
       // viewer.min.js renders a static SVG from the XML without a full
-      // editor. It installs `window.GraphViewer`, which picks up `.mxgraph`
-      // elements already in the document.
+      // editor, and installs `window.GraphViewer`.
       const holder = document.createElement("div");
       holder.className = "mxgraph";
       holder.setAttribute("style", "max-width:100%;");
-      holder.setAttribute("data-mxgraph", JSON.stringify({ xml: source }));
       preview.appendChild(holder);
       try {
         await loadViewerScript(host.plugin.baseUrl);
-        window.GraphViewer?.processElements();
+        drawDiagram(holder, source, window.GraphViewer, (xml) => new DOMParser().parseFromString(xml, "text/xml"));
       } catch (err) {
         host.ui.showError(preview, `Draw.io preview failed: ${err instanceof Error ? err.message : String(err)}`);
       }

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "drawio",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "label": "Draw.io diagrams",
   "description": "Embed and edit draw.io diagrams",
   "mahfouz": ">=0.5.0",
