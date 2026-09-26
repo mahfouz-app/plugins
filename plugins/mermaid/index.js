@@ -1186,4 +1186,15 @@ export function activate(host) {
     };
   }
   host.registerEmbed("mermaid", renderer);
+
+  if (host.isEnabled()) {
+    host.registerToolbarItem({
+      kind: "button",
+      id: "insert-diagram",
+      label: "Insert Mermaid diagram",
+      run: () => {
+        if (!host.editor.insertEmbed("mermaid")) host.toast("Click into the note first, then add the diagram.");
+      },
+    });
+  }
 }

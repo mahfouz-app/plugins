@@ -25,14 +25,27 @@ import {
   svgSize,
 } from "./index.js";
 
-function fakeHost() {
+function fakeHost({ enabled = false } = {}) {
   const host = {
     plugin: { baseUrl: "http://plugins.test/mahfouz/mermaid/" },
     embeds: new Map(),
+    toolbar: [],
+    toasts: [],
     panZoomed: [],
+    isEnabled: () => enabled,
     registerEmbed(language, renderer) {
       host.embeds.set(language, renderer);
       return { dispose() {} };
+    },
+    registerToolbarItem(item) {
+      host.toolbar.push(item);
+      return { dispose() {} };
+    },
+    toast(message) {
+      host.toasts.push(message);
+    },
+    editor: {
+      insertEmbed: () => true,
     },
     ui: {
       showError(container, message) {
@@ -80,6 +93,32 @@ test("activate registers the mermaid fence language", () => {
   const host = fakeHost();
   activate(host);
   assert.equal(host.embeds.get("mermaid").label, "Mermaid diagram");
+});
+
+test("adds no toolbar item when loaded only as a dependency", () => {
+  const host = fakeHost({ enabled: false });
+  activate(host);
+  assert.deepEqual(host.toolbar, []);
+});
+
+test("an Insert Mermaid diagram toolbar button inserts a mermaid block", () => {
+  const inserted = [];
+  const host = fakeHost({ enabled: true });
+  host.editor.insertEmbed = (lang) => (inserted.push(lang), true);
+  activate(host);
+  const btn = host.toolbar.find((i) => i.id === "insert-diagram");
+  assert.equal(btn.kind, "button");
+  assert.equal(btn.label, "Insert Mermaid diagram");
+  btn.run({ vaultId: "v", noteId: "n", path: "n.md", title: "N" });
+  assert.deepEqual(inserted, ["mermaid"]);
+});
+
+test("Insert Mermaid diagram toasts instead of inserting when there's no focused editor", () => {
+  const host = fakeHost({ enabled: true });
+  host.editor.insertEmbed = () => false;
+  activate(host);
+  host.toolbar[0].run({ vaultId: "v", noteId: "n", path: "n.md", title: "N" });
+  assert.deepEqual(host.toasts, ["Click into the note first, then add the diagram."]);
 });
 
 test("mounts the rendered SVG, no error box", async () => {
