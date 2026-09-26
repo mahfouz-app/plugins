@@ -60,6 +60,7 @@ test("the embed's edit button opens the editor tab for that block", () => {
   activate({
     registerEmbed: (_lang, r) => (renderer = r),
     registerTabType: () => {},
+    isEnabled: () => false,
     openTab: (type, note, arg) => opened.push([type, note, arg]),
   });
   const note = { vaultId: "v", noteId: "n" };
@@ -72,8 +73,52 @@ test("activate registers the embed and the editor tab", () => {
   activate({
     registerEmbed: (lang, r) => (registered.embed = [lang, r.label]),
     registerTabType: (t) => (registered.tab = [t.id, t.icon]),
+    isEnabled: () => false,
   });
   assert.deepEqual(registered, { embed: ["drawio", "Draw.io diagram"], tab: ["editor", "◇"] });
+});
+
+test("a New diagram toolbar button inserts a drawio block", () => {
+  const inserted = [];
+  const toolbar = [];
+  activate({
+    registerEmbed: () => {},
+    registerTabType: () => {},
+    isEnabled: () => true,
+    registerToolbarItem: (item) => toolbar.push(item),
+    editor: { insertEmbed: (lang) => (inserted.push(lang), true) },
+  });
+  const btn = toolbar.find((i) => i.id === "new-diagram");
+  assert.equal(btn.kind, "button");
+  assert.equal(btn.label, "New diagram");
+  btn.run({ vaultId: "v", noteId: "n", path: "n.md", title: "N" });
+  assert.deepEqual(inserted, ["drawio"]);
+});
+
+test("New diagram toasts instead of inserting when there's no focused editor", () => {
+  const toasts = [];
+  const toolbar = [];
+  activate({
+    registerEmbed: () => {},
+    registerTabType: () => {},
+    isEnabled: () => true,
+    registerToolbarItem: (item) => toolbar.push(item),
+    editor: { insertEmbed: () => false },
+    toast: (message) => toasts.push(message),
+  });
+  toolbar[0].run({ vaultId: "v", noteId: "n", path: "n.md", title: "N" });
+  assert.deepEqual(toasts, ["Click into the note first, then add the diagram."]);
+});
+
+test("adds no toolbar item when loaded only as a dependency", () => {
+  const toolbar = [];
+  activate({
+    registerEmbed: () => {},
+    registerTabType: () => {},
+    isEnabled: () => false,
+    registerToolbarItem: (item) => toolbar.push(item),
+  });
+  assert.deepEqual(toolbar, []);
 });
 
 // ---- editor session ------------------------------------------------------
