@@ -6,6 +6,7 @@ import {
   activate,
   countDrawioBlocksBefore,
   createEditorSession,
+  drawDiagram,
   extractDrawioBlockAt,
   replaceDrawioBlockAt,
 } from "./index.js";
@@ -154,4 +155,57 @@ test("messages it doesn't know are ignored", async () => {
   await s.handle({ event: "autosave" });
   await wait(30);
   assert.deepEqual(log, { posted: [], written: [], errors: [], closed: 0 });
+});
+
+// ---- preview -------------------------------------------------------------
+
+// Just enough of a DOMParser result for drawDiagram.
+function parsed(rootName, parseError) {
+  const errorEl = parseError && {
+    textContent: `This page contains the following errors:${parseError}Below is a rendering`,
+    getElementsByTagName: (tag) => (tag === "div" ? [{ textContent: parseError }] : []),
+  };
+  return {
+    documentElement: { nodeName: rootName },
+    getElementsByTagName: (tag) => (tag === "parsererror" && errorEl ? [errorEl] : []),
+  };
+}
+
+function fakeHolder() {
+  const attrs = {};
+  return { attrs, setAttribute: (k, v) => (attrs[k] = v) };
+}
+
+test("drawDiagram hands only its own element to the viewer", () => {
+  const drawn = [];
+  const holder = fakeHolder();
+  drawDiagram(holder, "<mxfile/>", { createViewerForElement: (el) => drawn.push(el) }, () => parsed("mxfile"));
+  assert.deepEqual(drawn, [holder]);
+  assert.deepEqual(JSON.parse(holder.attrs["data-mxgraph"]), { xml: "<mxfile/>" });
+});
+
+test("drawDiagram reports a viewer that didn't load", () => {
+  assert.throws(() => drawDiagram(fakeHolder(), "<mxfile/>", undefined, () => parsed("mxfile")), /viewer didn't load/);
+});
+
+test("drawDiagram reports XML that doesn't parse, with the parser's message", () => {
+  const viewer = { createViewerForElement: () => assert.fail("should not draw") };
+  assert.throws(
+    () => drawDiagram(fakeHolder(), "<mxfile", viewer, () => parsed("mxfile", "error on line 1 at column 8")),
+    /isn't valid XML: error on line 1 at column 8$/
+  );
+});
+
+test("drawDiagram reports XML that isn't a diagram", () => {
+  const viewer = { createViewerForElement: () => assert.fail("should not draw") };
+  assert.throws(() => drawDiagram(fakeHolder(), "<svg/>", viewer, () => parsed("svg")), /found <svg>/);
+});
+
+test("drawDiagram lets the viewer's own errors through", () => {
+  const viewer = {
+    createViewerForElement: () => {
+      throw new Error("Cannot read properties of null");
+    },
+  };
+  assert.throws(() => drawDiagram(fakeHolder(), "<mxfile/>", viewer, () => parsed("mxfile")), /Cannot read properties/);
 });
