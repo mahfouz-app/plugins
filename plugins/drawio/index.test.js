@@ -54,6 +54,19 @@ test("countDrawioBlocksBefore gives a just-inserted block its ordinal", () => {
   assert.equal(countDrawioBlocksBefore(body, 0), 0);
 });
 
+test("the embed's edit button opens the editor tab for that block", () => {
+  let renderer;
+  const opened = [];
+  activate({
+    registerEmbed: (_lang, r) => (renderer = r),
+    registerTabType: () => {},
+    openTab: (type, note, arg) => opened.push([type, note, arg]),
+  });
+  const note = { vaultId: "v", noteId: "n" };
+  renderer.edit({ ordinal: 2, note });
+  assert.deepEqual(opened, [["editor", note, "2"]]);
+});
+
 test("activate registers the embed and the editor tab", () => {
   const registered = {};
   activate({
@@ -176,12 +189,34 @@ function fakeHolder() {
   return { attrs, setAttribute: (k, v) => (attrs[k] = v) };
 }
 
-test("drawDiagram hands only its own element to the viewer", () => {
+// A viewer whose drawn model holds `cells` ("vertex" | "edge" | "other").
+function fakeViewer(cells, drawn = []) {
+  const model = {
+    getRoot: () => "root",
+    getDescendants: () => cells,
+    isVertex: (c) => c === "vertex",
+    isEdge: (c) => c === "edge",
+  };
+  return {
+    createViewerForElement: (el, done) => {
+      drawn.push(el);
+      done?.({ graph: { getModel: () => model } });
+    },
+  };
+}
+
+test("drawDiagram hands only its own element to the viewer, drawing it now", () => {
   const drawn = [];
   const holder = fakeHolder();
-  drawDiagram(holder, "<mxfile/>", { createViewerForElement: (el) => drawn.push(el) }, () => parsed("mxfile"));
+  assert.equal(drawDiagram(holder, "<mxfile/>", fakeViewer(["vertex"], drawn), () => parsed("mxfile")), true);
   assert.deepEqual(drawn, [holder]);
-  assert.deepEqual(JSON.parse(holder.attrs["data-mxgraph"]), { xml: "<mxfile/>" });
+  // Without this the viewer waits for the (0px-wide) holder to get a width.
+  assert.deepEqual(JSON.parse(holder.attrs["data-mxgraph"]), { xml: "<mxfile/>", "check-visible-state": false });
+});
+
+test("drawDiagram returns false for a diagram with no shapes", () => {
+  assert.equal(drawDiagram(fakeHolder(), "<mxGraphModel/>", fakeViewer(["other", "other"]), () => parsed("mxGraphModel")), false);
+  assert.equal(drawDiagram(fakeHolder(), "<mxGraphModel/>", fakeViewer(["other", "edge"]), () => parsed("mxGraphModel")), true);
 });
 
 test("drawDiagram reports a viewer that didn't load", () => {

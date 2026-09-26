@@ -139,7 +139,9 @@ of the plugin's installed directory. Load assets relative to it.
 Embed renderers also get a fourth `render` argument, `{ ordinal, note }`: which block of their
 language this is in the note, and the note itself. Read `note` when the user acts (e.g. on
 click), not while rendering. `onInsertedAt(view, from, note)` runs right after the toolbar
-inserts your snippet.
+inserts your snippet. An optional `edit({ ordinal, note })` takes over the block's edit button
+(which otherwise reveals the raw source) for an embed edited somewhere else, like draw.io's
+editor tab; apps before it existed ignore it.
 
 ### Tabs
 
