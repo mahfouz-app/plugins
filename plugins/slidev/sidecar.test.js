@@ -163,3 +163,17 @@ test("entries carry the template headmatter", () => {
   assert.match(exp, /aspectRatio: "3\/4"\n/);
   assert.match(exp, /\nmahfouz: /);
 });
+
+test("template headmatter renders header and footer and carries titleSlide", () => {
+  const render = (s) => `<r>${s}</r>`;
+  const lines = templateHeadmatter({ ...BRAND, header: "**H** {page}", titleSlide: true }, render);
+  const data = JSON.parse(/^mahfouz: (.*)$/m.exec(lines)[1]);
+  assert.equal(data.header, "<r>**H** {page}</r>");
+  assert.equal(data.footer, "<r>Acme</r>");
+  assert.equal(data.titleSlide, true);
+});
+
+test("a bare template (name \"\") with only a footer still writes headmatter", () => {
+  const lines = templateHeadmatter({ name: "", logoPosition: "top-right", cover: {}, css: "", footer: "F" });
+  assert.deepEqual(JSON.parse(/^mahfouz: (.*)$/m.exec(lines)[1]), { logoPosition: "top-right", footer: "F" });
+});
