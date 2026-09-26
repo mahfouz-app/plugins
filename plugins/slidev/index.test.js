@@ -1,10 +1,11 @@
 // Run with `npm test` (node --test) from the repo root. The frontend's
 // DOM-free behaviour, against a fake host and engine: what it registers,
-// the deck start sequence, the PDF API and the presentation tag. (The
+// the deck start sequence, the PDF API, the PowerPoint export format and the
+// presentation tag. (The
 // tab's and overlay's DOM are exercised in the app, not here.)
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activate, sidecarEngine, startDeck, withPresentationType } from "./index.js";
+import { activate, deckFileName, sidecarEngine, startDeck, withPresentationType } from "./index.js";
 
 function fakeEngine(over = {}) {
   const calls = [];
@@ -15,9 +16,9 @@ function fakeEngine(over = {}) {
       calls.push(`start ${vaultPath} ${relPath}${template ? ` ${template.name}` : ""}`),
       { url: "http://localhost:3030/", fresh: false }
     ),
-    exportPdf: async (_vaultPath, relPath, { orientation, template }) => (
-      calls.push(`export ${relPath} ${orientation}${template ? ` ${template.name}` : ""}`),
-      "/tmp/out.pdf"
+    exportDeck: async (_vaultPath, relPath, { orientation, format, template }) => (
+      calls.push(`export ${relPath} ${orientation} ${format}${template ? ` ${template.name}` : ""}`),
+      `/tmp/out.${format}`
     ),
     stop: async () => void calls.push("stop"),
     log: async () => "server log tail",
@@ -27,12 +28,13 @@ function fakeEngine(over = {}) {
 }
 
 function fakeHost(enabled, slides) {
-  const reg = { provided: undefined, tabs: [], commands: [], overlays: [], tabsOpened: [], attributeUpdates: [], sidecarCalls: [] };
+  const reg = { provided: undefined, tabs: [], commands: [], formats: [], overlays: [], tabsOpened: [], attributeUpdates: [], sidecarCalls: [] };
   const host = {
     isEnabled: () => enabled,
     provide: (api) => void (reg.provided = api),
     registerTabType: (t) => reg.tabs.push(t),
     registerCommand: (c) => reg.commands.push(c),
+    registerExportFormat: (f) => reg.formats.push(f),
     openTab: async (...args) => void reg.tabsOpened.push(args),
     notes: {
       get: async (note) => ({ ...note, title: "Deck", path: "talks/deck.md", vaultPath: "/vault", attributes: {}, body: "" }),
@@ -72,7 +74,7 @@ test("as PDF export's dependency only: provides its API, adds nothing, starts no
   activate(host, engine);
   await flush();
   assert.ok(reg.provided);
-  assert.deepEqual([reg.tabs, reg.commands, calls], [[], [], []]);
+  assert.deepEqual([reg.tabs, reg.commands, reg.formats, calls], [[], [], [], []]);
 });
 
 test("exportPdf checks Node, renders the note's own file, and adds the log to failures", async () => {
@@ -81,15 +83,39 @@ test("exportPdf checks Node, renders the note's own file, and adds the log to fa
   activate(a.host, ok.engine);
   const progress = [];
   assert.equal(await a.reg.provided.exportPdf(note, { orientation: "portrait" }, (d) => progress.push(d)), "/tmp/out.pdf");
-  assert.deepEqual(ok.calls, ["ready", "export talks/deck.md portrait"]);
+  assert.deepEqual(ok.calls, ["ready", "export talks/deck.md portrait pdf"]);
   assert.deepEqual(progress, ["Exporting…"]);
 
-  const failing = fakeEngine({ exportPdf: async () => Promise.reject(new Error("chromium crashed")) });
+  const failing = fakeEngine({ exportDeck: async () => Promise.reject(new Error("chromium crashed")) });
   const b = fakeHost(false);
   activate(b.host, failing.engine);
   await assert.rejects(b.reg.provided.exportPdf(note, { orientation: "landscape" }, () => {}), {
     message: "chromium crashed\n\nserver log tail",
   });
+});
+
+test("enabled: adds a PowerPoint export format that renders the dialog's content", async () => {
+  const { engine, calls } = fakeEngine();
+  const { host, reg } = fakeHost(true);
+  activate(host, engine);
+  assert.deepEqual(reg.formats.map((f) => [f.id, f.label]), [["pptx", "PowerPoint / Google Slides (.pptx)"]]);
+  const progress = [];
+  const result = await reg.formats[0].export(
+    { note: { ...note, attributes: { orientation: "portrait" } }, content: "# x" },
+    (d) => progress.push(d)
+  );
+  assert.deepEqual(result, {
+    path: "/tmp/out.pptx",
+    suggestedName: "Deck.pptx",
+    filter: { name: "PowerPoint", extensions: ["pptx"] },
+  });
+  assert.ok(calls.includes("export talks/deck.md portrait pptx"));
+  assert.deepEqual(progress, ["Exporting…"]);
+});
+
+test("deck file names replace characters file systems refuse", () => {
+  assert.equal(deckFileName("Q3: plan/review", "pptx"), "Q3- plan-review.pptx");
+  assert.equal(deckFileName("", "pptx"), "Untitled.pptx");
 });
 
 test("Present full screen tags the note a presentation and opens the overlay", async () => {
@@ -141,10 +167,10 @@ test("the engine is the sidecar's methods", async () => {
   const engine = sidecarEngine(host);
   const template = { name: "Brand" };
   await engine.start("/v", "a.md", template);
-  await engine.exportPdf("/v", "a.md", { orientation: "portrait", content: "# x", template });
+  await engine.exportDeck("/v", "a.md", { orientation: "portrait", content: "# x", format: "pptx", template });
   assert.deepEqual(reg.sidecarCalls, [
     ["start", { vaultPath: "/v", relPath: "a.md", template }],
-    ["export", { vaultPath: "/v", relPath: "a.md", orientation: "portrait", content: "# x", template }],
+    ["export", { vaultPath: "/v", relPath: "a.md", orientation: "portrait", content: "# x", format: "pptx", template }],
   ]);
 });
 
@@ -155,7 +181,7 @@ test("the presentation tag is added once, keeping other types", () => {
   assert.equal(withPresentationType(tagged), tagged);
 });
 
-test("the note's slides template goes to the export and to Present", async () => {
+test("the note's slides template goes to both exports and to Present", async () => {
   const brand = { name: "Brand" };
   const asked = [];
   const slides = { resolveTemplate: async (n) => (asked.push(n.noteId), brand) };
@@ -163,8 +189,10 @@ test("the note's slides template goes to the export and to Present", async () =>
   const a = fakeHost(true, slides);
   activate(a.host, ok.engine);
   await a.reg.provided.exportPdf(note, { orientation: "landscape" }, () => {});
-  assert.ok(ok.calls.includes("export talks/deck.md landscape Brand"));
-  assert.deepEqual(asked, ["n"]);
+  assert.ok(ok.calls.includes("export talks/deck.md landscape pdf Brand"));
+  await a.reg.formats[0].export({ note: { ...note, attributes: {} } }, () => {});
+  assert.ok(ok.calls.includes("export talks/deck.md landscape pptx Brand"));
+  assert.deepEqual(asked, ["n", "n"]);
 
   const phases = [];
   const started = fakeEngine();
@@ -186,6 +214,6 @@ test("no template support on the host, or a failing lookup, means no template", 
   activate(b.host, broken.engine);
   await b.reg.provided.exportPdf(note, { orientation: "portrait" }, () => {});
   console.warn = quiet;
-  assert.deepEqual(old.calls, ["ready", "export talks/deck.md portrait"]);
-  assert.deepEqual(broken.calls, ["ready", "export talks/deck.md portrait"]);
+  assert.deepEqual(old.calls, ["ready", "export talks/deck.md portrait pdf"]);
+  assert.deepEqual(broken.calls, ["ready", "export talks/deck.md portrait pdf"]);
 });

@@ -148,6 +148,17 @@ export function exportEntryContent(src, portrait, template = null) {
   return `---\nsrc: ${quote(src)}\n${portrait ? 'aspectRatio: "3/4"\n' : ""}${templateHeadmatter(template)}---\n`;
 }
 
+/** The Export dialog's formats → `slidev export --format` values (and the
+ * output's extension, which is the key). PowerPoint uses the editable export:
+ * text stays text, and a slide it can't convert goes in as a picture. Google
+ * Slides imports the same file. */
+const EXPORT_FORMATS = { pdf: "pdf", pptx: "pptx-editable" };
+
+export function slidevExportFormat(format = "pdf") {
+  if (!Object.hasOwn(EXPORT_FORMATS, format)) throw new Error(`unsupported export format "${format}"`);
+  return EXPORT_FORMATS[format];
+}
+
 /** Stable, filename-safe name for a vault's symlink. */
 export function vaultLinkId(vaultPath) {
   return createHash("sha256").update(vaultPath).digest("hex").slice(0, 16);
@@ -341,15 +352,16 @@ export const methods = {
   },
 
   /**
-   * Renders a note to a PDF in the OS temp dir with `slidev export`, and
-   * returns the file's path. Independent of the Present server: its own
+   * Renders a note to a PDF or, with `format: "pptx"`, a PowerPoint file in
+   * the OS temp dir with `slidev export`, and returns the file's path. Independent of the Present server: its own
    * entry (`export.md`, so a concurrent Present rewriting `deck.md` can't
    * race it), run to completion as a one-shot process. `content`, when
    * given, is rendered instead of the note file (the Export dialog's
    * children/attachment options). `template` is the note's slides
    * template, or null.
    */
-  async export({ vaultPath, relPath, orientation, content, template }) {
+  async export({ vaultPath, relPath, orientation, content, template, format = "pdf" }) {
+    const slidevFormat = slidevExportFormat(format);
     assertInstalled();
     checkNote(vaultPath, relPath, "exported");
     const id = linkVault(WORKSPACE, vaultPath);
@@ -360,11 +372,11 @@ export const methods = {
     }
     const entry = path.join(WORKSPACE, "export.md");
     fs.writeFileSync(entry, exportEntryContent(src, orientation === "portrait", template ?? null));
-    const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.pdf`);
+    const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.${format}`);
     const log = tail();
     const child = spawn(
       process.execPath,
-      [cliEntry(WORKSPACE), "export", entry, "--output", output, "--format", "pdf"],
+      [cliEntry(WORKSPACE), "export", entry, "--output", output, "--format", slidevFormat],
       { cwd: WORKSPACE, env: { ...process.env, NO_COLOR: "1", CI: "1" }, stdio: ["ignore", "pipe", "pipe"] }
     );
     child.stdout.setEncoding("utf8").on("data", (d) => log.add(d));
