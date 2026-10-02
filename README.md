@@ -14,7 +14,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 |---|---|---|
 | `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
 | `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, and edits one in a draw.io tab | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
-| `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Slidev, its default theme and playwright-chromium, with `npm ci` from the committed lockfile. Needs Node.js 22.12+ |
+| `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Node.js 24.21.0 (~50 MB), then Slidev, its default theme and playwright-chromium with `npm ci` from the committed lockfile. No Node.js needed. macOS only (Apple Silicon and Intel) |
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 
@@ -45,7 +45,8 @@ upstream (npm, GitHub releases) and is pinned by sha256.
 - `npm test`
 - `node scripts/check.mjs --base <base branch>`: every manifest against the rules the app's
   parser enforces (fields, slugs, versions, the `mahfouz` range, paths staying inside the plugin,
-  dependencies, the files `frontend`/`sidecar`/npm steps name), plus the version-bump rule
+  dependencies, the files `frontend`/`sidecar`/npm steps name, fields newer than the `mahfouz` range
+  allows), plus the version-bump rule
 - `npm ci --ignore-scripts` wherever there's a lockfile, so it's known to match its `package.json`
 - `node scripts/check.mjs --artifacts`: downloads each artifact and checks its sha256 (on a PR,
   only for plugins whose manifest changed; weekly, all of them, in case an upstream URL breaks)
@@ -109,11 +110,12 @@ relative and stay inside the plugin's directory.
 | `apiVersion` | Host API major version (`api.ts`). Currently `1`. |
 | `dependencies` | Qualified ids installed first. A dependency from a registry the user hasn't added blocks the install. |
 | `install` | Steps run in order inside the plugin's installed directory. |
-| `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Needs Node.js on the user's machine. `"progress": "npm-fetch"` shows a percentage by counting npm's package downloads against the lockfile. |
+| `install[].type: "npm"` | Runs `npm ci` in `dir` (default `.`). Needs a committed `package-lock.json`. Runs with the plugin's own Node.js when `node` names one for the user's platform, otherwise needs Node.js on the user's machine. `"progress": "npm-fetch"` shows a percentage by counting npm's package downloads against the lockfile. |
 | `install[].type: "download"` | Fetches the artifact for the user's platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `windows-x64`), or the `"any"` one for platform-independent files. A **sha256 mismatch aborts the install**. `extract` is `tar.gz`, `zip`, or `none` (the default; with `none`, `to` is the saved file's path). `include` optionally limits unpacking to those archive paths (a directory unpacks its contents). A platform with no artifact and no `"any"` shows "Not available on this platform". |
 | `gitPath` | Directories put on `PATH` for every git command Mahfouz runs (e.g. a `git-lfs` binary). |
+| `node` | A Node.js binary the plugin ships, per platform: `{ "<platform>": "<path to bin/node>" }`, produced by a `download` step that has an artifact for each platform listed. On a listed platform, `npm` steps run with that binary's sibling `npm` and a `node` sidecar runs with it, so the user needs no Node.js of their own; elsewhere both fall back to the user's Node. Needs `"mahfouz": ">=0.9.0"`. |
 | `frontend` | ES module the app imports. It must export `activate(host)` and may export `deactivate()`. **Ship a single bundled file**: relative imports aren't refreshed on update until the app restarts. |
-| `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the user's Node. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
+| `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the plugin's `node` for the user's platform, or the user's Node when there isn't one. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
 
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
 installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).
