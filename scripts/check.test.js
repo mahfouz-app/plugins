@@ -177,6 +177,29 @@ test("node: maps platforms to a bundled node binary a download step provides", (
   }
 });
 
+test("an artifact can override its step's extract, from Mahfouz 0.9.0", () => {
+  const sha = "a".repeat(64);
+  const step = (artifact) => ({
+    type: "download",
+    extract: "tar.gz",
+    to: "runtime",
+    artifacts: { "linux-x64": { url: "https://e.x/a.tar.gz", sha256: sha }, "windows-x64": { url: "https://e.x/a.zip", sha256: sha, ...artifact } },
+  });
+  const manifest = (artifact, mahfouz = ">=0.9.0") => minimal("e", { mahfouz, install: [step(artifact)] });
+
+  for (const extract of ["none", "tar.gz", "zip"]) assert.deepEqual(validate(manifest({ extract })), [], extract);
+  const cases = [
+    [manifest({ extract: "rar" }), 'artifacts["windows-x64"]: extract must be "none", "tar.gz" or "zip"'],
+    [manifest({ extract: "zip" }, ">=0.5.0"), 'artifacts["windows-x64"]: "extract" needs Mahfouz 0.9.0'],
+  ];
+  for (const [m, fragment] of cases) {
+    const errors = validate(m);
+    assert.ok(errors.some((e) => e.includes(fragment)), `expected an error containing: ${fragment}\n${errors.join("\n")}`);
+  }
+  // Without the override, older ranges stay fine.
+  assert.deepEqual(validate(manifest({}, ">=0.5.0")), []);
+});
+
 test("a changed plugin must raise its version", () => {
   assert.equal(versionBumpError("p", true, null, "1.0.0"), null, "new plugins are fine");
   assert.equal(versionBumpError("p", false, "1.0.0", "1.0.0"), null, "untouched plugins are fine");

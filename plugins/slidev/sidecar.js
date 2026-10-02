@@ -218,7 +218,9 @@ export function ensureLink(link, target) {
   }
   if (current === target) return;
   if (current !== null) fs.unlinkSync(link);
-  fs.symlinkSync(target, link, "dir");
+  // A junction on Windows: directory symlinks there need admin rights or
+  // Developer Mode, junctions don't (the target is always absolute here).
+  fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
 }
 
 /** `vaults/<id>` → the vault (for `src:`), and `public/files` → its `files/`

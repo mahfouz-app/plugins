@@ -36,6 +36,9 @@ const SHA256 = /^[0-9a-f]{64}$/i;
 // app version that understands each. An older app rejects an unknown field, so
 // the plugin's `mahfouz` range must start at that version or later.
 export const FIELD_SINCE = { node: "0.9.0" };
+// The same for fields of a download step's artifact.
+export const ARTIFACT_FIELD_SINCE = { extract: "0.9.0" };
+const EXTRACTS = ["none", "tar.gz", "zip"];
 
 // ---- helpers --------------------------------------------------------------------
 
@@ -103,6 +106,10 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
   const errors = [];
   const where = `plugins/${id}/plugin.json`;
   if (!isObject(m)) return [`${where}: not a JSON object`];
+  // [where it's used, field, first app version that understands it]
+  const newer = Object.entries(FIELD_SINCE)
+    .filter(([field]) => field in m)
+    .map(([field, since]) => [where, field, since]);
 
   onlyKeys(
     m,
@@ -165,7 +172,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
           onlyKeys(step, ["type", "artifacts", "extract", "to", "include"], at, errors);
           if (!("to" in step)) errors.push(`${at}: missing "to"`);
           else paths.push(step.to);
-          if ("extract" in step && !["none", "tar.gz", "zip"].includes(step.extract)) {
+          if ("extract" in step && !EXTRACTS.includes(step.extract)) {
             errors.push(`${at}: extract must be "none", "tar.gz" or "zip"`);
           }
           if ("include" in step) {
@@ -184,7 +191,13 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
                 errors.push(`${aat}: must be { url, sha256 }`);
                 continue;
               }
-              onlyKeys(artifact, ["url", "sha256"], aat, errors);
+              onlyKeys(artifact, ["url", "sha256", "extract"], aat, errors);
+              if ("extract" in artifact && !EXTRACTS.includes(artifact.extract)) {
+                errors.push(`${aat}: extract must be "none", "tar.gz" or "zip"`);
+              }
+              for (const [field, since] of Object.entries(ARTIFACT_FIELD_SINCE)) {
+                if (field in artifact) newer.push([aat, field, since]);
+              }
               if (typeof artifact.url !== "string" || !/^(https:\/\/|file:\/\/)/.test(artifact.url)) {
                 errors.push(`${aat}: url must be https://`);
               }
@@ -250,9 +263,9 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
     }
   }
 
-  for (const [field, since] of Object.entries(FIELD_SINCE)) {
-    if (field in m && isVersionRange(m.mahfouz) && compareVersions(rangeFloor(m.mahfouz), since) < 0) {
-      errors.push(`${where}: "${field}" needs Mahfouz ${since} or later, so mahfouz must start there (e.g. ">=${since}"); older apps reject the manifest`);
+  for (const [at, field, since] of newer) {
+    if (isVersionRange(m.mahfouz) && compareVersions(rangeFloor(m.mahfouz), since) < 0) {
+      errors.push(`${at}: "${field}" needs Mahfouz ${since} or later, so mahfouz must start there (e.g. ">=${since}"); older apps reject the manifest`);
     }
   }
 
