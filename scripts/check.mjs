@@ -32,6 +32,14 @@ const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$
 const COMPARATOR = /^(?:\*|x|X|(?:(?:[<>]=?|=|\^|~)\s*)?\d+(?:\.(?:\d+|x|X|\*)){0,2}(?:-[0-9A-Za-z.-]+)?)$/;
 const SHA256 = /^[0-9a-f]{64}$/i;
 
+// Top-level fields newer than the app's first plugin release, and the first
+// app version that understands each. An older app rejects an unknown field, so
+// the plugin's `mahfouz` range must start at that version or later.
+export const FIELD_SINCE = { node: "0.9.0" };
+// The same for fields of a download step's artifact.
+export const ARTIFACT_FIELD_SINCE = { extract: "0.9.0" };
+const EXTRACTS = ["none", "tar.gz", "zip"];
+
 // ---- helpers --------------------------------------------------------------------
 
 /** -1 / 0 / 1; a prerelease sorts before its release. Null if not semver. */
@@ -56,6 +64,21 @@ export function compareVersions(a, b) {
 export function isVersionRange(range) {
   if (typeof range !== "string" || !range.trim()) return false;
   return range.split(",").every((c) => COMPARATOR.test(c.trim()));
+}
+
+/** The lowest app version (x.y.z, prerelease ignored) a range can admit:
+ * the highest lower bound among its comparators, or 0.0.0 without one. A
+ * bare version means `^` in Rust's `semver`, so it's a lower bound too. */
+export function rangeFloor(range) {
+  let floor = [0, 0, 0];
+  for (const c of String(range).split(",")) {
+    const m = /^\s*(>=|>|=|\^|~)?\s*(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?/.exec(c);
+    if (!m) continue; // "*", "<…", "<=…": no lower bound
+    const v = [m[2], m[3], m[4]].map((n) => (n && /^\d+$/.test(n) ? Number(n) : 0));
+    const i = v.findIndex((n, k) => n !== floor[k]);
+    if (i >= 0 && v[i] > floor[i]) floor = v;
+  }
+  return floor.join(".");
 }
 
 /** Relative, non-empty, and can't climb out of the directory it's joined to. */
@@ -83,10 +106,14 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
   const errors = [];
   const where = `plugins/${id}/plugin.json`;
   if (!isObject(m)) return [`${where}: not a JSON object`];
+  // [where it's used, field, first app version that understands it]
+  const newer = Object.entries(FIELD_SINCE)
+    .filter(([field]) => field in m)
+    .map(([field, since]) => [where, field, since]);
 
   onlyKeys(
     m,
-    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar"],
+    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node"],
     where,
     errors
   );
@@ -145,7 +172,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
           onlyKeys(step, ["type", "artifacts", "extract", "to", "include"], at, errors);
           if (!("to" in step)) errors.push(`${at}: missing "to"`);
           else paths.push(step.to);
-          if ("extract" in step && !["none", "tar.gz", "zip"].includes(step.extract)) {
+          if ("extract" in step && !EXTRACTS.includes(step.extract)) {
             errors.push(`${at}: extract must be "none", "tar.gz" or "zip"`);
           }
           if ("include" in step) {
@@ -164,7 +191,13 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
                 errors.push(`${aat}: must be { url, sha256 }`);
                 continue;
               }
-              onlyKeys(artifact, ["url", "sha256"], aat, errors);
+              onlyKeys(artifact, ["url", "sha256", "extract"], aat, errors);
+              if ("extract" in artifact && !EXTRACTS.includes(artifact.extract)) {
+                errors.push(`${aat}: extract must be "none", "tar.gz" or "zip"`);
+              }
+              for (const [field, since] of Object.entries(ARTIFACT_FIELD_SINCE)) {
+                if (field in artifact) newer.push([aat, field, since]);
+              }
               if (typeof artifact.url !== "string" || !/^(https:\/\/|file:\/\/)/.test(artifact.url)) {
                 errors.push(`${aat}: url must be https://`);
               }
@@ -203,6 +236,36 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
       else paths.push(...Object.values(s.entry));
     } else {
       errors.push(`${where}: sidecar.runtime must be "node" or "native"`);
+    }
+  }
+
+  if ("node" in m) {
+    if (!isObject(m.node)) errors.push(`${where}: node must map platforms to paths`);
+    else {
+      // Platforms some download step can provide a binary for.
+      const provided = new Set(
+        (Array.isArray(m.install) ? m.install : [])
+          .filter((s) => s?.type === "download" && isObject(s.artifacts))
+          .flatMap((s) => Object.keys(s.artifacts))
+      );
+      for (const [platform, rel] of Object.entries(m.node)) {
+        const at = `${where}: node["${platform}"]`;
+        if (!PLATFORMS.includes(platform)) errors.push(`${at}: unknown platform (use ${PLATFORMS.join(", ")})`);
+        if (typeof rel !== "string") {
+          errors.push(`${at}: must be a path`);
+          continue;
+        }
+        paths.push(rel);
+        if (!provided.has(platform) && !provided.has(ANY_PLATFORM)) {
+          errors.push(`${at}: no download step has an artifact for this platform, so nothing installs that binary`);
+        }
+      }
+    }
+  }
+
+  for (const [at, field, since] of newer) {
+    if (isVersionRange(m.mahfouz) && compareVersions(rangeFloor(m.mahfouz), since) < 0) {
+      errors.push(`${at}: "${field}" needs Mahfouz ${since} or later, so mahfouz must start there (e.g. ">=${since}"); older apps reject the manifest`);
     }
   }
 

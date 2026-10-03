@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { check, compareVersions, isContained, isVersionRange, validateManifest, versionBumpError } from "./check.mjs";
+import { check, compareVersions, isContained, isVersionRange, rangeFloor, validateManifest, versionBumpError } from "./check.mjs";
 
 const quiet = () => {};
 
@@ -127,6 +127,77 @@ test("what the app would reject, or users would trip on, is reported", () => {
   }
   // The manifest says "y", but it lives in plugins/x/.
   assert.ok(validate(minimal("x", { id: "y" }), {}, "x").some((e) => e.includes('must match its directory "x"')));
+});
+
+test("a range's floor is the lowest app version it can admit", () => {
+  assert.equal(rangeFloor(">=0.9.0"), "0.9.0");
+  assert.equal(rangeFloor(">= 0.9.1, <1.0.0"), "0.9.1");
+  assert.equal(rangeFloor("^0.9"), "0.9.0");
+  assert.equal(rangeFloor("0.10.x"), "0.10.0");
+  assert.equal(rangeFloor(">=0.9.0-beta.1"), "0.9.0");
+  assert.equal(rangeFloor("<1.0.0"), "0.0.0");
+  assert.equal(rangeFloor("*"), "0.0.0");
+});
+
+test("node: maps platforms to a bundled node binary a download step provides", () => {
+  const sha = "a".repeat(64);
+  const download = (platforms) => ({
+    type: "download",
+    extract: "tar.gz",
+    to: "runtime",
+    artifacts: Object.fromEntries(platforms.map((p) => [p, { url: `https://e.x/${p}.tar.gz`, sha256: sha }])),
+  });
+  const files = { "package.json": "{}", "package-lock.json": "{}", "sidecar.js": "" };
+  const withNode = (node, over = {}) =>
+    minimal("n", {
+      mahfouz: ">=0.9.0",
+      install: [download(["darwin-arm64", "darwin-x64"]), { type: "npm" }],
+      node,
+      sidecar: { runtime: "node", entry: "sidecar.js" },
+      ...over,
+    });
+
+  assert.deepEqual(validate(withNode({ "darwin-arm64": "runtime/a/bin/node", "darwin-x64": "runtime/b/bin/node" }), files), []);
+  // An "any" artifact covers every platform.
+  assert.deepEqual(validate(withNode({ "linux-x64": "runtime/bin/node" }, { install: [download(["any"])] }), files), []);
+
+  const cases = [
+    [withNode(["runtime/bin/node"]), "node must map platforms to paths"],
+    [withNode({ "darwin-arm65": "runtime/bin/node" }), 'node["darwin-arm65"]: unknown platform'],
+    [withNode({ "darwin-arm64": 3 }), 'node["darwin-arm64"]: must be a path'],
+    [withNode({ "darwin-arm64": "../node" }), 'path "../node" must be relative and stay inside the plugin'],
+    [withNode({ "darwin-arm64": "/usr/local/bin/node" }), 'path "/usr/local/bin/node" must be relative'],
+    [withNode({ "linux-x64": "runtime/bin/node" }), 'node["linux-x64"]: no download step has an artifact for this platform'],
+    [withNode({ "darwin-arm64": "runtime/bin/node" }, { mahfouz: ">=0.5.0" }), '"node" needs Mahfouz 0.9.0'],
+    [withNode({ "darwin-arm64": "runtime/bin/node" }, { mahfouz: "<1.0.0" }), '"node" needs Mahfouz 0.9.0'],
+  ];
+  for (const [manifest, fragment] of cases) {
+    const errors = validate(manifest, files);
+    assert.ok(errors.some((e) => e.includes(fragment)), `expected an error containing: ${fragment}\n${errors.join("\n")}`);
+  }
+});
+
+test("an artifact can override its step's extract, from Mahfouz 0.9.0", () => {
+  const sha = "a".repeat(64);
+  const step = (artifact) => ({
+    type: "download",
+    extract: "tar.gz",
+    to: "runtime",
+    artifacts: { "linux-x64": { url: "https://e.x/a.tar.gz", sha256: sha }, "windows-x64": { url: "https://e.x/a.zip", sha256: sha, ...artifact } },
+  });
+  const manifest = (artifact, mahfouz = ">=0.9.0") => minimal("e", { mahfouz, install: [step(artifact)] });
+
+  for (const extract of ["none", "tar.gz", "zip"]) assert.deepEqual(validate(manifest({ extract })), [], extract);
+  const cases = [
+    [manifest({ extract: "rar" }), 'artifacts["windows-x64"]: extract must be "none", "tar.gz" or "zip"'],
+    [manifest({ extract: "zip" }, ">=0.5.0"), 'artifacts["windows-x64"]: "extract" needs Mahfouz 0.9.0'],
+  ];
+  for (const [m, fragment] of cases) {
+    const errors = validate(m);
+    assert.ok(errors.some((e) => e.includes(fragment)), `expected an error containing: ${fragment}\n${errors.join("\n")}`);
+  }
+  // Without the override, older ranges stay fine.
+  assert.deepEqual(validate(manifest({}, ">=0.5.0")), []);
 });
 
 test("a changed plugin must raise its version", () => {
