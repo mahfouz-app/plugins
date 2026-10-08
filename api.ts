@@ -17,6 +17,7 @@ import type {
   ExportFormat,
   ExportRequest,
   ExportResult,
+  FencedBlock,
   NoteInfo,
   OverlaySpec,
   PluginCommand,
@@ -32,6 +33,7 @@ export type {
   ExportFormat,
   ExportRequest,
   ExportResult,
+  FencedBlock,
   NoteInfo,
   NoteRef,
   OverlaySpec,
@@ -55,6 +57,81 @@ export interface PluginInfo {
   version: string;
   /** URL of the plugin's installed directory, ending in `/`; resolve assets against it. */
   baseUrl: string;
+}
+
+/** The token kinds a `CodeLanguage` rule can produce; the host colors each
+ * with its own theme. */
+export type CodeToken =
+  | "keyword"
+  | "type"
+  | "string"
+  | "comment"
+  | "operator"
+  | "number"
+  | "variable"
+  | "punctuation";
+
+/** A declarative syntax for `createCodeEditor`. At each position the rules
+ * are tried in order and the first that matches there (non-empty) wins; text
+ * no rule matches is skipped a character at a time, unstyled. `regex` and
+ * `flags` are `RegExp` source and flags; a rule that doesn't compile is
+ * ignored. Rules see one line at a time. */
+export interface CodeLanguage {
+  /** What Toggle Comment puts before a line, e.g. `%%`. */
+  lineComment?: string;
+  rules: { regex: string; flags?: string; token: CodeToken }[];
+}
+
+export interface CodeEditorOptions {
+  value: string;
+  /** Called after every edit the user makes, with the whole text; not
+   * called by `setValue`. */
+  onChange?(value: string): void;
+  language?: CodeLanguage;
+  readOnly?: boolean;
+}
+
+/** An inline error or warning mark. `line` and `column` are 1-based;
+ * `endColumn` is exclusive. Without `column` the whole line is marked,
+ * without `endColumn` the rest of the line from `column`. Positions past the
+ * document are clamped to it. */
+export interface CodeDiagnostic {
+  line: number;
+  column?: number;
+  endColumn?: number;
+  message: string;
+}
+
+export interface CodeEditorHandle {
+  getValue(): string;
+  /** Replaces the whole text as one undoable step, without `onChange`. */
+  setValue(value: string): void;
+  setReadOnly(readOnly: boolean): void;
+  /** Replaces the editor's diagnostics; an empty list clears them. */
+  setDiagnostics(diagnostics: CodeDiagnostic[]): void;
+  focus(): void;
+  /** Removes the editor from its container. */
+  destroy(): void;
+}
+
+export interface PanZoomControls {
+  zoomIn(): void;
+  zoomOut(): void;
+  /** Scales and centres the content to fit the container. */
+  fit(): void;
+  /** Back to 100%, top-left. */
+  reset(): void;
+  /** Re-applies the current transform; call after replacing the content. */
+  refresh(): void;
+  /** Removes the drag and wheel handlers. */
+  dispose(): void;
+}
+
+export interface SaveFileOptions {
+  /** Suggested file name; only its last path component is used. */
+  defaultName: string;
+  filters?: { name: string; extensions: string[] }[];
+  data: Uint8Array;
 }
 
 export interface MahfouzPluginHost {
@@ -84,6 +161,23 @@ export interface MahfouzPluginHost {
       note: NoteRef,
       update: (attributes: Record<string, string>) => Record<string, string>
     ): Promise<void>;
+  };
+  /** Fenced code blocks in a note body, found as the editor finds them. */
+  markdown?: {
+    /** The blocks tagged `lang`, in document order. Index `i` is the block
+     * whose `EmbedContext.ordinal` is `i`: `~~~` and longer fences, indented
+     * fences and fences inside lists or blockquotes count, fences inside
+     * other code blocks don't. `from`/`to` are offsets into `body` covering
+     * the content lines, prefix included (empty for an empty block), `prefix`
+     * is what a list or blockquote puts before each line, and `source` is the content with
+     * that stripped and CRLF turned into LF. */
+    fencedBlocks(body: string, lang: string): FencedBlock[];
+    /** `body` with the `index`th `lang` block's content replaced by `source`
+     * (LF line endings, no prefix): the block's prefix is re-applied to its
+     * lines, the document's line ending is kept, and everything else stays
+     * byte-for-byte. Works on an empty or unclosed fence. Throws when there
+     * is no such block. */
+    replaceFencedBlock(body: string, lang: string, index: number, source: string): string;
   };
   slides: {
     /** The slides template that applies to `note` — its `slides_template`
@@ -124,6 +218,19 @@ export interface MahfouzPluginHost {
     openOverlay(spec: OverlaySpec): () => void;
     /** Opens an http(s) URL in the user's browser. */
     openExternal(url: string): Promise<void>;
+    /** Mounts a source editor in `container`, styled like the note
+     * editor, with line numbers, undo history, bracket matching and Tab to
+     * indent. Call `destroy` from your tab's or embed's `dispose`. */
+    createCodeEditor?(container: HTMLElement, options: CodeEditorOptions): CodeEditorHandle;
+    /** Drag-to-pan and wheel-zoom for `container`, plus buttons' actions.
+     * Unlike `attachPanZoom`, the target (the container's first child) is
+     * looked up on every call, so a preview that is re-rendered keeps
+     * working: call `refresh` after replacing the content. */
+    createPanZoom?(container: HTMLElement): PanZoomControls;
+    /** Asks where to save `data` in the native save dialog and writes it
+     * there. Resolves to the path written, or null when the user cancelled.
+     * Rejects where there is no save dialog (the web). */
+    saveFile?(options: SaveFileOptions): Promise<string | null>;
   };
 }
 

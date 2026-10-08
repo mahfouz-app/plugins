@@ -153,7 +153,10 @@ A plugin can open tabs with `host.registerTabType({ id, icon, render(container, 
 deleted. `render` fills the area below; the function it returns runs when the tab unmounts,
 including on a tab switch, so flush unsaved work there. `ctx` has `note`, your `arg`,
 `readBody()`, `writeBody(body)` (the app's normal save path) and `close()`. `openTab` saves
-the note's pending edits first, so `readBody()` sees them.
+the note's pending edits first, so `readBody()` sees them. `ctx.theme` is the app's current
+`"light"` or `"dark"`, and `ctx.onThemeChange(fn)` calls `fn` when it changes and returns an
+unsubscribe. A toolbar button with `menu: [{ label, onSelect }]` is a dropdown and needs no
+`onClick`.
 
 ### Commands, overlays, export formats, and other plugins
 
@@ -172,6 +175,17 @@ the note's pending edits first, so `readBody()` sees them.
   turned off — then `host.isEnabled()` is false, and it should only `provide`.
 - A plugin tab's `ctx.setToolbar(buttons)` puts buttons in the app's toolbar;
   `host.ui.openExternal(url)` opens an http(s) URL in the browser.
+- Optional members, absent in older apps, so feature-detect each (`if (host.ui.createCodeEditor)`)
+  and keep a fallback:
+  - `host.markdown.fencedBlocks(body, lang)` finds a note's fenced blocks the way the editor does;
+    `host.markdown.replaceFencedBlock(body, lang, index, source)` swaps one block's content.
+  - `host.ui.createCodeEditor(container, { value, onChange, language, readOnly })` mounts a source
+    editor and returns `{ getValue, setValue, setReadOnly, setDiagnostics, focus, destroy }`.
+  - `host.ui.createPanZoom(container)` gives `{ zoomIn, zoomOut, fit, reset, refresh, dispose }`;
+    unlike `attachPanZoom` it survives the content being re-rendered.
+  - `host.ui.saveFile({ defaultName, filters?, data })` opens the native save dialog and resolves to
+    the path written, or null if cancelled. It rejects on the web.
+  - `ctx.theme`, `ctx.onThemeChange` and a toolbar button's `menu` (see Tabs).
 - Plugin UI can use the app's `presentation-*` classes (`presentation-status`,
   `presentation-status-title`, `presentation-spinner`, `presentation-log`, `presentation-cta`,
   `presentation-frame`) to match the app's own panes.

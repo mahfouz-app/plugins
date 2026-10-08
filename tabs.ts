@@ -1,5 +1,8 @@
 // Vendored from mahfouz-app/app src/app/src/plugins/tabs.ts — keep in sync.
 
+/** The app's resolved light/dark theme. */
+export type ResolvedTheme = "light" | "dark";
+
 export interface NoteRef {
   vaultId: string;
   noteId: string;
@@ -9,7 +12,10 @@ export interface ToolbarButton {
   label: string;
   title?: string;
   disabled?: boolean;
-  onClick(): void;
+  /** Makes the button a dropdown: clicking it lists these items instead of
+   * calling `onClick`. */
+  menu?: { label: string; onSelect(): void }[];
+  onClick?(): void;
 }
 
 export interface PluginTabContext {
@@ -25,6 +31,12 @@ export interface PluginTabContext {
   /** Buttons shown in the app's toolbar, before Close. Call again to update
    * them (e.g. enable once loaded). */
   setToolbar(buttons: ToolbarButton[]): void;
+  /** The app's current light/dark theme. */
+  readonly theme: ResolvedTheme;
+  /** Calls `fn` when the theme changes (a setting change, or the OS preference
+   * while the setting is "system"). Returns an unsubscribe function; any
+   * subscription left over ends when the tab unmounts. */
+  onThemeChange(fn: (theme: ResolvedTheme) => void): () => void;
 }
 
 export interface PluginTabType {
