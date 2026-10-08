@@ -106,6 +106,21 @@ test("a render that never settles degrades to an error instead of hanging", asyn
   assert.match(c.error, /timed out/i);
 });
 
+test("a module load that never settles times out and frees the queue", async () => {
+  let loads = 0;
+  const mermaid = fakeMermaid();
+  const runtime = createMermaidRuntime(fakeHost(), {
+    loadModule: () => {
+      loads += 1;
+      return loads === 1 ? new Promise(() => {}) : Promise.resolve(mermaid);
+    },
+    timeoutMs: 20,
+  });
+  await assert.rejects(runtime.renderSvg("a", "light"), /timed out/i);
+  assert.equal(await runtime.renderSvg("b", "light"), "<svg>diagram</svg>");
+  assert.equal(loads, 2);
+});
+
 test("loads the module once, but retries after a failed load", async () => {
   let loads = 0;
   const mermaid = fakeMermaid();
@@ -319,8 +334,36 @@ test("parseErrorLocation: langium's line and column, read from the message", () 
   assert.deepEqual(parseErrorLocation(langiumError()), { line: 3, column: 10 });
 });
 
-test("parseErrorLocation: a bare 'line N' in the message", () => {
-  assert.deepEqual(parseErrorLocation(new Error("Lexer error on LINE 7")), { line: 7 });
+test("parseErrorLocation: jison's lexer error, 0-based hash.line", () => {
+  // Built from the lexer's parseError call in the vendored build (no
+  // reachable input triggered one).
+  const err = new Error("Lexical error on line 4. Unrecognized text.\n...A --> B\n-----^");
+  err.hash = { text: "", token: null, line: 3 };
+  assert.deepEqual(parseErrorLocation(err), { line: 4 });
+});
+
+test("parseErrorLocation: langium's lexer error", () => {
+  const err = new MermaidParseError(
+    "Parsing failed: Lexer error on line 3, column 3: unexpected character: ->^<- at offset: 16, skipped 3 characters. "
+  );
+  assert.deepEqual(parseErrorLocation(err), { line: 3, column: 3 });
+});
+
+test("parseErrorLocation: a semantic error quoting the user's text has no location", () => {
+  // sequenceDiagram\n  A->>B: hi\n  deactivate line 4 — captured: mermaid
+  // attaches a placeholder hash (line "1", loc all 1s) to its own errors.
+  const err = new Error("Trying to inactivate an inactive participant (line 4)");
+  err.hash = {
+    text: "->>-",
+    token: "->>-",
+    line: "1",
+    loc: { first_line: 1, last_line: 1, first_column: 1, last_column: 1 },
+    expected: ["'ACTIVE_PARTICIPANT'"],
+  };
+  assert.equal(parseErrorLocation(err), null);
+  assert.equal(parseErrorLocation(new Error("Task overdue: deadline 3")), null);
+  assert.equal(parseErrorLocation(new Error("Bad outline 2")), null);
+  assert.equal(parseErrorLocation(new Error("Not a Parse error on line 2")), null);
 });
 
 test("parseErrorLocation: an unknown diagram has no location", () => {

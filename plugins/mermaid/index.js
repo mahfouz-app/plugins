@@ -13,17 +13,25 @@ export function mermaidModuleUrl(baseUrl) {
   return `${baseUrl}${MODULE_PATH}`;
 }
 
+// How mermaid's parsers word a syntax error, at the start of the message:
+// jison's parser ("Parse error on line 3:") and lexer ("Lexical error on
+// line 3."), and the langium diagrams' "Parsing failed: Parse error on line
+// 3, column 10:" / "Lexer error on line 3, column 3:".
+const SYNTAX_ERROR_RE = /^(?:Parsing failed:\s*)?(?:Parse|Lexical|Lexer) error on line (\d+)\b(?:, column (\d+)\b)?/;
+
 /**
- * Where a mermaid parse error points, as 1-based `{ line, column?, endColumn? }`
- * (`endColumn` exclusive), or null when it doesn't say. Flowchart-style
- * diagrams use jison parsers, whose error carries a `hash` (`loc` columns are
- * 0-based, `line` is 0-based); the langium ones (pie and others) only say it
- * in the message, with chevrotain's 1-based line and column.
+ * Where a mermaid syntax error points, as 1-based `{ line, column?, endColumn? }`
+ * (`endColumn` exclusive), or null for any other error. Only a message
+ * worded like a parser's counts: mermaid's own semantic errors quote the
+ * user's text and carry a placeholder `hash`, so neither can be trusted.
+ * jison errors (flowchart and others) carry a `hash` (`loc` columns and
+ * `line` 0-based); langium ones (pie and others) only say it in the
+ * message, with chevrotain's 1-based line and column.
  */
 export function parseErrorLocation(err) {
   if (!(err instanceof Error)) return null;
-  // Its message quotes the user's text, which may well say "line 2".
-  if (err.name === "UnknownDiagramError") return null;
+  const match = SYNTAX_ERROR_RE.exec(err.message);
+  if (!match) return null;
   const loc = err.hash?.loc;
   if (Number.isInteger(loc?.first_line)) {
     const at = { line: loc.first_line };
@@ -36,8 +44,6 @@ export function parseErrorLocation(err) {
     return at;
   }
   if (Number.isInteger(err.hash?.line)) return { line: err.hash.line + 1 };
-  const match = /line (\d+)(?:, column (\d+))?/i.exec(err.message);
-  if (!match) return null;
   return match[2] ? { line: Number(match[1]), column: Number(match[2]) } : { line: Number(match[1]) };
 }
 
@@ -65,11 +71,13 @@ export function createMermaidRuntime(host, options = {}) {
   function load() {
     if (cached) return Promise.resolve(cached);
     if (!pending) {
-      pending = loadModule().then((mod) => {
+      // Under the timeout too: an import that never settles would otherwise
+      // hold the render queue for good.
+      pending = withTimeout(loadModule(), "Loading Mermaid").then((mod) => {
         cached = mod;
         return mod;
       });
-      // A failed load isn't cached, so the next render retries.
+      // A failed or timed-out load isn't cached, so the next render retries.
       pending.catch(() => {
         pending = null;
       });
@@ -77,10 +85,10 @@ export function createMermaidRuntime(host, options = {}) {
     return pending;
   }
 
-  function withTimeout(promise) {
+  function withTimeout(promise, what = "Mermaid render") {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new Error(`Mermaid render timed out after ${timeoutMs}ms`)),
+        () => reject(new Error(`${what} timed out after ${timeoutMs}ms`)),
         timeoutMs
       );
       promise.then(
