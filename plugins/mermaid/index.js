@@ -7,6 +7,9 @@
 
 const MODULE_PATH = "vendor/package/dist/mermaid.esm.min.mjs";
 const RENDER_TIMEOUT_MS = 8000;
+// Collapses a burst of edits in the tab into one note save: the same
+// cadence as the app's own editor saves.
+const AUTOSAVE_DEBOUNCE_MS = 400;
 
 /** Where the vendored mermaid build is served, under the plugin's own URL. */
 export function mermaidModuleUrl(baseUrl) {
@@ -182,6 +185,127 @@ export function createMermaidRenderer(host, options = {}) {
       panZoomUndo.get(container)?.();
       panZoomUndo.delete(container);
     },
+  };
+}
+
+// ---- editing a block in a tab --------------------------------------------
+
+const lf = (text) => text.replace(/\r\n/g, "\n");
+
+/**
+ * The tab's link to its ```mermaid block: the `index`th one in the note
+ * (0-based, document order). DOM-free; the tab passes `ctx.readBody`,
+ * `ctx.writeBody` and `host.markdown`, and the UI hooks:
+ * - `onConflict()`: the block changed outside the editor. Autosave has
+ *   stopped until `reload()`; the editor should go read-only.
+ * - `onSaved()`: a save reached the note.
+ * - `onError(message)`: a save failed; the next save retries it.
+ *
+ * Every save checks that the block still holds what the session last
+ * wrote (or loaded) before replacing it. A block that moved (another one
+ * inserted above) is followed when exactly one block holds that text;
+ * otherwise it's a conflict, never a guess. Saves run one at a time, so a
+ * save never reads the body while an earlier write is still landing.
+ * An external edit the app hasn't synced into the body yet can still be
+ * overwritten, as in the main editor.
+ */
+export function createEditorSession({
+  index,
+  markdown,
+  readBody,
+  writeBody,
+  onConflict,
+  onSaved = () => {},
+  onError,
+  debounceMs = AUTOSAVE_DEBOUNCE_MS,
+}) {
+  let at = index;
+  // The block's text as the note holds it, as far as the session knows.
+  let lastWritten = null;
+  // The editor's text, saved or not.
+  let current = "";
+  // Until a load, and after a conflict, nothing is saved.
+  let stopped = true;
+  let timer = null;
+  let chain = Promise.resolve();
+
+  const enqueue = (job) => {
+    const result = chain.then(job);
+    chain = result.catch(() => {});
+    return result;
+  };
+
+  const cancelTimer = () => {
+    clearTimeout(timer);
+    timer = null;
+  };
+
+  const saveNow = async () => {
+    if (stopped) return;
+    const source = current;
+    try {
+      const body = await readBody();
+      const blocks = markdown.fencedBlocks(body, "mermaid");
+      if (blocks[at] === undefined || lf(blocks[at].source) !== lastWritten) {
+        const moved = blocks.flatMap((b, i) => (lf(b.source) === lastWritten ? [i] : []));
+        if (moved.length !== 1) {
+          stopped = true;
+          cancelTimer();
+          onConflict();
+          return;
+        }
+        at = moved[0];
+      }
+      if (source === lastWritten) return;
+      await writeBody(markdown.replaceFencedBlock(body, "mermaid", at, source));
+      lastWritten = source;
+      onSaved();
+    } catch (err) {
+      onError(`Diagram save failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  return {
+    /**
+     * Reads the block into the session and returns its source. Also what
+     * "Reload from note" runs: it drops unsaved edits and resumes autosave.
+     * Rejects, leaving autosave stopped, when the note has no such block.
+     */
+    load() {
+      cancelTimer();
+      return enqueue(async () => {
+        const block = markdown.fencedBlocks(await readBody(), "mermaid")[at];
+        if (!block) throw new Error(`No mermaid block at index ${at}`);
+        lastWritten = current = lf(block.source);
+        stopped = false;
+        return current;
+      });
+    },
+
+    /** The editor's text changed; saves it after the debounce. */
+    change(source) {
+      current = lf(source);
+      if (stopped) return;
+      cancelTimer();
+      timer = setTimeout(() => {
+        timer = null;
+        void enqueue(saveNow);
+      }, debounceMs);
+    },
+
+    /** Saves any unsaved edit now (unmount, Close, tab switch); resolves
+     * once every save so far has finished. */
+    flush() {
+      cancelTimer();
+      if (!stopped && current !== lastWritten) void enqueue(saveNow);
+      return chain;
+    },
+
+    /** The editor's text, saved or not ("Copy my version"). */
+    source: () => current,
+
+    /** The block's index now, after following any move. */
+    index: () => at,
   };
 }
 

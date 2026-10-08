@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   activate,
+  createEditorSession,
   createMermaidRenderer,
   createMermaidRuntime,
   mermaidModuleUrl,
@@ -379,4 +380,264 @@ test("parseErrorLocation: anything else has no location", () => {
   assert.equal(parseErrorLocation("Parse error on line 2"), null);
   assert.equal(parseErrorLocation(null), null);
   assert.equal(parseErrorLocation(undefined), null);
+});
+
+// ---- editor session ------------------------------------------------------
+
+// A stand-in for host.markdown: a plain ```mermaid fence splitter. Like the
+// host, `source` has CRLF turned into LF, and a replace keeps the body's
+// line ending and throws on a missing block.
+const FENCE_RE = /^```mermaid\r?\n([\s\S]*?)^```/gm;
+
+const fakeMarkdown = {
+  fencedBlocks(body, lang) {
+    assert.equal(lang, "mermaid");
+    return [...body.matchAll(FENCE_RE)].map((m) => ({
+      from: m.index,
+      to: m.index + m[0].length,
+      prefix: "",
+      source: m[1].replace(/\r\n/g, "\n").replace(/\n$/, ""),
+    }));
+  },
+  replaceFencedBlock(body, lang, index, source) {
+    assert.equal(lang, "mermaid");
+    const m = [...body.matchAll(FENCE_RE)][index];
+    if (!m) throw new Error(`no mermaid block at index ${index}`);
+    const eol = body.includes("\r\n") ? "\r\n" : "\n";
+    const start = m.index + m[0].length - m[1].length - 3;
+    const content = source ? source.split("\n").join(eol) + eol : "";
+    return body.slice(0, start) + content + body.slice(start + m[1].length);
+  },
+};
+
+const fence = (src) => "```mermaid\n" + src + "\n```\n";
+const twoDiagrams = "# Note\n\n" + fence("graph TD\n  A-->B") + "\ntext\n\n" + fence("pie\n  \"x\": 1");
+
+function editor(overrides = {}) {
+  const log = { written: [], errors: [], conflicts: 0, saved: 0 };
+  const note = { body: overrides.body ?? twoDiagrams };
+  const s = createEditorSession({
+    index: overrides.index ?? 1,
+    markdown: fakeMarkdown,
+    readBody: async () => note.body,
+    writeBody:
+      overrides.writeBody ??
+      (async (next) => {
+        note.body = next;
+        log.written.push(next);
+      }),
+    onConflict: () => (log.conflicts += 1),
+    onSaved: () => (log.saved += 1),
+    onError: (m) => log.errors.push(m),
+    debounceMs: 10,
+  });
+  return { s, log, note };
+}
+
+const sourceAt = (body, i) => fakeMarkdown.fencedBlocks(body, "mermaid")[i]?.source;
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("session: load returns the addressed block's source", async () => {
+  const { s } = editor();
+  assert.equal(await s.load(), 'pie\n  "x": 1');
+  assert.equal(s.source(), 'pie\n  "x": 1');
+  assert.equal(s.index(), 1);
+});
+
+test("session: load rejects when the note has no such block", async () => {
+  const { s, log } = editor({ index: 5 });
+  await assert.rejects(s.load(), /no mermaid block at index 5/i);
+  s.change("pie");
+  await s.flush();
+  assert.equal(log.written.length, 0);
+});
+
+test("session: a burst of edits becomes one save of the last state", async () => {
+  const { s, log, note } = editor();
+  await s.load();
+  s.change("pie\n  a");
+  s.change("pie\n  ab");
+  s.change("pie\n  abc");
+  await wait(5);
+  assert.equal(log.written.length, 0);
+  await wait(30);
+  assert.equal(log.written.length, 1);
+  assert.equal(sourceAt(note.body, 1), "pie\n  abc");
+  assert.equal(sourceAt(note.body, 0), "graph TD\n  A-->B");
+  assert.equal(log.saved, 1);
+});
+
+test("session: flush saves a pending edit right away, once", async () => {
+  const { s, log, note } = editor();
+  await s.load();
+  s.change("pie\n  now");
+  await s.flush();
+  assert.equal(log.written.length, 1);
+  assert.equal(sourceAt(note.body, 1), "pie\n  now");
+  await wait(30);
+  assert.equal(log.written.length, 1);
+});
+
+test("session: an edit back to the saved text writes nothing", async () => {
+  const { s, log } = editor();
+  const original = await s.load();
+  s.change("pie\n  typo");
+  s.change(original);
+  await s.flush();
+  assert.equal(log.written.length, 0);
+});
+
+test("session: overlapping saves run one at a time, with no false conflict", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const writes = [];
+  const { s, log, note } = editor({
+    writeBody: async (next) => {
+      writes.push(next);
+      if (writes.length === 1) await gate;
+      note.body = next;
+    },
+  });
+  await s.load();
+  s.change("pie\n  first");
+  const first = s.flush();
+  await wait(5);
+  assert.equal(writes.length, 1);
+  // A second save while the first write is still open waits for it, rather
+  // than reading a body whose block no longer matches what it expects.
+  s.change("pie\n  second");
+  const second = s.flush();
+  await wait(5);
+  assert.equal(writes.length, 1);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(writes.length, 2);
+  assert.equal(sourceAt(note.body, 1), "pie\n  second");
+  assert.equal(log.conflicts, 0);
+  assert.deepEqual(log.errors, []);
+});
+
+test("session: a failed write is reported and doesn't advance what was last written", async () => {
+  let fail = true;
+  const { s, log, note } = editor({
+    writeBody: async (next) => {
+      if (fail) throw new Error("disk full");
+      note.body = next;
+    },
+  });
+  await s.load();
+  s.change("pie\n  lost?");
+  await s.flush();
+  assert.deepEqual(log.errors, ["Diagram save failed: disk full"]);
+  assert.equal(log.saved, 0);
+  // The block still holds the original text, which is what the session
+  // expects there, so the retry is no conflict, and flush retries even
+  // with no new edit.
+  fail = false;
+  await s.flush();
+  assert.equal(log.conflicts, 0);
+  assert.equal(sourceAt(note.body, 1), "pie\n  lost?");
+});
+
+test("session: a block inserted above is adopted silently", async () => {
+  const { s, log, note } = editor();
+  await s.load();
+  note.body = fence("flowchart LR\n  X-->Y") + note.body;
+  s.change("pie\n  moved");
+  await s.flush();
+  assert.equal(log.conflicts, 0);
+  assert.equal(s.index(), 2);
+  assert.equal(sourceAt(note.body, 0), "flowchart LR\n  X-->Y");
+  assert.equal(sourceAt(note.body, 1), "graph TD\n  A-->B");
+  assert.equal(sourceAt(note.body, 2), "pie\n  moved");
+  // And the next save goes straight to the adopted block.
+  s.change("pie\n  again");
+  await s.flush();
+  assert.equal(sourceAt(note.body, 2), "pie\n  again");
+  assert.equal(log.conflicts, 0);
+});
+
+test("session: a block changed outside the editor raises the conflict and stops autosave", async () => {
+  const { s, log, note } = editor();
+  await s.load();
+  note.body = note.body.replace('"x": 1', '"x": 2');
+  const outside = note.body;
+  s.change("pie\n  mine");
+  await s.flush();
+  assert.equal(log.conflicts, 1);
+  assert.equal(log.written.length, 0);
+  assert.equal(note.body, outside);
+  // Later edits neither save nor raise it again; the user's text is kept.
+  s.change("pie\n  mine, more");
+  await wait(30);
+  await s.flush();
+  assert.equal(log.written.length, 0);
+  assert.equal(log.conflicts, 1);
+  assert.equal(s.source(), "pie\n  mine, more");
+});
+
+test("session: a deleted block raises the conflict", async () => {
+  const { s, log, note } = editor();
+  await s.load();
+  note.body = note.body.slice(0, note.body.lastIndexOf("```mermaid"));
+  s.change("pie\n  mine");
+  await s.flush();
+  assert.equal(log.conflicts, 1);
+  assert.equal(log.written.length, 0);
+});
+
+test("session: two blocks matching the moved text are a conflict, not a guess", async () => {
+  const { s, log, note } = editor({ index: 0 });
+  await s.load();
+  // A new block above moves ours to index 1, and a copy of it lands at 3.
+  note.body = fence("flowchart LR") + note.body + fence("graph TD\n  A-->B");
+  s.change("graph TD\n  A-->C");
+  await s.flush();
+  assert.equal(log.conflicts, 1);
+  assert.equal(log.written.length, 0);
+});
+
+test("session: loading again (Reload from note) re-reads the block and resumes autosave", async () => {
+  const { s, log, note } = editor();
+  await s.load();
+  note.body = note.body.replace('"x": 1', '"x": 2');
+  s.change("pie\n  mine");
+  await s.flush();
+  assert.equal(log.conflicts, 1);
+  assert.equal(await s.load(), 'pie\n  "x": 2');
+  assert.equal(s.source(), 'pie\n  "x": 2');
+  s.change("pie\n  after reload");
+  await wait(30);
+  assert.equal(log.written.length, 1);
+  assert.equal(sourceAt(note.body, 1), "pie\n  after reload");
+  assert.equal(log.conflicts, 1);
+});
+
+test("session: loading again drops a pending edit", async () => {
+  const { s, log } = editor();
+  await s.load();
+  s.change("pie\n  pending");
+  await s.load();
+  await wait(30);
+  await s.flush();
+  assert.equal(log.written.length, 0);
+});
+
+test("session: a CRLF body saves with no false conflict and keeps CRLF", async () => {
+  const crlf = twoDiagrams.replace(/\n/g, "\r\n");
+  const { s, log, note } = editor({ body: crlf });
+  assert.equal(await s.load(), 'pie\n  "x": 1');
+  // Text from the editor with CRLF in it (a paste) counts as the same text.
+  s.change('pie\r\n  "x": 1');
+  await s.flush();
+  assert.equal(log.written.length, 0);
+  s.change("pie\r\n  y");
+  await s.flush();
+  assert.equal(log.conflicts, 0);
+  assert.equal(sourceAt(note.body, 1), "pie\n  y");
+  assert.ok(!/[^\r]\n/.test(note.body), "every newline stays CRLF");
+  s.change("pie\n  z");
+  await s.flush();
+  assert.equal(log.conflicts, 0);
+  assert.equal(sourceAt(note.body, 1), "pie\n  z");
 });
