@@ -12,7 +12,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 
 | Plugin | What it does | Installs |
 |---|---|---|
-| `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
+| `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams, and edits one in a split editor tab | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
 | `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, and edits one in a draw.io tab | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
 | `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Node.js 24.21.0 (~50 MB), then Slidev, its default theme and playwright-chromium with `npm ci` from the committed lockfile. No Node.js needed. macOS, Linux and Windows (x64 and Apple Silicon/arm64) |
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |

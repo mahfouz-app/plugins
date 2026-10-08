@@ -176,7 +176,9 @@ export interface MahfouzPluginHost {
      * (LF line endings, no prefix): the block's prefix is re-applied to its
      * lines, the document's line ending is kept, and everything else stays
      * byte-for-byte. Works on an empty or unclosed fence. Throws when there
-     * is no such block. */
+     * is no such block, and when a line of `source` would close the block's
+     * fence (the same fence character, at least as many as the opening
+     * fence, at most three spaces of indent, only whitespace after). */
     replaceFencedBlock(body: string, lang: string, index: number, source: string): string;
   };
   slides: {
