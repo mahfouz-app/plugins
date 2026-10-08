@@ -559,6 +559,24 @@ export function storeSplit(value) {
   }
 }
 
+/**
+ * The buttons on the banner a conflict or a failed load shows, in order.
+ * Copy my version keeps the user's edits, so it comes first and is the
+ * primary action; Reload from note discards them. With no editor yet (the
+ * first load failed) there's nothing to copy.
+ */
+export function bannerActions({ hasEditor }) {
+  const reload = { id: "reload", label: "Reload from note", primary: false };
+  return hasEditor ? [{ id: "copy", label: "Copy my version", primary: true }, reload] : [reload];
+}
+
+/** Whether Export and Copy SVG may act: the preview shows a successful
+ * render of the source as it is now, with no newer render debounced or
+ * running, so all three act on the same text. */
+export function canExport({ svg, current, pending }) {
+  return svg !== null && current && !pending;
+}
+
 const errorMessage = (err) => (err instanceof Error ? err.message : String(err));
 
 const STYLE = `
@@ -569,6 +587,10 @@ const STYLE = `
 .mahfouz-mermaid-editor .mme-banner-text { flex: 1; }
 .mahfouz-mermaid-editor .mme-banner button { font: inherit; padding: 2px 10px; border-radius: 4px; cursor: pointer;
   border: 1px solid var(--cm-border-strong); background: var(--cm-bg); color: var(--cm-text); }
+/* Inverted text colours, not --cm-accent: white on the accent is under WCAG AA (App.css). */
+.mahfouz-mermaid-editor .mme-banner button.mme-primary { background: var(--cm-text); border-color: var(--cm-text);
+  color: var(--cm-bg); }
+.mahfouz-mermaid-editor .mme-banner button:disabled { opacity: 0.5; cursor: default; }
 .mahfouz-mermaid-editor .mme-main { flex: 1; display: flex; min-height: 0; }
 .mahfouz-mermaid-editor .mme-source { min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
 .mahfouz-mermaid-editor .mme-source > * { flex: 1; min-height: 0; }
@@ -583,10 +605,13 @@ const STYLE = `
 .mahfouz-mermaid-editor .mme-canvas.mme-stale { opacity: 0.35; }
 .mahfouz-mermaid-editor .mme-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   padding: 24px; text-align: center; color: var(--cm-muted); pointer-events: none; }
-.mahfouz-mermaid-editor .mme-hint[hidden], .mahfouz-mermaid-editor .mme-error:empty { display: none; }
+.mahfouz-mermaid-editor .mme-hint[hidden] { display: none; }
 .mahfouz-mermaid-editor .mme-error { max-height: 30%; overflow: auto; margin: 0; padding: 8px 12px; white-space: pre-wrap;
   font-family: var(--font-stack-monospace); font-size: 0.85em; color: var(--callout-caution);
   border-top: 1px solid var(--cm-border); background: var(--cm-bg); }
+/* Collapsed, not display:none, while there's no error: the live region has
+   to stay in the accessibility tree for its first message to be announced. */
+.mahfouz-mermaid-editor .mme-error:empty { padding: 0; border-top: 0; }
 .mahfouz-mermaid-editor .mme-footer { padding: 2px 12px; font-size: 0.8em; color: var(--cm-muted);
   border-top: 1px solid var(--cm-border); text-align: right; }
 `;
@@ -670,8 +695,8 @@ function createEditorTab(host, runtime) {
         "This diagram is empty. Choose one from Samples in the toolbar, or type Mermaid on the left."
       );
       hint.hidden = true;
-      // Always in the tree, so a screen reader hears each new error; empty
-      // (and so not shown) while the diagram renders.
+      // Rendered even while empty (collapsed by CSS), so the live region is
+      // in the accessibility tree before its first error arrives.
       const errorStrip = el("pre", "mme-error");
       errorStrip.setAttribute("aria-live", "polite");
       preview.append(viewport, hint, errorStrip, el("div", "mme-footer", `mermaid v${MERMAID_VERSION}`));
@@ -688,6 +713,10 @@ function createEditorTab(host, runtime) {
       let lastSvg = null;
       let current = false;
       let renderTimer = null;
+      // A render is debounced or running whose result isn't in yet.
+      let pending = false;
+      // A load is in flight; Reload waits for it.
+      let loading = false;
       let renderSeq = 0;
 
       // ---- split ----
@@ -757,10 +786,12 @@ function createEditorTab(host, runtime) {
         clearTimeout(renderTimer);
         renderTimer = null;
         if (!editor) return;
+        pending = true;
         const text = editor.getValue();
         renderSeq += 1;
         const seq = renderSeq;
         if (!text.trim()) {
+          pending = false;
           canvas.replaceChildren();
           canvas.classList.remove("mme-stale");
           hint.hidden = false;
@@ -777,6 +808,7 @@ function createEditorTab(host, runtime) {
           svg = await runtime.renderSvg(text, ctx.theme);
         } catch (err) {
           if (disposed || seq !== renderSeq) return;
+          pending = false;
           const message = errorMessage(err);
           // The last good diagram stays, dimmed, above the error.
           canvas.classList.add("mme-stale");
@@ -788,6 +820,7 @@ function createEditorTab(host, runtime) {
           return;
         }
         if (disposed || seq !== renderSeq) return;
+        pending = false;
         canvas.innerHTML = svg;
         canvas.classList.remove("mme-stale");
         // At its natural size, so pan/zoom has something to measure.
@@ -809,17 +842,27 @@ function createEditorTab(host, runtime) {
       const scheduleRender = () => {
         clearTimeout(renderTimer);
         renderTimer = setTimeout(() => void renderNow(), PREVIEW_DEBOUNCE_MS);
+        // Export and Copy wait for this render (once per burst of edits).
+        if (!pending) {
+          pending = true;
+          updateToolbar();
+        }
       };
       const offTheme = ctx.onThemeChange(() => void renderNow());
 
       // ---- banner ----
+      const runAction = {
+        copy: () => void copyText(session.source(), "Your version is copied."),
+        reload: () => void load(),
+      };
       const showBanner = (text, actions = []) => {
         bannerText.textContent = text;
         banner.replaceChildren(bannerText);
-        for (const [label, run] of actions) {
-          const button = el("button", "", label);
+        for (const { id, label, primary } of actions) {
+          const button = el("button", primary ? "mme-primary" : "", label);
           button.type = "button";
-          button.addEventListener("click", run);
+          button.dataset.action = id;
+          button.addEventListener("click", runAction[id]);
           banner.appendChild(button);
         }
         banner.hidden = false;
@@ -836,10 +879,10 @@ function createEditorTab(host, runtime) {
           editable = false;
           editor?.setReadOnly(true);
           updateToolbar();
-          showBanner("This diagram changed outside the editor, so your edits here aren't being saved.", [
-            ["Reload from note", () => void load()],
-            ["Copy my version", () => void copyText(session.source(), "Your version is copied.")],
-          ]);
+          showBanner(
+            "This diagram changed outside the editor, so your edits here aren't being saved.",
+            bannerActions({ hasEditor: editor !== null })
+          );
         },
         onSaved() {
           if (editable) hideBanner();
@@ -851,6 +894,11 @@ function createEditorTab(host, runtime) {
       });
 
       const load = async () => {
+        // One load at a time: a second Reload click while one runs is ignored.
+        if (loading) return;
+        loading = true;
+        const reloadButton = banner.querySelector('[data-action="reload"]');
+        if (reloadButton) reloadButton.disabled = true;
         let text;
         try {
           text = await session.load();
@@ -860,8 +908,10 @@ function createEditorTab(host, runtime) {
           editor?.setReadOnly(true);
           status.textContent = "The diagram couldn't be read.";
           updateToolbar();
-          showBanner(`Couldn't read the diagram: ${errorMessage(err)}`, [["Reload from note", () => void load()]]);
+          showBanner(`Couldn't read the diagram: ${errorMessage(err)}`, bannerActions({ hasEditor: editor !== null }));
           return;
+        } finally {
+          loading = false;
         }
         if (disposed) return;
         if (editor) {
@@ -938,7 +988,7 @@ function createEditorTab(host, runtime) {
 
       const updateToolbar = () => {
         if (disposed) return;
-        const ready = current && lastSvg !== null;
+        const ready = canExport({ svg: lastSvg, current, pending });
         const buttons = [
           {
             label: "Samples",

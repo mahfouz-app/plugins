@@ -5,6 +5,8 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import {
   activate,
+  bannerActions,
+  canExport,
   createEditorSession,
   createMermaidRenderer,
   createMermaidRuntime,
@@ -1014,4 +1016,24 @@ test("editor tab: a freshly inserted block opens at its ordinal", () => {
   const note = { vaultId: "v", noteId: "n" };
   host.embeds.get("mermaid").onInsertedAt(view, before.length, note);
   assert.deepEqual(host.opened, [["editor", note, "1"]]);
+});
+
+test("banner: Copy my version comes first and is primary; Reload, which discards edits, second", () => {
+  assert.deepEqual(bannerActions({ hasEditor: true }), [
+    { id: "copy", label: "Copy my version", primary: true },
+    { id: "reload", label: "Reload from note", primary: false },
+  ]);
+  // A load that failed before there was an editor has nothing to copy.
+  assert.deepEqual(bannerActions({ hasEditor: false }), [
+    { id: "reload", label: "Reload from note", primary: false },
+  ]);
+});
+
+test("canExport: only a successful render of the current source, with none pending", () => {
+  assert.equal(canExport({ svg: "<svg/>", current: true, pending: false }), true);
+  // An edit's render is still debounced or running: the SVG is the old text's.
+  assert.equal(canExport({ svg: "<svg/>", current: true, pending: true }), false);
+  // The source has an error or is empty.
+  assert.equal(canExport({ svg: "<svg/>", current: false, pending: false }), false);
+  assert.equal(canExport({ svg: null, current: false, pending: false }), false);
 });
