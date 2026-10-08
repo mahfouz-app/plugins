@@ -80,7 +80,15 @@ export function createMermaidRenderer(host, options = {}) {
         return;
       }
       if (initializedTheme !== theme) {
-        mermaid.initialize({ startOnLoad: false, theme: theme === "dark" ? "dark" : "default" });
+        // suppressErrorRendering: on a syntax error mermaid otherwise draws
+        // its own error diagram into a temporary element on document.body
+        // and leaves it there, outside the embed. The thrown error is shown
+        // in the embed's card instead.
+        mermaid.initialize({
+          startOnLoad: false,
+          suppressErrorRendering: true,
+          theme: theme === "dark" ? "dark" : "default",
+        });
         initializedTheme = theme;
       }
       try {
