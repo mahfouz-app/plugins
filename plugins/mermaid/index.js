@@ -10,6 +10,9 @@ const RENDER_TIMEOUT_MS = 8000;
 // Collapses a burst of edits in the tab into one note save: the same
 // cadence as the app's own editor saves.
 const AUTOSAVE_DEBOUNCE_MS = 400;
+/** The vendored mermaid's version (the build doesn't expose it); plugin.json
+ * pins the same one. */
+export const MERMAID_VERSION = "12.0.0";
 
 /** Where the vendored mermaid build is served, under the plugin's own URL. */
 export function mermaidModuleUrl(baseUrl) {
@@ -333,7 +336,714 @@ export function createEditorSession({
   };
 }
 
+// ---- the editor tab: source on the left, live preview on the right -------
+
+const PREVIEW_DEBOUNCE_MS = 250;
+const SPLIT_KEY = "mahfouz.mermaid.split";
+const SPLIT_DEFAULT = 40;
+const SPLIT_MIN = 15;
+const SPLIT_MAX = 85;
+const SPLIT_STEP = 2;
+const USE_SVG_EXPORT = "Use Export SVG for this diagram";
+// Rendered to a PNG, an HTML label (a <foreignObject>) taints the canvas, so
+// the export asks mermaid for SVG text labels instead. As a directive in the
+// source, it applies to that one render: the shared instance's config,
+// which the embeds render with, is never re-initialised for it.
+const PNG_INIT = '%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false}}}%%';
+
+const DIAGRAM_TYPES = [
+  "flowchart-elk", "flowchart", "graph", "sequenceDiagram", "classDiagram-v2", "classDiagram",
+  "stateDiagram-v2", "stateDiagram", "erDiagram", "journey", "gantt", "pie", "quadrantChart",
+  "requirementDiagram", "gitGraph", "C4Context", "C4Container", "C4Component", "C4Dynamic", "C4Deployment",
+  "mindmap", "timeline", "zenuml", "sankey-beta", "sankey", "xychart-beta", "xychart", "block-beta", "block",
+  "packet-beta", "packet", "kanban", "architecture-beta", "architecture", "radar-beta", "treemap-beta",
+  "treemap",
+];
+
+const KEYWORDS = [
+  "subgraph", "end", "direction", "participant", "actor", "loop", "alt", "else", "opt", "par", "and",
+  "critical", "break", "rect", "box", "note", "over", "left of", "right of", "activate", "deactivate",
+  "autonumber", "create", "destroy", "class", "classDef", "style", "linkStyle", "click", "state", "section",
+  "title", "dateFormat", "axisFormat", "tickInterval", "excludes", "includes", "todayMarker", "showData",
+  "accTitle", "accDescr", "as", "TB", "TD", "BT", "RL", "LR",
+];
+
+/**
+ * The source pane's syntax, as `createCodeEditor` rules. They see one line
+ * at a time and keep no state, so "the first line" is approximated as a
+ * diagram type at the start of a line, and a `---` config block only has
+ * its fences marked.
+ */
+export const MERMAID_LANGUAGE = {
+  lineComment: "%%",
+  rules: [
+    // Comments, and %%{init}%% directives.
+    { regex: "%%.*", token: "comment" },
+    { regex: "^---\\s*$", token: "punctuation" },
+    { regex: `^\\s*(?:${DIAGRAM_TYPES.join("|")})(?![\\w-])`, token: "type" },
+    // Arrows of every diagram: flowchart (-->, -.->, ==>, ~~~, --o, --x),
+    // class (<|--, *--, ..>), ER cardinalities (||--o{), then the one-dash
+    // sequence arrows (->>, -x, -)), which need a head so a hyphenated
+    // name's dash isn't one (a name with "-x" in it is marked anyway).
+    {
+      regex:
+        "(?:<\\||\\*|[|}][|o]|<<?)?(?:-\\.+-|-{2,}|={2,}|\\.{2,}|~{3,})(?:>>|\\|>|[|o][|{]|[>)]|[ox](?!\\w))?" +
+        "|<{0,2}-(?:>>|[>)x])",
+      token: "operator",
+    },
+    { regex: '"[^"]*"?', token: "string" },
+    // Edge labels: -->|label|.
+    { regex: "\\|[^|]*\\|", token: "string" },
+    { regex: `\\b(?:${KEYWORDS.join("|")})\\b`, token: "keyword" },
+    { regex: "\\b\\d+(?:\\.\\d+)?\\b", token: "number" },
+  ],
+};
+
+/** The Samples menu, in order; the first line of each is its diagram type. */
+export const MERMAID_SAMPLES = [
+  {
+    label: "Flowchart",
+    source: `flowchart TD
+    Start([Idea]) --> Draft[Write a draft]
+    Draft --> Review{Ready?}
+    Review -->|Yes| Publish[Publish]
+    Review -->|No| Draft`,
+  },
+  {
+    label: "Sequence",
+    source: `sequenceDiagram
+    participant A as Alice
+    participant B as Bob
+    A->>B: Can we meet tomorrow?
+    alt free
+        B-->>A: Yes, at ten
+    else busy
+        B-->>A: How about Friday?
+    end`,
+  },
+  {
+    label: "Class",
+    source: `classDiagram
+    class Note {
+        +String title
+        +String body
+        +save()
+    }
+    class Attachment {
+        +String path
+    }
+    Note "1" --> "*" Attachment : links`,
+  },
+  {
+    label: "State",
+    source: `stateDiagram-v2
+    [*] --> Draft
+    Draft --> Review : submit
+    Review --> Draft : changes requested
+    Review --> Published : approve
+    Published --> [*]`,
+  },
+  {
+    label: "ER",
+    source: `erDiagram
+    AUTHOR ||--o{ NOTE : writes
+    NOTE ||--o{ TAG : has
+    AUTHOR {
+        string name
+        string email
+    }
+    NOTE {
+        string title
+        date created
+    }`,
+  },
+  {
+    label: "Gantt",
+    source: `gantt
+    title Project plan
+    dateFormat YYYY-MM-DD
+    section Design
+        Research       :a1, 2026-01-05, 7d
+        Mockups        :after a1, 5d
+    section Build
+        Implementation :b1, 2026-01-19, 14d
+        Testing        :after b1, 5d`,
+  },
+  {
+    label: "Pie",
+    source: `pie title Time spent
+    "Writing" : 45
+    "Reading" : 30
+    "Meetings" : 25`,
+  },
+  {
+    label: "Mindmap",
+    source: `mindmap
+  root((Notes))
+    Projects
+      Website
+      App
+    Areas
+      Health
+      Finance
+    Resources`,
+  },
+  {
+    label: "Timeline",
+    source: `timeline
+    title Release history
+    2024 : First prototype
+    2025 : Public beta : Plugins
+    2026 : Version 1.0`,
+  },
+];
+
+/** `source` with the PNG export's directive added: first, or after a
+ * leading `---` config block, which mermaid only reads at the very start. */
+export function pngExportSource(source) {
+  const config = /^---[ \t]*\n[\s\S]*?\n---[ \t]*(?:\n|$)/.exec(source);
+  if (!config) return `${PNG_INIT}\n${source}`;
+  const head = config[0].endsWith("\n") ? config[0] : `${config[0]}\n`;
+  return `${head}${PNG_INIT}\n${source.slice(config[0].length)}`;
+}
+
+/** Whether `svg` can't be drawn onto a canvas and read back: an HTML label
+ * or an image that isn't inline data would taint it. */
+export function needsSvgExport(svg) {
+  if (/<foreignObject\b/i.test(svg)) return true;
+  return [...svg.matchAll(/<image\b[^>]*?\b(?:xlink:)?href\s*=\s*["']([^"']*)["']/gi)].some(
+    (m) => !/^data:/i.test(m[1].trim())
+  );
+}
+
+/** The diagram's size in CSS pixels, from its root `<svg>`'s viewBox, else
+ * its numeric width and height; null when it has neither. */
+export function svgSize(svg) {
+  const root = /<svg\b[^>]*>/i.exec(svg)?.[0];
+  if (!root) return null;
+  const attr = (name) => new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, "i").exec(root)?.[1];
+  const box = attr("viewBox")?.trim().split(/[\s,]+/).map(Number);
+  if (box?.length === 4 && box[2] > 0 && box[3] > 0) return { width: box[2], height: box[3] };
+  const width = Number(attr("width"));
+  const height = Number(attr("height"));
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+/** `<title>-diagram-<n>.<ext>`, `index` being the block's 0-based ordinal,
+ * with the characters file systems refuse replaced. */
+export function exportFileName(title, index, ext) {
+  const safe = title
+    .replace(/[\\/:*?"<>|\x00-\x1f]+/g, "-")
+    .trim()
+    .replace(/^\.+/, "");
+  return `${safe || "untitled"}-diagram-${index + 1}.${ext}`;
+}
+
+/** The source pane's width, as a percentage of the tab. */
+export function loadSplit() {
+  try {
+    const stored = localStorage.getItem(SPLIT_KEY);
+    const value = stored === null ? NaN : Number(stored);
+    if (Number.isFinite(value)) return Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, value));
+  } catch {
+    // Storage unavailable: the default.
+  }
+  return SPLIT_DEFAULT;
+}
+
+export function storeSplit(value) {
+  try {
+    localStorage.setItem(SPLIT_KEY, String(value));
+  } catch {
+    // Not remembered; nothing else depends on it.
+  }
+}
+
+const errorMessage = (err) => (err instanceof Error ? err.message : String(err));
+
+const STYLE = `
+.mahfouz-mermaid-editor { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.mahfouz-mermaid-editor .mme-banner { display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-bottom: 1px solid var(--cm-border); color: var(--cm-text); }
+.mahfouz-mermaid-editor .mme-banner[hidden] { display: none; }
+.mahfouz-mermaid-editor .mme-banner-text { flex: 1; }
+.mahfouz-mermaid-editor .mme-banner button { font: inherit; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--cm-border-strong); background: var(--cm-bg); color: var(--cm-text); }
+.mahfouz-mermaid-editor .mme-main { flex: 1; display: flex; min-height: 0; }
+.mahfouz-mermaid-editor .mme-source { min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
+.mahfouz-mermaid-editor .mme-source > * { flex: 1; min-height: 0; }
+.mahfouz-mermaid-editor .mme-status { padding: 12px; color: var(--cm-muted); }
+.mahfouz-mermaid-editor .mme-divider { flex: 0 0 5px; cursor: col-resize; background: var(--cm-border); }
+.mahfouz-mermaid-editor .mme-divider:hover, .mahfouz-mermaid-editor .mme-divider:focus-visible {
+  background: var(--cm-accent); outline: none; }
+.mahfouz-mermaid-editor .mme-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.mahfouz-mermaid-editor .mme-viewport { flex: 1; position: relative; overflow: hidden; background: var(--cm-bg); cursor: grab; }
+.mahfouz-mermaid-editor .mme-canvas { position: absolute; top: 0; left: 0; }
+.mahfouz-mermaid-editor .mme-canvas > svg { display: block; }
+.mahfouz-mermaid-editor .mme-canvas.mme-stale { opacity: 0.35; }
+.mahfouz-mermaid-editor .mme-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 24px; text-align: center; color: var(--cm-muted); pointer-events: none; }
+.mahfouz-mermaid-editor .mme-hint[hidden], .mahfouz-mermaid-editor .mme-error:empty { display: none; }
+.mahfouz-mermaid-editor .mme-error { max-height: 30%; overflow: auto; margin: 0; padding: 8px 12px; white-space: pre-wrap;
+  font-family: var(--font-stack-monospace); font-size: 0.85em; color: var(--callout-caution);
+  border-top: 1px solid var(--cm-border); background: var(--cm-bg); }
+.mahfouz-mermaid-editor .mme-footer { padding: 2px 12px; font-size: 0.8em; color: var(--cm-muted);
+  border-top: 1px solid var(--cm-border); text-align: right; }
+`;
+
+/** An element with a class (under the tab's root class) and optional text. */
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/** Draws `svg` at twice its size onto an opaque `background` and returns
+ * the PNG bytes. Throws a SecurityError when the canvas is tainted. */
+async function svgToPng(svg, background) {
+  const size = svgSize(svg);
+  if (!size) throw new Error("the diagram has no size");
+  // Sized explicitly: mermaid's own SVG is width="100%", which an <img>
+  // doesn't resolve.
+  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const root = doc.documentElement;
+  if (root.nodeName !== "svg") throw new Error("the diagram's SVG doesn't parse as XML");
+  root.setAttribute("width", String(size.width));
+  root.setAttribute("height", String(size.height));
+  root.style.maxWidth = "";
+  const image = new Image();
+  image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(root))}`;
+  await image.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(size.width * 2);
+  canvas.height = Math.ceil(size.height * 2);
+  const g = canvas.getContext("2d");
+  g.fillStyle = background;
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  g.scale(2, 2);
+  g.drawImage(image, 0, 0, size.width, size.height);
+  const blob = await new Promise((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("the PNG couldn't be encoded"))), "image/png")
+  );
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+function createEditorTab(host, runtime) {
+  return {
+    id: "editor",
+    icon: "◈",
+    render(container, ctx) {
+      const { createPanZoom, saveFile } = host.ui;
+      let disposed = false;
+
+      const root = el("div", "mahfouz-mermaid-editor");
+      root.appendChild(el("style", "", STYLE));
+
+      // Save failures and conflicts, above both panes.
+      const banner = el("div", "mme-banner");
+      banner.setAttribute("role", "alert");
+      banner.hidden = true;
+      const bannerText = el("span", "mme-banner-text");
+      banner.appendChild(bannerText);
+
+      const main = el("div", "mme-main");
+      const source = el("div", "mme-source");
+      const status = el("div", "mme-status", "Loading the diagram…");
+      source.appendChild(status);
+      const divider = el("div", "mme-divider");
+      divider.setAttribute("role", "separator");
+      divider.setAttribute("aria-orientation", "vertical");
+      divider.setAttribute("aria-label", "Resize the source and preview");
+      divider.setAttribute("aria-valuemin", String(SPLIT_MIN));
+      divider.setAttribute("aria-valuemax", String(SPLIT_MAX));
+      divider.tabIndex = 0;
+
+      const preview = el("div", "mme-preview");
+      const viewport = el("div", "mme-viewport");
+      // The pan/zoom target: the viewport's first child.
+      const canvas = el("div", "mme-canvas");
+      viewport.appendChild(canvas);
+      const hint = el(
+        "div",
+        "mme-hint",
+        "This diagram is empty. Choose one from Samples in the toolbar, or type Mermaid on the left."
+      );
+      hint.hidden = true;
+      // Always in the tree, so a screen reader hears each new error; empty
+      // (and so not shown) while the diagram renders.
+      const errorStrip = el("pre", "mme-error");
+      errorStrip.setAttribute("aria-live", "polite");
+      preview.append(viewport, hint, errorStrip, el("div", "mme-footer", `mermaid v${MERMAID_VERSION}`));
+
+      main.append(source, divider, preview);
+      root.append(banner, main);
+      container.appendChild(root);
+
+      // ---- state ----
+      let editor = null;
+      // Whether the source can be edited: loaded, and no conflict.
+      let editable = false;
+      // The last SVG that rendered, and whether it's what the source shows.
+      let lastSvg = null;
+      let current = false;
+      let renderTimer = null;
+      let renderSeq = 0;
+
+      // ---- split ----
+      let split = loadSplit();
+      const applySplit = () => {
+        source.style.flex = `0 0 ${split}%`;
+        divider.setAttribute("aria-valuenow", String(Math.round(split)));
+      };
+      applySplit();
+      const setSplit = (value) => {
+        split = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, value));
+        applySplit();
+      };
+      divider.addEventListener("keydown", (e) => {
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+        e.preventDefault();
+        setSplit(split + (e.key === "ArrowLeft" ? -SPLIT_STEP : SPLIT_STEP));
+        storeSplit(split);
+      });
+      divider.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        divider.setPointerCapture(e.pointerId);
+        const move = (ev) => {
+          const box = main.getBoundingClientRect();
+          if (box.width > 0) setSplit(((ev.clientX - box.left) / box.width) * 100);
+        };
+        const up = () => {
+          divider.removeEventListener("pointermove", move);
+          divider.removeEventListener("pointerup", up);
+          divider.removeEventListener("pointercancel", up);
+          storeSplit(split);
+        };
+        divider.addEventListener("pointermove", move);
+        divider.addEventListener("pointerup", up);
+        divider.addEventListener("pointercancel", up);
+      });
+
+      // ---- pan/zoom ----
+      const panZoom = createPanZoom ? createPanZoom(viewport) : null;
+      // Fit on every render and resize until the user moves the view.
+      let userMoved = false;
+      viewport.addEventListener("wheel", () => (userMoved = true), { passive: true });
+      // A drag pans; a plain click doesn't count.
+      viewport.addEventListener("mousedown", (down) => {
+        const up = (e) => {
+          if (Math.hypot(e.clientX - down.clientX, e.clientY - down.clientY) > 4) userMoved = true;
+        };
+        window.addEventListener("mouseup", up, { once: true });
+      });
+      const placeView = () => {
+        if (!panZoom) return;
+        if (userMoved) panZoom.refresh();
+        else panZoom.fit();
+      };
+      const resizes =
+        panZoom && typeof ResizeObserver === "function"
+          ? new ResizeObserver(() => {
+              if (lastSvg && !userMoved) panZoom.fit();
+            })
+          : null;
+      resizes?.observe(viewport);
+
+      // ---- preview ----
+      const showDiagnostics = (list) => editor?.setDiagnostics(list);
+
+      const renderNow = async () => {
+        clearTimeout(renderTimer);
+        renderTimer = null;
+        if (!editor) return;
+        const text = editor.getValue();
+        renderSeq += 1;
+        const seq = renderSeq;
+        if (!text.trim()) {
+          canvas.replaceChildren();
+          canvas.classList.remove("mme-stale");
+          hint.hidden = false;
+          errorStrip.textContent = "";
+          lastSvg = null;
+          current = false;
+          showDiagnostics([]);
+          updateToolbar();
+          return;
+        }
+        hint.hidden = true;
+        let svg;
+        try {
+          svg = await runtime.renderSvg(text, ctx.theme);
+        } catch (err) {
+          if (disposed || seq !== renderSeq) return;
+          const message = errorMessage(err);
+          // The last good diagram stays, dimmed, above the error.
+          canvas.classList.add("mme-stale");
+          errorStrip.textContent = message;
+          current = false;
+          const at = parseErrorLocation(err);
+          showDiagnostics(at ? [{ ...at, message }] : []);
+          updateToolbar();
+          return;
+        }
+        if (disposed || seq !== renderSeq) return;
+        canvas.innerHTML = svg;
+        canvas.classList.remove("mme-stale");
+        // At its natural size, so pan/zoom has something to measure.
+        const size = svgSize(svg);
+        const svgEl = canvas.querySelector("svg");
+        if (size && svgEl) {
+          svgEl.setAttribute("width", String(size.width));
+          svgEl.setAttribute("height", String(size.height));
+          svgEl.style.maxWidth = "none";
+        }
+        errorStrip.textContent = "";
+        lastSvg = svg;
+        current = true;
+        showDiagnostics([]);
+        placeView();
+        updateToolbar();
+      };
+
+      const scheduleRender = () => {
+        clearTimeout(renderTimer);
+        renderTimer = setTimeout(() => void renderNow(), PREVIEW_DEBOUNCE_MS);
+      };
+      const offTheme = ctx.onThemeChange(() => void renderNow());
+
+      // ---- banner ----
+      const showBanner = (text, actions = []) => {
+        bannerText.textContent = text;
+        banner.replaceChildren(bannerText);
+        for (const [label, run] of actions) {
+          const button = el("button", "", label);
+          button.type = "button";
+          button.addEventListener("click", run);
+          banner.appendChild(button);
+        }
+        banner.hidden = false;
+      };
+      const hideBanner = () => (banner.hidden = true);
+
+      // ---- the block ----
+      const session = createEditorSession({
+        index: Number(ctx.arg),
+        markdown: host.markdown,
+        readBody: ctx.readBody,
+        writeBody: ctx.writeBody,
+        onConflict() {
+          editable = false;
+          editor?.setReadOnly(true);
+          updateToolbar();
+          showBanner("This diagram changed outside the editor, so your edits here aren't being saved.", [
+            ["Reload from note", () => void load()],
+            ["Copy my version", () => void copyText(session.source(), "Your version is copied.")],
+          ]);
+        },
+        onSaved() {
+          if (editable) hideBanner();
+        },
+        onError(message) {
+          console.error(message);
+          showBanner(message);
+        },
+      });
+
+      const load = async () => {
+        let text;
+        try {
+          text = await session.load();
+        } catch (err) {
+          if (disposed) return;
+          editable = false;
+          editor?.setReadOnly(true);
+          status.textContent = "The diagram couldn't be read.";
+          updateToolbar();
+          showBanner(`Couldn't read the diagram: ${errorMessage(err)}`, [["Reload from note", () => void load()]]);
+          return;
+        }
+        if (disposed) return;
+        if (editor) {
+          editor.setValue(text);
+          editor.setReadOnly(false);
+        } else {
+          // Made once the text is known, so undo can't go back to an empty
+          // editor.
+          source.replaceChildren();
+          editor = host.ui.createCodeEditor(source, {
+            value: text,
+            language: MERMAID_LANGUAGE,
+            onChange(value) {
+              session.change(value);
+              scheduleRender();
+            },
+          });
+          editor.focus();
+        }
+        editable = true;
+        hideBanner();
+        updateToolbar();
+        void renderNow();
+      };
+
+      // ---- toolbar ----
+      const copyText = async (text, done) => {
+        try {
+          await navigator.clipboard.writeText(text);
+          host.toast(done);
+        } catch (err) {
+          host.toast(`Couldn't copy: ${errorMessage(err)}`, "error");
+        }
+      };
+
+      const save = async (ext, filterName, data) => {
+        try {
+          await saveFile({
+            defaultName: exportFileName(ctx.note.title, session.index(), ext),
+            filters: [{ name: filterName, extensions: [ext] }],
+            data,
+          });
+        } catch (err) {
+          host.toast(`Export failed: ${errorMessage(err)}`, "error");
+        }
+      };
+
+      const exportPng = async () => {
+        const text = editor.getValue();
+        let svg;
+        try {
+          svg = await runtime.renderSvg(pngExportSource(text), ctx.theme);
+        } catch (err) {
+          host.toast(`Export failed: ${errorMessage(err)}`, "error");
+          return;
+        }
+        if (needsSvgExport(svg)) {
+          host.toast(USE_SVG_EXPORT, "error");
+          return;
+        }
+        // Opaque, in the preview's own colour, so the PNG reads the same.
+        const fill = getComputedStyle(viewport).backgroundColor;
+        const opaque = fill && !/^rgba\(.*,\s*0\)$|^transparent$/.test(fill);
+        let data;
+        try {
+          data = await svgToPng(svg, opaque ? fill : ctx.theme === "dark" ? "#1e1e1e" : "#ffffff");
+        } catch (err) {
+          const tainted = err instanceof Error && err.name === "SecurityError";
+          host.toast(tainted ? USE_SVG_EXPORT : `Export failed: ${errorMessage(err)}`, "error");
+          return;
+        }
+        await save("png", "PNG image", data);
+      };
+
+      const updateToolbar = () => {
+        if (disposed) return;
+        const ready = current && lastSvg !== null;
+        const buttons = [
+          {
+            label: "Samples",
+            title: "Replace the source with a sample diagram (undo brings yours back)",
+            disabled: !editable,
+            menu: MERMAID_SAMPLES.map((sample) => ({
+              label: sample.label,
+              onSelect() {
+                if (!editable || !editor) return;
+                editor.setValue(sample.source);
+                session.change(sample.source);
+                void renderNow();
+              },
+            })),
+          },
+        ];
+        if (panZoom) {
+          buttons.push(
+            {
+              label: "Zoom out",
+              title: "Zoom out of the preview",
+              onClick() {
+                userMoved = true;
+                panZoom.zoomOut();
+              },
+            },
+            {
+              label: "Zoom in",
+              title: "Zoom in to the preview",
+              onClick() {
+                userMoved = true;
+                panZoom.zoomIn();
+              },
+            },
+            {
+              label: "Fit",
+              title: "Fit the diagram to the preview, and keep fitting it",
+              onClick() {
+                userMoved = false;
+                panZoom.fit();
+              },
+            }
+          );
+        }
+        if (saveFile) {
+          buttons.push(
+            {
+              label: "Export SVG",
+              title: "Save the diagram as an SVG file",
+              disabled: !ready,
+              onClick: () => void save("svg", "SVG image", new TextEncoder().encode(lastSvg)),
+            },
+            {
+              label: "Export PNG",
+              title: "Save the diagram as a PNG image at twice its size",
+              disabled: !ready,
+              onClick: () => void exportPng(),
+            }
+          );
+        }
+        buttons.push({
+          label: "Copy SVG",
+          title: "Copy the diagram's SVG markup",
+          disabled: !ready,
+          onClick: () => void copyText(lastSvg, "SVG copied."),
+        });
+        ctx.setToolbar(buttons);
+      };
+
+      updateToolbar();
+      void load();
+
+      return () => {
+        disposed = true;
+        clearTimeout(renderTimer);
+        offTheme();
+        resizes?.disconnect();
+        panZoom?.dispose();
+        void session.flush();
+        editor?.destroy();
+      };
+    },
+  };
+}
+
 export function activate(host) {
   const runtime = createMermaidRuntime(host);
-  host.registerEmbed("mermaid", createMermaidRenderer(host, { runtime }));
+  const renderer = createMermaidRenderer(host, { runtime });
+  // The editor tab needs the host's block splicing and code editor; an
+  // older app gets the embed alone, and its edit button reveals the source.
+  if (host.markdown?.fencedBlocks && host.markdown?.replaceFencedBlock && host.ui?.createCodeEditor) {
+    const openEditor = (note, ordinal) => {
+      if (!note || ordinal < 0) return;
+      void host.openTab("editor", note, String(ordinal));
+    };
+    host.registerTabType(createEditorTab(host, runtime));
+    // Only the edit button opens the tab; a plain click on the diagram
+    // still reveals its source in the note.
+    renderer.edit = (context) => openEditor(context.note, context.ordinal);
+    // A block inserted from the toolbar opens in the editor. Its ordinal
+    // counts the blocks whose content starts before its fence.
+    renderer.onInsertedAt = (view, from, note) => {
+      const blocks = host.markdown.fencedBlocks(view.state.doc.toString(), "mermaid");
+      openEditor(note, blocks.filter((b) => b.from < from).length);
+    };
+  }
+  host.registerEmbed("mermaid", renderer);
 }

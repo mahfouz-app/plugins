@@ -2,13 +2,23 @@
 // the host and the DOM container are small fakes.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import {
   activate,
   createEditorSession,
   createMermaidRenderer,
   createMermaidRuntime,
+  exportFileName,
+  loadSplit,
+  MERMAID_LANGUAGE,
+  MERMAID_SAMPLES,
+  MERMAID_VERSION,
   mermaidModuleUrl,
+  needsSvgExport,
   parseErrorLocation,
+  pngExportSource,
+  storeSplit,
+  svgSize,
 } from "./index.js";
 
 function fakeHost() {
@@ -765,4 +775,243 @@ test("session: a throwing onSaved isn't reported as a failed save", async (t) =>
   // It counts as saved: nothing is written again.
   await s.flush();
   assert.equal(log.written.length, 1);
+});
+
+// ---- the editor tab ------------------------------------------------------
+
+// The host's tokenizer (src/core/src/plugins/codeEditor.ts), line by line:
+// at each position the first rule that matches there (non-empty) wins;
+// otherwise one character is skipped, unstyled.
+function tokenize(line) {
+  const rules = MERMAID_LANGUAGE.rules.map((r) => ({
+    re: new RegExp(r.regex, (r.flags ?? "").replace(/[gy]/g, "") + "y"),
+    token: r.token,
+  }));
+  const out = [];
+  let pos = 0;
+  while (pos < line.length) {
+    let hit = null;
+    for (const { re, token } of rules) {
+      re.lastIndex = pos;
+      const m = re.exec(line);
+      if (m && m[0].length > 0) {
+        hit = [m[0], token];
+        break;
+      }
+    }
+    if (hit) {
+      out.push(hit);
+      pos += hit[0].length;
+    } else {
+      pos += 1;
+    }
+  }
+  return out;
+}
+
+test("mermaid rules: every regex compiles, as the host compiles it", () => {
+  assert.equal(MERMAID_LANGUAGE.lineComment, "%%");
+  const tokens = new Set(["keyword", "type", "string", "comment", "operator", "number", "variable", "punctuation"]);
+  for (const rule of MERMAID_LANGUAGE.rules) {
+    assert.ok(tokens.has(rule.token), rule.token);
+    assert.doesNotThrow(() => new RegExp(rule.regex, (rule.flags ?? "") + "y"), rule.regex);
+  }
+});
+
+test("mermaid rules: fixture lines get the expected tokens", () => {
+  const cases = [
+    ["flowchart LR", [["flowchart", "type"], ["LR", "keyword"]]],
+    ["sequenceDiagram", [["sequenceDiagram", "type"]]],
+    ["  stateDiagram-v2", [["  stateDiagram-v2", "type"]]],
+    ["%% a comment --> not an arrow", [["%% a comment --> not an arrow", "comment"]]],
+    ['%%{init: {"theme": "dark"}}%%', [['%%{init: {"theme": "dark"}}%%', "comment"]]],
+    ["---", [["---", "punctuation"]]],
+    ["  A[Start] -->|yes| B", [["-->", "operator"], ["|yes|", "string"]]],
+    ["  A -.-> B", [["-.->", "operator"]]],
+    ["  A ==> B", [["==>", "operator"]]],
+    ["  A --o B", [["--o", "operator"]]],
+    ["  Alice->>Bob: Hi", [["->>", "operator"]]],
+    ["  Bob-->>Alice: Hello", [["-->>", "operator"]]],
+    ["  Alice-xBob: lost", [["-x", "operator"]]],
+    ["  Animal <|-- Duck", [["<|--", "operator"]]],
+    ["  CUSTOMER ||--o{ ORDER : places", [["||--o{", "operator"]]],
+    ['  A["a label"] --> B', [['"a label"', "string"], ["-->", "operator"]]],
+    ['  "Dogs" : 386', [['"Dogs"', "string"], ["386", "number"]]],
+    ["  subgraph one", [["subgraph", "keyword"]]],
+    ["  end", [["end", "keyword"]]],
+    ["  participant Alice", [["participant", "keyword"]]],
+    ["  loop Every minute", [["loop", "keyword"]]],
+    ["  alt is sick", [["alt", "keyword"]]],
+    ["  else is well", [["else", "keyword"]]],
+    // Keywords and arrows inside identifiers aren't marked.
+    ["  backend --> endpoint", [["-->", "operator"]]],
+    ["  my-node --> api-node", [["-->", "operator"]]],
+  ];
+  for (const [line, expected] of cases) assert.deepEqual(tokenize(line), expected, line);
+});
+
+test("samples: the menu's diagrams, each starting with its diagram type", () => {
+  assert.deepEqual(
+    MERMAID_SAMPLES.map((s) => s.label),
+    ["Flowchart", "Sequence", "Class", "State", "ER", "Gantt", "Pie", "Mindmap", "Timeline"]
+  );
+  for (const { label, source } of MERMAID_SAMPLES) {
+    const first = source.split("\n")[0];
+    assert.equal(tokenize(first)[0]?.[1], "type", label);
+  }
+});
+
+test("the footer's version is the one plugin.json installs", () => {
+  const manifest = JSON.parse(readFileSync(new URL("./plugin.json", import.meta.url), "utf8"));
+  assert.ok(manifest.install[0].artifacts.any.url.endsWith(`/mermaid-${MERMAID_VERSION}.tgz`));
+});
+
+const PNG_INIT = '%%{init: {"htmlLabels": false, "flowchart": {"htmlLabels": false}}}%%';
+
+test("PNG export source: the htmlLabels directive goes first", () => {
+  assert.equal(pngExportSource("graph TD\n  A-->B"), `${PNG_INIT}\ngraph TD\n  A-->B`);
+});
+
+test("PNG export source: after a --- config block, which must stay first", () => {
+  const src = "---\ntitle: Hello\n---\ngraph TD\n  A-->B";
+  assert.equal(pngExportSource(src), `---\ntitle: Hello\n---\n${PNG_INIT}\ngraph TD\n  A-->B`);
+  // An unclosed block isn't a config block.
+  assert.equal(pngExportSource("---\ngraph TD"), `${PNG_INIT}\n---\ngraph TD`);
+});
+
+test("a PNG export doesn't change the next embed render's config", async () => {
+  const mermaid = fakeMermaid();
+  const sources = [];
+  const render = mermaid.render;
+  mermaid.render = (id, source) => {
+    sources.push(source);
+    return render(id, source);
+  };
+  const runtime = createMermaidRuntime(fakeHost(), { loadModule: async () => mermaid });
+  const renderer = createMermaidRenderer(fakeHost(), { runtime });
+  await renderer.render(fakeContainer(), "graph TD\n  A-->B", "light");
+  await runtime.renderSvg(pngExportSource("graph TD\n  A-->B"), "light");
+  await renderer.render(fakeContainer(), "graph TD\n  A-->B", "light");
+  // One initialize, before the first render: the export never re-initializes.
+  assert.equal(mermaid.calls.initialize.length, 1);
+  assert.equal(sources[1].split("\n")[0], PNG_INIT);
+  assert.equal(sources[2], "graph TD\n  A-->B");
+});
+
+test("needsSvgExport: HTML labels and external images can't be drawn to a PNG", () => {
+  assert.equal(needsSvgExport('<svg><g><rect/><text>A</text></g></svg>'), false);
+  assert.equal(needsSvgExport("<svg><foreignObject><div>A</div></foreignObject></svg>"), true);
+  assert.equal(needsSvgExport('<svg><image href="https://example.com/a.png"/></svg>'), true);
+  assert.equal(needsSvgExport('<svg><image xlink:href="/files/a.png"/></svg>'), true);
+  assert.equal(needsSvgExport('<svg><image href="data:image/png;base64,AAAA"/></svg>'), false);
+});
+
+test("svgSize: from the viewBox, else width and height", () => {
+  assert.deepEqual(svgSize('<svg id="x" viewBox="-8 -8 316.5 200" style="max-width: 316.5px;">'), {
+    width: 316.5,
+    height: 200,
+  });
+  assert.deepEqual(svgSize('<svg width="120" height="80"><g viewBox="0 0 1 1"/></svg>'), { width: 120, height: 80 });
+  assert.equal(svgSize('<svg width="100%"></svg>'), null);
+  assert.equal(svgSize("not svg"), null);
+});
+
+test("exportFileName: the note title made safe, and the diagram's number", () => {
+  assert.equal(exportFileName("Design notes", 0, "svg"), "Design notes-diagram-1.svg");
+  assert.equal(exportFileName('a/b\\c: "d"?', 2, "png"), "a-b-c- -d--diagram-3.png");
+  assert.equal(exportFileName("..hidden", 0, "svg"), "hidden-diagram-1.svg");
+  assert.equal(exportFileName("  ", 1, "png"), "untitled-diagram-2.png");
+});
+
+test("split: stored width is read back, clamped, and a bad or unreadable value gives the default", (t) => {
+  const store = new Map();
+  t.after(() => delete globalThis.localStorage);
+  globalThis.localStorage = {
+    getItem: (k) => store.get(k) ?? null,
+    setItem: (k, v) => store.set(k, v),
+  };
+  assert.equal(loadSplit(), 40);
+  storeSplit(55);
+  assert.equal(store.get("mahfouz.mermaid.split"), "55");
+  assert.equal(loadSplit(), 55);
+  store.set("mahfouz.mermaid.split", "99");
+  assert.equal(loadSplit(), 85);
+  store.set("mahfouz.mermaid.split", "nonsense");
+  assert.equal(loadSplit(), 40);
+  globalThis.localStorage = {
+    getItem() {
+      throw new Error("denied");
+    },
+    setItem() {
+      throw new Error("denied");
+    },
+  };
+  assert.equal(loadSplit(), 40);
+  assert.doesNotThrow(() => storeSplit(50));
+});
+
+// A host from before the editor members: no markdown, no code editor.
+function oldTabHost() {
+  const host = fakeHost();
+  host.tabTypes = [];
+  host.opened = [];
+  host.registerTabType = (type) => {
+    host.tabTypes.push(type);
+    return { dispose() {} };
+  };
+  host.openTab = async (...args) => {
+    host.opened.push(args);
+  };
+  return host;
+}
+
+function editorHost() {
+  const host = oldTabHost();
+  host.markdown = fakeMarkdown;
+  host.ui.createCodeEditor = () => {
+    throw new Error("not in node");
+  };
+  return host;
+}
+
+test("feature detection: an old host gets the embed only, no tab and no edit hooks", () => {
+  for (const tweak of [
+    (h) => delete h.markdown,
+    (h) => delete h.markdown.replaceFencedBlock,
+    (h) => delete h.ui.createCodeEditor,
+  ]) {
+    const host = editorHost();
+    host.markdown = { ...fakeMarkdown };
+    tweak(host);
+    activate(host);
+    assert.deepEqual(host.tabTypes, []);
+    const embed = host.embeds.get("mermaid");
+    assert.equal(embed.edit, undefined);
+    assert.equal(embed.onInsertedAt, undefined);
+  }
+});
+
+test("editor tab: registered on a new host, opened by the edit button with the block's ordinal", () => {
+  const host = editorHost();
+  activate(host);
+  assert.equal(host.tabTypes.length, 1);
+  assert.equal(host.tabTypes[0].id, "editor");
+  assert.equal(host.tabTypes[0].icon, "◈");
+  const embed = host.embeds.get("mermaid");
+  const note = { vaultId: "v", noteId: "n" };
+  embed.edit({ ordinal: 2, note });
+  assert.deepEqual(host.opened, [["editor", note, "2"]]);
+  embed.edit({ ordinal: 0, note: null });
+  assert.equal(host.opened.length, 1);
+});
+
+test("editor tab: a freshly inserted block opens at its ordinal", () => {
+  const host = editorHost();
+  activate(host);
+  const before = "# Note\n\n" + fence("graph TD\n  A-->B") + "\n";
+  const doc = before + fence("graph TD;\n    A --> B") + "\n" + fence("pie");
+  const view = { state: { doc: { toString: () => doc } } };
+  const note = { vaultId: "v", noteId: "n" };
+  host.embeds.get("mermaid").onInsertedAt(view, before.length, note);
+  assert.deepEqual(host.opened, [["editor", note, "1"]]);
 });
