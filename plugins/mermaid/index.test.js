@@ -85,7 +85,7 @@ test("initializes with the matching theme, and only again when it changes", asyn
   const renderer = createMermaidRenderer(fakeHost(), { loadModule: async () => mermaid });
   await renderer.render(fakeContainer(), "a", "dark");
   await renderer.render(fakeContainer(), "b", "dark");
-  assert.deepEqual(mermaid.calls.initialize, [{ startOnLoad: false, theme: "dark" }]);
+  assert.deepEqual(mermaid.calls.initialize, [{ startOnLoad: false, suppressErrorRendering: true, theme: "dark" }]);
   await renderer.render(fakeContainer(), "c", "light");
   assert.equal(mermaid.calls.initialize.at(-1).theme, "default");
 });

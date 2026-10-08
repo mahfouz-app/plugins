@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "mermaid",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "label": "Mermaid diagrams",
   "description": "Render mermaid code blocks as diagrams",
   "mahfouz": ">=0.5.0",
