@@ -657,14 +657,43 @@ test("session: a write that lands and then throws is retried, not a conflict", a
   s.change("pie\n  landed");
   await s.flush();
   assert.deepEqual(log.errors, ["Diagram save failed: file write failed"]);
+  assert.equal(log.saved, 0);
   fail = false;
-  // The block holds the failed write's text: still ours.
+  // The block holds the failed write's text: still ours, and written again,
+  // since it may be in the body but not on disk.
   await s.flush();
   assert.equal(log.conflicts, 0);
+  assert.equal(log.written.length, 2);
+  assert.equal(sourceAt(log.written[1], 1), "pie\n  landed");
+  assert.equal(log.saved, 1);
+  // Now confirmed: flushing again writes nothing.
+  await s.flush();
+  assert.equal(log.written.length, 2);
   s.change("pie\n  next");
   await s.flush();
   assert.equal(log.conflicts, 0);
   assert.equal(sourceAt(note.body, 1), "pie\n  next");
+  assert.equal(log.saved, 2);
+});
+
+test("session: undoing back to the saved text after a landed failed write still writes it", async () => {
+  let fail = true;
+  const { s, log, note } = editor({
+    writeBody: async (next) => {
+      note.body = next;
+      log.written.push(next);
+      if (fail) throw new Error("file write failed");
+    },
+  });
+  const original = await s.load();
+  s.change("pie\n  landed");
+  await s.flush();
+  fail = false;
+  s.change(original);
+  await s.flush();
+  assert.equal(log.conflicts, 0);
+  assert.equal(log.written.length, 2);
+  assert.equal(sourceAt(note.body, 1), original);
   assert.equal(log.saved, 1);
 });
 

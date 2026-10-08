@@ -261,9 +261,13 @@ export function createEditorSession({
         }
         at = moved[0];
       }
-      lastWritten = texts[at];
-      attempted.clear();
-      if (source === lastWritten) return;
+      // A block holding a failed write's text is written again: the host
+      // updates the body before the file, so that text may be in the body
+      // but not on disk.
+      if (texts[at] === lastWritten) {
+        attempted.clear();
+        if (source === lastWritten) return;
+      }
       attempted.add(source);
       await writeBody(markdown.replaceFencedBlock(body, "mermaid", at, source));
       lastWritten = source;
@@ -317,7 +321,7 @@ export function createEditorSession({
      * once every save so far has finished. */
     flush() {
       cancelTimer();
-      if (!stopped && current !== lastWritten) void enqueue(saveNow);
+      if (!stopped && (current !== lastWritten || attempted.size > 0)) void enqueue(saveNow);
       return chain;
     },
 
