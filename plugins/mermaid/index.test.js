@@ -20,6 +20,7 @@ import {
   needsSvgExport,
   parseErrorLocation,
   pngExportSource,
+  sourceErrorLocation,
   storeSplit,
   svgSize,
 } from "./index.js";
@@ -393,6 +394,103 @@ test("parseErrorLocation: anything else has no location", () => {
   assert.equal(parseErrorLocation("Parse error on line 2"), null);
   assert.equal(parseErrorLocation(null), null);
   assert.equal(parseErrorLocation(undefined), null);
+});
+
+// ---- sourceErrorLocation -------------------------------------------------
+//
+// Each `at` is what parseErrorLocation returned for that source under the
+// pinned build (mermaid.parse under node): mermaid counts in the text it
+// parsed, after stripping front matter, directives and comments.
+
+test("sourceErrorLocation: a plain source maps onto itself", () => {
+  const src = "graph TD\n  A-->B\n  C-->>\n";
+  assert.deepEqual(sourceErrorLocation(src, { line: 3, column: 4, endColumn: 7 }), {
+    line: 3,
+    column: 4,
+    endColumn: 7,
+  });
+});
+
+test("sourceErrorLocation: front matter, comments, directives and leading blank lines", () => {
+  const at = { line: 3, column: 4, endColumn: 7 }; // reported for every one of these
+  const cases = [
+    ["---\ntitle: x\n---\ngraph TD\n  A-->B\n  C-->>\n", 6],
+    ["  ---\n  title: x\n  ---\ngraph TD\n  A-->B\n  C-->>\n", 6],
+    ["graph TD\n%% one\n  %% indented\n  A-->B\n  C-->>\n", 5],
+    ["%%{init: {'theme':'dark'}}%%\ngraph TD\n  A-->B\n  C-->>\n", 4],
+    ["\n\n\ngraph TD\n  A-->B\n  C-->>\n", 6],
+    // A comment's leading \s* takes the blank line above it too.
+    ["graph TD\n  A-->B\n\n%% c\n  C-->>\n", 5],
+    ["---\ntitle: x\n---\n\n%%{init: {'theme':'dark'}}%%\n%% c\ngraph TD\n\n  %% c2\n  A-->B\n  C-->>\n", 11],
+    // An inline directive leaves its line; a bare %% isn't a comment.
+    ["graph TD\n  A-->B %%{init: {'theme':'dark'}}%% \n  C-->>\n", 3],
+    ["graph TD\n%%\n  C-->>\n", 3],
+  ];
+  for (const [src, line] of cases) {
+    assert.deepEqual(sourceErrorLocation(src, at), { line, column: 4, endColumn: 7 }, JSON.stringify(src));
+  }
+});
+
+test("sourceErrorLocation: a directive spanning lines, and an indented first line", () => {
+  const at = { line: 2, column: 4, endColumn: 7 };
+  assert.deepEqual(sourceErrorLocation("%%{init: {\n'theme':'dark'\n}}%%\ngraph TD\n  C-->>\n", at), {
+    line: 5,
+    column: 4,
+    endColumn: 7,
+  });
+  assert.deepEqual(sourceErrorLocation("\n   graph TD\n  C-->>\n", at), { line: 3, column: 4, endColumn: 7 });
+  // The trimmed indent shifts the columns on the first line back.
+  assert.deepEqual(sourceErrorLocation("%% c\n  graph TD C-->>\n", { line: 1, column: 9, endColumn: 10 }), {
+    line: 2,
+    column: 11,
+    endColumn: 12,
+  });
+});
+
+test("sourceErrorLocation: front matter that isn't at the very start stays in", () => {
+  assert.deepEqual(sourceErrorLocation("\n---\ntitle: x\n---\ngraph TD\n", { line: 1, column: 1 }), {
+    line: 2,
+    column: 1,
+  });
+});
+
+test("sourceErrorLocation: an error at the end of the input", () => {
+  assert.deepEqual(sourceErrorLocation("%% c\ngraph TD\n  A-->\n%% trailing\n", { line: 2, column: 4 }), {
+    line: 3,
+    column: 4,
+  });
+});
+
+test("sourceErrorLocation: pie (langium) errors", () => {
+  assert.deepEqual(sourceErrorLocation('---\ntitle: p\n---\npie\n  "a": 1\n  "b" 2\n', { line: 3, column: 7 }), {
+    line: 6,
+    column: 7,
+  });
+  const all = '\n%%{init: {\'theme\':\'dark\'}}%%\n%% c\npie\n  %% c\n  "a": 1\n\n  "b" 2\n';
+  assert.deepEqual(sourceErrorLocation(all, { line: 4, column: 7 }), { line: 8, column: 7 });
+  const comments = 'pie\n%% c\n    %% indented\n\n  "a": 1\n  "b" 2\n';
+  assert.deepEqual(sourceErrorLocation(comments, { line: 4, column: 7 }), { line: 6, column: 7 });
+});
+
+test("sourceErrorLocation: agentflow is parsed with its comments in", () => {
+  const src = "---\ntitle: a\n---\n%% c\nagentflow-beta\n  bad bad (\n";
+  assert.deepEqual(sourceErrorLocation(src, { line: 3, column: 6, endColumn: 7 }), {
+    line: 6,
+    column: 6,
+    endColumn: 7,
+  });
+});
+
+test("sourceErrorLocation: keeps only the line where entities shift the columns", () => {
+  assert.deepEqual(sourceErrorLocation("%% c\ngraph TD\n  A[#35; x]-->B C-->>\n", { line: 2, column: 20 }), {
+    line: 3,
+  });
+});
+
+test("sourceErrorLocation: no mark when it can't be placed", () => {
+  assert.equal(sourceErrorLocation("graph TD\n  A-->\n", null), null);
+  assert.equal(sourceErrorLocation("graph TD\n  A-->\n", { line: 9 }), null);
+  assert.equal(sourceErrorLocation("graph TD\r\n  A-->\r\n", { line: 2, column: 4 }), null);
 });
 
 // ---- editor session ------------------------------------------------------

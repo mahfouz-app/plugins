@@ -53,6 +53,71 @@ export function parseErrorLocation(err) {
   return match[2] ? { line: Number(match[1]), column: Number(match[2]) } : { line: Number(match[1]) };
 }
 
+// mermaid's preprocessing (`preprocessDiagram` in the vendored build), in its
+// order: front matter, then `%%{…}%%` directives anywhere, then `%%` comment
+// lines (with any blank lines the leading `\s*` reaches back over), then
+// leading whitespace. The regexes are copied from the build.
+const FRONT_MATTER_RE = /^([^\S\n\r]*)-{3}\s*[\n\r](.*?)[\n\r]\1-{3}\s*[\n\r]+/s;
+const DIRECTIVE_RE = /%{2}{\s*(?:(\w+)\s*:|(\w+))\s*(?:(\w+)|((?:(?!}%{2}).|\r?\n)*))?\s*(?:}%{2})?/gi;
+const COMMENT_RE = /^\s*%%(?!{)[^\n]+\n?/gm;
+// The one diagram mermaid parses with its comments left in, untrimmed.
+const KEEPS_COMMENTS_RE = /^\s*agentflow-beta\b/;
+// What mermaid's encodeEntities rewrites on a line before parsing, shifting
+// the columns after it.
+const ENTITY_RE = /#\w+;|(?:style|classDef).*:\S*#.*;/;
+
+/**
+ * Maps a `parseErrorLocation` result, which counts lines and columns in the
+ * text mermaid actually parsed, back onto `source`, the text the user
+ * typed: mermaid first strips front matter, directives and `%%` comments
+ * and trims leading whitespace. Null when the position can't be placed
+ * with confidence; a wrong mark is worse than none.
+ */
+export function sourceErrorLocation(source, at) {
+  if (!at || typeof source !== "string" || source.includes("\r")) return null;
+  // The source offset of every character still in the text.
+  let kept = Array.from({ length: source.length }, (_, i) => i);
+  let text = source;
+  const cut = (re) => {
+    const drop = new Set();
+    for (const m of re.global ? text.matchAll(re) : [re.exec(text)].filter(Boolean)) {
+      for (let i = m.index; i < m.index + m[0].length; i++) drop.add(i);
+    }
+    kept = kept.filter((_, i) => !drop.has(i));
+    text = kept.map((i) => source[i]).join("");
+  };
+  cut(FRONT_MATTER_RE);
+  cut(DIRECTIVE_RE);
+  if (!KEEPS_COMMENTS_RE.test(text.replace(COMMENT_RE, "").trimStart())) {
+    cut(COMMENT_RE);
+    cut(/^\s+/);
+  }
+
+  const lines = text.split("\n");
+  const lineText = lines[at.line - 1];
+  if (lineText === undefined) return null;
+  const start = lines.slice(0, at.line - 1).reduce((n, l) => n + l.length + 1, 0);
+  const place = (i) => {
+    const from = source.lastIndexOf("\n", i - 1) + 1;
+    return { line: source.slice(0, from).split("\n").length, column: i - from + 1 };
+  };
+
+  // A column past the line's text points at its line break, if it has one.
+  const column = at.column !== undefined && !ENTITY_RE.test(lineText) ? at.column : undefined;
+  if (column === undefined || column > lineText.length + 1 || start + column - 1 >= kept.length) {
+    // The line's first character, or the line break ending an empty line.
+    const first = kept[start];
+    return first === undefined ? null : { line: place(first).line };
+  }
+  const head = place(kept[start + column - 1]);
+  const result = { line: head.line, column: head.column };
+  if (at.endColumn !== undefined && at.endColumn - 1 <= lineText.length) {
+    const tail = place(kept[start + at.endColumn - 2]);
+    if (tail.line === head.line) result.endColumn = tail.column + 1;
+  }
+  return result;
+}
+
 /**
  * The one mermaid instance the plugin renders with: the embed and the
  * editor tab share it, so the module loads once. `loadModule` and
@@ -842,7 +907,7 @@ function createEditorTab(host, runtime) {
           canvas.classList.add("mme-stale");
           errorStrip.textContent = message;
           current = false;
-          const at = parseErrorLocation(err);
+          const at = sourceErrorLocation(text, parseErrorLocation(err));
           showDiagnostics(at ? [{ ...at, message }] : []);
           updateToolbar();
           return;
