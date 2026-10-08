@@ -197,14 +197,15 @@ const lf = (text) => text.replace(/\r\n/g, "\n");
  * (0-based, document order). DOM-free; the tab passes `ctx.readBody`,
  * `ctx.writeBody` and `host.markdown`, and the UI hooks:
  * - `onConflict()`: the block changed outside the editor. Autosave has
- *   stopped until `reload()`; the editor should go read-only.
+ *   stopped until `load()` runs again; the editor should go read-only.
  * - `onSaved()`: a save reached the note.
  * - `onError(message)`: a save failed; the next save retries it.
  *
  * Every save checks that the block still holds what the session last
- * wrote (or loaded) before replacing it. A block that moved (another one
- * inserted above) is followed when exactly one block holds that text;
- * otherwise it's a conflict, never a guess. Saves run one at a time, so a
+ * wrote (or loaded), or the text of a write that failed (the host's write
+ * can land in the body and then throw), before replacing it. A block that
+ * moved (another one inserted above) is followed when exactly one block
+ * holds such a text; otherwise it's a conflict, never a guess. Saves run one at a time, so a
  * save never reads the body while an earlier write is still landing.
  * An external edit the app hasn't synced into the body yet can still be
  * overwritten, as in the main editor.
@@ -222,6 +223,8 @@ export function createEditorSession({
   let at = index;
   // The block's text as the note holds it, as far as the session knows.
   let lastWritten = null;
+  // Texts of writes that threw since then: any of them may have landed.
+  const attempted = new Set();
   // The editor's text, saved or not.
   let current = "";
   // Until a load, and after a conflict, nothing is saved.
@@ -240,14 +243,16 @@ export function createEditorSession({
     timer = null;
   };
 
+  const isOurs = (text) => text !== undefined && (text === lastWritten || attempted.has(text));
+
   const saveNow = async () => {
     if (stopped) return;
     const source = current;
     try {
       const body = await readBody();
-      const blocks = markdown.fencedBlocks(body, "mermaid");
-      if (blocks[at] === undefined || lf(blocks[at].source) !== lastWritten) {
-        const moved = blocks.flatMap((b, i) => (lf(b.source) === lastWritten ? [i] : []));
+      const texts = markdown.fencedBlocks(body, "mermaid").map((b) => lf(b.source));
+      if (!isOurs(texts[at])) {
+        const moved = texts.flatMap((text, i) => (isOurs(text) ? [i] : []));
         if (moved.length !== 1) {
           stopped = true;
           cancelTimer();
@@ -256,12 +261,22 @@ export function createEditorSession({
         }
         at = moved[0];
       }
+      lastWritten = texts[at];
+      attempted.clear();
       if (source === lastWritten) return;
+      attempted.add(source);
       await writeBody(markdown.replaceFencedBlock(body, "mermaid", at, source));
       lastWritten = source;
-      onSaved();
+      attempted.clear();
     } catch (err) {
       onError(`Diagram save failed: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    // Outside the try: the save succeeded whatever the UI hook does.
+    try {
+      onSaved();
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -269,14 +284,19 @@ export function createEditorSession({
     /**
      * Reads the block into the session and returns its source. Also what
      * "Reload from note" runs: it drops unsaved edits and resumes autosave.
-     * Rejects, leaving autosave stopped, when the note has no such block.
+     * Rejects, leaving autosave stopped, when the note can't be read or has
+     * no such block.
      */
     load() {
       cancelTimer();
       return enqueue(async () => {
+        // Stopped until the block is read, so a load that fails leaves
+        // autosave off.
+        stopped = true;
         const block = markdown.fencedBlocks(await readBody(), "mermaid")[at];
         if (!block) throw new Error(`No mermaid block at index ${at}`);
         lastWritten = current = lf(block.source);
+        attempted.clear();
         stopped = false;
         return current;
       });

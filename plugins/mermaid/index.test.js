@@ -419,7 +419,7 @@ function editor(overrides = {}) {
   const s = createEditorSession({
     index: overrides.index ?? 1,
     markdown: fakeMarkdown,
-    readBody: async () => note.body,
+    readBody: overrides.readBody ?? (async () => note.body),
     writeBody:
       overrides.writeBody ??
       (async (next) => {
@@ -427,7 +427,7 @@ function editor(overrides = {}) {
         log.written.push(next);
       }),
     onConflict: () => (log.conflicts += 1),
-    onSaved: () => (log.saved += 1),
+    onSaved: overrides.onSaved ?? (() => (log.saved += 1)),
     onError: (m) => log.errors.push(m),
     debounceMs: 10,
   });
@@ -640,4 +640,100 @@ test("session: a CRLF body saves with no false conflict and keeps CRLF", async (
   await s.flush();
   assert.equal(log.conflicts, 0);
   assert.equal(sourceAt(note.body, 1), "pie\n  z");
+});
+
+test("session: a write that lands and then throws is retried, not a conflict", async () => {
+  let fail = true;
+  const { s, log, note } = editor({
+    // Like the host: the body (what readBody returns) is updated before
+    // the file write that fails.
+    writeBody: async (next) => {
+      note.body = next;
+      log.written.push(next);
+      if (fail) throw new Error("file write failed");
+    },
+  });
+  await s.load();
+  s.change("pie\n  landed");
+  await s.flush();
+  assert.deepEqual(log.errors, ["Diagram save failed: file write failed"]);
+  fail = false;
+  // The block holds the failed write's text: still ours.
+  await s.flush();
+  assert.equal(log.conflicts, 0);
+  s.change("pie\n  next");
+  await s.flush();
+  assert.equal(log.conflicts, 0);
+  assert.equal(sourceAt(note.body, 1), "pie\n  next");
+  assert.equal(log.saved, 1);
+});
+
+test("session: a landed failed write is followed when a block is inserted above", async () => {
+  let fail = true;
+  const { s, log, note } = editor({
+    writeBody: async (next) => {
+      note.body = next;
+      if (fail) throw new Error("file write failed");
+    },
+  });
+  await s.load();
+  s.change("pie\n  landed");
+  await s.flush();
+  fail = false;
+  note.body = fence("flowchart LR") + note.body;
+  s.change("pie\n  next");
+  await s.flush();
+  assert.equal(log.conflicts, 0);
+  assert.equal(s.index(), 2);
+  assert.equal(sourceAt(note.body, 2), "pie\n  next");
+});
+
+test("session: a load that fails mid-session leaves autosave stopped", async () => {
+  let readFails = false;
+  const { s, log, note } = editor({
+    readBody: async () => {
+      if (readFails) throw new Error("vault gone");
+      return note.body;
+    },
+  });
+  await s.load();
+  s.change("pie\n  unsaved");
+  readFails = true;
+  await assert.rejects(s.load(), /vault gone/);
+  readFails = false;
+  s.change("pie\n  more");
+  await wait(30);
+  await s.flush();
+  assert.equal(log.written.length, 0);
+  assert.equal(s.source(), "pie\n  more");
+});
+
+test("session: a load that finds the block gone mid-session leaves autosave stopped", async () => {
+  const { s, log, note } = editor();
+  await s.load();
+  note.body = note.body.slice(0, note.body.lastIndexOf("```mermaid"));
+  await assert.rejects(s.load(), /no mermaid block at index 1/i);
+  s.change("pie\n  more");
+  await wait(30);
+  await s.flush();
+  assert.equal(log.written.length, 0);
+  assert.equal(log.conflicts, 0);
+});
+
+test("session: a throwing onSaved isn't reported as a failed save", async (t) => {
+  const logged = t.mock.method(console, "error", () => {});
+  const { s, log } = editor({
+    onSaved: () => {
+      throw new Error("ui hook broke");
+    },
+  });
+  await s.load();
+  s.change("pie\n  saved");
+  await s.flush();
+  assert.deepEqual(log.errors, []);
+  assert.equal(log.written.length, 1);
+  assert.equal(logged.mock.callCount(), 1);
+  // It counts as saved: nothing is written again.
+  await s.flush();
+  assert.equal(log.written.length, 1);
 });
