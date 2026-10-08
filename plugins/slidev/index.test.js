@@ -28,13 +28,14 @@ function fakeEngine(over = {}) {
 }
 
 function fakeHost(enabled, slides) {
-  const reg = { provided: undefined, tabs: [], commands: [], formats: [], overlays: [], tabsOpened: [], attributeUpdates: [], sidecarCalls: [] };
+  const reg = { provided: undefined, tabs: [], commands: [], formats: [], toolbar: [], overlays: [], tabsOpened: [], attributeUpdates: [], sidecarCalls: [] };
   const host = {
     isEnabled: () => enabled,
     provide: (api) => void (reg.provided = api),
     registerTabType: (t) => reg.tabs.push(t),
     registerCommand: (c) => reg.commands.push(c),
     registerExportFormat: (f) => reg.formats.push(f),
+    registerToolbarItem: (i) => reg.toolbar.push(i),
     openTab: async (...args) => void reg.tabsOpened.push(args),
     notes: {
       get: async (note) => ({ ...note, title: "Deck", path: "talks/deck.md", vaultPath: "/vault", attributes: {}, body: "" }),
@@ -74,7 +75,27 @@ test("as PDF export's dependency only: provides its API, adds nothing, starts no
   activate(host, engine);
   await flush();
   assert.ok(reg.provided);
-  assert.deepEqual([reg.tabs, reg.commands, reg.formats, calls], [[], [], [], []]);
+  assert.deepEqual([reg.tabs, reg.commands, reg.formats, reg.toolbar, calls], [[], [], [], [], []]);
+});
+
+test("adds a Present button to the toolbar that opens the presentation tab", async () => {
+  const { engine } = fakeEngine();
+  const { host, reg } = fakeHost(true);
+  activate(host, engine);
+  await flush();
+  const present = reg.toolbar.find((i) => i.id === "present-button");
+  assert.equal(present.kind, "button");
+  assert.equal(present.label, "Present");
+  present.run(note);
+  assert.deepEqual(reg.tabsOpened, [["present", note, ""]]);
+});
+
+test("adds no toolbar item when loaded only as a dependency", async () => {
+  const { engine } = fakeEngine();
+  const { host, reg } = fakeHost(false);
+  activate(host, engine);
+  await flush();
+  assert.deepEqual(reg.toolbar, []);
 });
 
 test("exportPdf checks Node, renders the note's own file, and adds the log to failures", async () => {

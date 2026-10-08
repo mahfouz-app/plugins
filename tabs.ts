@@ -11,6 +11,8 @@ export interface NoteRef {
 export interface ToolbarButton {
   label: string;
   title?: string;
+  /** Inline SVG body (24×24 viewBox, stroke-based), shown before the label. */
+  icon?: string;
   disabled?: boolean;
   /** Makes the button a dropdown: clicking it lists these items instead of
    * calling `onClick`. */

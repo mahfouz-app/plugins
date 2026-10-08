@@ -21,6 +21,10 @@ const COLD_START_RELOAD_MS = 1500;
 const PRESENT_ICON =
   '<rect x="3" y="4" width="18" height="12" rx="2" /><path d="M10 8l4 2-4 2z" /><path d="M8 20h8M12 16v4" />';
 
+const RELOAD_ICON = '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>';
+const PRESENTER_ICON = '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M7 20h10"/><circle cx="12" cy="10" r="2"/>';
+const BROWSER_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
+
 // ---- the engine: the sidecar's methods ---------------------------------------
 
 /** The sidecar calls the UI uses (see sidecar.js for what each does). */
@@ -278,14 +282,21 @@ function renderPresentTab(host, engine, container, ctx, target) {
   const toolbar = () => {
     const running = phase.kind === "running";
     ctx.setToolbar([
-      { label: "Reload", title: "Reload the deck", disabled: !running, onClick: () => url && (frame.src = url) },
+      { label: "Reload", title: "Reload the deck", icon: RELOAD_ICON, disabled: !running, onClick: () => url && (frame.src = url) },
       {
         label: "Presenter",
         title: "Open presenter view (notes, timer) in your browser",
+        icon: PRESENTER_ICON,
         disabled: !running,
         onClick: () => url && void host.ui.openExternal(`${url}presenter/`),
       },
-      { label: "Browser", title: "Open the deck in your browser", disabled: !running, onClick: () => url && void host.ui.openExternal(url) },
+      {
+        label: "Browser",
+        title: "Open the deck in your browser",
+        icon: BROWSER_ICON,
+        disabled: !running,
+        onClick: () => url && void host.ui.openExternal(url),
+      },
       { label: "Restart", title: "Restart the Slidev server", disabled: phase.kind === "starting", onClick: () => session?.restart() },
     ]);
   };
@@ -394,6 +405,14 @@ export function activate(host, engine = sidecarEngine(host)) {
     label: "Present",
     icon: PRESENT_ICON,
     noteMenu: true,
+    run: (note) => host.openTab("present", note, ""),
+  });
+
+  host.registerToolbarItem({
+    kind: "button",
+    id: "present-button",
+    label: "Present",
+    icon: PRESENT_ICON,
     run: (note) => host.openTab("present", note, ""),
   });
 

@@ -335,4 +335,15 @@ function createEditorTab(host) {
 export function activate(host) {
   host.registerEmbed("drawio", createRenderer(host));
   host.registerTabType(createEditorTab(host));
+
+  if (host.isEnabled()) {
+    host.registerToolbarItem({
+      kind: "button",
+      id: "new-diagram",
+      label: "New diagram",
+      run: () => {
+        if (!host.editor.insertEmbed("drawio")) host.toast("Open a note in the editor first, then add the diagram.");
+      },
+    });
+  }
 }
