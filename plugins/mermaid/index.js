@@ -577,6 +577,39 @@ export function canExport({ svg, current, pending }) {
   return svg !== null && current && !pending;
 }
 
+/**
+ * Which preview render may land. Each render the tab starts takes a number,
+ * and only the latest one's result (or error) is used. An edit also
+ * supersedes a render already running, since that render is of older text,
+ * so a debounced render pending means nothing is current until it lands.
+ */
+export function createRenderTracker() {
+  let seq = 0;
+  let pending = false;
+  return {
+    /** An edit scheduled a render. True when nothing was pending before. */
+    schedule() {
+      seq += 1;
+      const was = pending;
+      pending = true;
+      return !was;
+    },
+    /** A render starts; returns its number for `settle`. */
+    start() {
+      seq += 1;
+      pending = true;
+      return seq;
+    },
+    /** Render `n` finished; true when it's the latest and may be shown. */
+    settle(n) {
+      if (n !== seq) return false;
+      pending = false;
+      return true;
+    },
+    isPending: () => pending,
+  };
+}
+
 const errorMessage = (err) => (err instanceof Error ? err.message : String(err));
 
 const STYLE = `
@@ -713,11 +746,9 @@ function createEditorTab(host, runtime) {
       let lastSvg = null;
       let current = false;
       let renderTimer = null;
-      // A render is debounced or running whose result isn't in yet.
-      let pending = false;
+      const renders = createRenderTracker();
       // A load is in flight; Reload waits for it.
       let loading = false;
-      let renderSeq = 0;
 
       // ---- split ----
       let split = loadSplit();
@@ -786,12 +817,10 @@ function createEditorTab(host, runtime) {
         clearTimeout(renderTimer);
         renderTimer = null;
         if (!editor) return;
-        pending = true;
         const text = editor.getValue();
-        renderSeq += 1;
-        const seq = renderSeq;
+        const seq = renders.start();
         if (!text.trim()) {
-          pending = false;
+          renders.settle(seq);
           canvas.replaceChildren();
           canvas.classList.remove("mme-stale");
           hint.hidden = false;
@@ -807,8 +836,7 @@ function createEditorTab(host, runtime) {
         try {
           svg = await runtime.renderSvg(text, ctx.theme);
         } catch (err) {
-          if (disposed || seq !== renderSeq) return;
-          pending = false;
+          if (!renders.settle(seq) || disposed) return;
           const message = errorMessage(err);
           // The last good diagram stays, dimmed, above the error.
           canvas.classList.add("mme-stale");
@@ -819,8 +847,7 @@ function createEditorTab(host, runtime) {
           updateToolbar();
           return;
         }
-        if (disposed || seq !== renderSeq) return;
-        pending = false;
+        if (!renders.settle(seq) || disposed) return;
         canvas.innerHTML = svg;
         canvas.classList.remove("mme-stale");
         // At its natural size, so pan/zoom has something to measure.
@@ -842,11 +869,9 @@ function createEditorTab(host, runtime) {
       const scheduleRender = () => {
         clearTimeout(renderTimer);
         renderTimer = setTimeout(() => void renderNow(), PREVIEW_DEBOUNCE_MS);
-        // Export and Copy wait for this render (once per burst of edits).
-        if (!pending) {
-          pending = true;
-          updateToolbar();
-        }
+        // Any render in flight is of older text now, and is dropped; Export
+        // and Copy wait for this one (the toolbar updates once per burst).
+        if (renders.schedule()) updateToolbar();
       };
       const offTheme = ctx.onThemeChange(() => void renderNow());
 
@@ -988,7 +1013,7 @@ function createEditorTab(host, runtime) {
 
       const updateToolbar = () => {
         if (disposed) return;
-        const ready = canExport({ svg: lastSvg, current, pending });
+        const ready = canExport({ svg: lastSvg, current, pending: renders.isPending() });
         const buttons = [
           {
             label: "Samples",

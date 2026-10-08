@@ -8,6 +8,7 @@ import {
   bannerActions,
   canExport,
   createEditorSession,
+  createRenderTracker,
   createMermaidRenderer,
   createMermaidRuntime,
   exportFileName,
@@ -1036,4 +1037,33 @@ test("canExport: only a successful render of the current source, with none pendi
   // The source has an error or is empty.
   assert.equal(canExport({ svg: "<svg/>", current: false, pending: false }), false);
   assert.equal(canExport({ svg: null, current: false, pending: false }), false);
+});
+
+test("render tracker: an edit during a render drops that render, and exports wait for the next", () => {
+  const t = createRenderTracker();
+  assert.equal(t.isPending(), false);
+  // First edit: debounced render scheduled, then it starts.
+  assert.equal(t.schedule(), true);
+  const first = t.start();
+  // A second edit lands while the first render is in flight.
+  assert.equal(t.schedule(), false);
+  // The first render resolves: superseded, so it's dropped and nothing is exportable.
+  assert.equal(t.settle(first), false);
+  assert.equal(t.isPending(), true);
+  assert.equal(canExport({ svg: "<svg>old</svg>", current: true, pending: t.isPending() }), false);
+  // The second edit's render runs and resolves.
+  const second = t.start();
+  assert.equal(t.settle(second), true);
+  assert.equal(t.isPending(), false);
+  assert.equal(canExport({ svg: "<svg>new</svg>", current: true, pending: t.isPending() }), true);
+});
+
+test("render tracker: a render started over another wins, and the older one is dropped", () => {
+  const t = createRenderTracker();
+  const a = t.start();
+  const b = t.start(); // e.g. a theme change re-renders
+  assert.equal(t.settle(a), false);
+  assert.equal(t.isPending(), true);
+  assert.equal(t.settle(b), true);
+  assert.equal(t.isPending(), false);
 });
