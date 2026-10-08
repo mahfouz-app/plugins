@@ -1,4 +1,4 @@
-// Vendored from mahfouz-app/app src/app/src/plugins/{commands,exportFormats,notes,overlay}.ts — keep in sync.
+// Vendored from mahfouz-app/app src/app/src/plugins/{commands,exportFormats,fencedBlocks,notes,overlay}.ts — keep in sync.
 import type { NoteRef } from "./tabs";
 
 export interface CommandNote {
@@ -42,6 +42,20 @@ export interface ExportFormat {
     request: ExportRequest,
     progress: (detail: string, percent?: number) => void
   ): Promise<ExportResult>;
+}
+
+export interface FencedBlock {
+  /** Start of the block's first content line, including its prefix. */
+  from: number;
+  /** End of the content, before the line break that precedes the closing
+   * fence. An empty block (`from === to`) sits at the start of the line the
+   * closing fence is on, or at the end of an unclosed fence. */
+  to: number;
+  /** What a container puts in front of every line of the block: the list
+   * indent, a blockquote's `> `, or both. Empty for a top-level fence. */
+  prefix: string;
+  /** The content with `prefix` stripped and CRLF turned into LF. */
+  source: string;
 }
 
 export interface NoteInfo extends NoteRef {
