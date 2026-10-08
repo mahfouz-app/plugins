@@ -14,10 +14,39 @@ export function mermaidModuleUrl(baseUrl) {
 }
 
 /**
- * Builds the embed renderer. `loadModule` and `timeoutMs` exist for tests;
- * the app uses the defaults.
+ * Where a mermaid parse error points, as 1-based `{ line, column?, endColumn? }`
+ * (`endColumn` exclusive), or null when it doesn't say. Flowchart-style
+ * diagrams use jison parsers, whose error carries a `hash` (`loc` columns are
+ * 0-based, `line` is 0-based); the langium ones (pie and others) only say it
+ * in the message, with chevrotain's 1-based line and column.
  */
-export function createMermaidRenderer(host, options = {}) {
+export function parseErrorLocation(err) {
+  if (!(err instanceof Error)) return null;
+  // Its message quotes the user's text, which may well say "line 2".
+  if (err.name === "UnknownDiagramError") return null;
+  const loc = err.hash?.loc;
+  if (Number.isInteger(loc?.first_line)) {
+    const at = { line: loc.first_line };
+    if (Number.isInteger(loc.first_column)) {
+      at.column = loc.first_column + 1;
+      if (loc.last_line === loc.first_line && loc.last_column > loc.first_column) {
+        at.endColumn = loc.last_column + 1;
+      }
+    }
+    return at;
+  }
+  if (Number.isInteger(err.hash?.line)) return { line: err.hash.line + 1 };
+  const match = /line (\d+)(?:, column (\d+))?/i.exec(err.message);
+  if (!match) return null;
+  return match[2] ? { line: Number(match[1]), column: Number(match[2]) } : { line: Number(match[1]) };
+}
+
+/**
+ * The one mermaid instance the plugin renders with: the embed and the
+ * editor tab share it, so the module loads once. `loadModule` and
+ * `timeoutMs` exist for tests; the app uses the defaults.
+ */
+export function createMermaidRuntime(host, options = {}) {
   const loadModule =
     options.loadModule ?? (() => import(mermaidModuleUrl(host.plugin.baseUrl)).then((m) => m.default));
   const timeoutMs = options.timeoutMs ?? RENDER_TIMEOUT_MS;
@@ -25,10 +54,13 @@ export function createMermaidRenderer(host, options = {}) {
   let cached = null;
   let pending = null;
   // mermaid.initialize() is meant for startup or a config change, not every
-  // render, so it only runs again when the theme actually changes.
-  let initializedTheme = null;
+  // render, so it only runs again when the config actually changes.
+  let initializedConfig = null;
   let renderCounter = 0;
-  const panZoomUndo = new WeakMap();
+  // initialize() sets global config that a render reads while it runs, so
+  // renders go one at a time: a theme change for one caller can't land in
+  // the middle of another's render.
+  let queue = Promise.resolve();
 
   function load() {
     if (cached) return Promise.resolve(cached);
@@ -64,6 +96,54 @@ export function createMermaidRenderer(host, options = {}) {
     });
   }
 
+  async function renderNow(source, theme) {
+    const mermaid = await load();
+    // securityLevel is mermaid's default, pinned so it can't drift: it
+    // sanitises labels and turns off click handlers in the SVG.
+    // suppressErrorRendering: on a syntax error mermaid otherwise draws its
+    // own error diagram into a temporary element on document.body and
+    // leaves it there. Callers show the thrown error themselves.
+    const config = {
+      startOnLoad: false,
+      securityLevel: "strict",
+      suppressErrorRendering: true,
+      theme: theme === "dark" ? "dark" : "default",
+    };
+    const key = JSON.stringify(config);
+    if (initializedConfig !== key) {
+      mermaid.initialize(config);
+      initializedConfig = key;
+    }
+    renderCounter += 1;
+    const { svg } = await withTimeout(mermaid.render(`mahfouz-mermaid-${renderCounter}`, source));
+    return svg;
+  }
+
+  return {
+    /** Whether the mermaid module has loaded (renders won't wait on it). */
+    isLoaded: () => cached !== null,
+
+    /** Renders `source` to SVG markup; rejects with mermaid's error. */
+    renderSvg(source, theme) {
+      const result = queue.then(() => renderNow(source, theme));
+      queue = result.catch(() => {});
+      return result;
+    },
+  };
+}
+
+/**
+ * Builds the embed renderer. `options.runtime` is the shared mermaid
+ * instance; without one it makes its own from `options` (tests do).
+ */
+export function createMermaidRenderer(host, options = {}) {
+  const runtime = options.runtime ?? createMermaidRuntime(host, options);
+  const panZoomUndo = new WeakMap();
+  // Each render of a container takes the next number; a result that comes
+  // back after a newer render of the same container started is dropped.
+  const latest = new WeakMap();
+  let sequence = 0;
+
   const message = (err) => (err instanceof Error ? err.message : String(err));
 
   return {
@@ -71,36 +151,22 @@ export function createMermaidRenderer(host, options = {}) {
     snippet: "graph TD;\n    A --> B",
 
     async render(container, source, theme) {
-      if (!cached) container.textContent = "Loading Mermaid…";
-      let mermaid;
+      sequence += 1;
+      const seq = sequence;
+      latest.set(container, seq);
+      if (!runtime.isLoaded()) container.textContent = "Loading Mermaid…";
+      let svg;
       try {
-        mermaid = await load();
+        svg = await runtime.renderSvg(source, theme);
       } catch (err) {
-        host.ui.showError(container, message(err));
+        if (latest.get(container) === seq) host.ui.showError(container, message(err));
         return;
       }
-      if (initializedTheme !== theme) {
-        // suppressErrorRendering: on a syntax error mermaid otherwise draws
-        // its own error diagram into a temporary element on document.body
-        // and leaves it there, outside the embed. The thrown error is shown
-        // in the embed's card instead.
-        mermaid.initialize({
-          startOnLoad: false,
-          suppressErrorRendering: true,
-          theme: theme === "dark" ? "dark" : "default",
-        });
-        initializedTheme = theme;
-      }
-      try {
-        renderCounter += 1;
-        const { svg } = await withTimeout(mermaid.render(`mahfouz-mermaid-${renderCounter}`, source));
-        container.innerHTML = svg;
-        const rendered = container.firstElementChild;
-        if (rendered && rendered.scrollWidth > container.clientWidth) {
-          panZoomUndo.set(container, host.ui.attachPanZoom(container));
-        }
-      } catch (err) {
-        host.ui.showError(container, message(err));
+      if (latest.get(container) !== seq) return;
+      container.innerHTML = svg;
+      const rendered = container.firstElementChild;
+      if (rendered && rendered.scrollWidth > container.clientWidth) {
+        panZoomUndo.set(container, host.ui.attachPanZoom(container));
       }
     },
 
@@ -112,5 +178,6 @@ export function createMermaidRenderer(host, options = {}) {
 }
 
 export function activate(host) {
-  host.registerEmbed("mermaid", createMermaidRenderer(host));
+  const runtime = createMermaidRuntime(host);
+  host.registerEmbed("mermaid", createMermaidRenderer(host, { runtime }));
 }
