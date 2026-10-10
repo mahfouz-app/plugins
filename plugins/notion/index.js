@@ -59,7 +59,7 @@ export function createNotionImporter(deps = {}) {
     description: "Pages, databases, tasks, comments and files from a Notion workspace",
     credential: {
       label: "Notion integration token",
-      helpUrl: "https://docs.mahfouz.app/guide/import-notion",
+      helpUrl: "https://docs.mahfouz.app/guide/import-notion/",
       secretName: SECRET,
     },
     options: [{ id: "comments", label: "Include comments", hint: "Slower: one more request for every block", default: true }],
