@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "notion",
+  "version": "1.0.0",
+  "label": "Notion import",
+  "description": "Import pages, databases, tasks, comments and files from a Notion workspace",
+  "mahfouz": ">=0.12.0",
+  "apiVersion": 1,
+  "icon": "icon.svg",
+  "frontend": "index.js",
+  "network": {
+    "hosts": ["api.notion.com", "prod-files-secure.s3.us-west-2.amazonaws.com", "file.notion.so"]
+  },
+  "secrets": {
+    "token": { "hosts": ["api.notion.com"] }
+  }
+}

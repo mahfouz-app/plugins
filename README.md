@@ -17,6 +17,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Node.js 24.21.0 (~50 MB), then Slidev, its default theme and playwright-chromium with `npm ci` from the committed lockfile. No Node.js needed. macOS, Linux and Windows (x64 and Apple Silicon/arm64) |
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
+| `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.12.0 |
 
 `npm test` runs the plugins' tests and the registry checker's with `node --test` (no
 dependencies).
@@ -97,7 +98,9 @@ approve the update.
   ],
   "gitPath": ["bin"],
   "frontend": "index.js",
-  "sidecar": { "runtime": "node", "entry": "sidecar.js" }
+  "sidecar": { "runtime": "node", "entry": "sidecar.js" },
+  "network": { "hosts": ["api.example.com", "*.files.example.com"] },
+  "secrets": { "token": { "hosts": ["api.example.com"] } }
 }
 ```
 
@@ -119,6 +122,8 @@ relative and stay inside the plugin's directory.
 | `gitPath` | Directories put on `PATH` for every git command Mahfouz runs (e.g. a `git-lfs` binary). |
 | `node` | A Node.js binary the plugin ships, per platform: `{ "<platform>": "<path to the node binary>" }` (`…/bin/node`, or `…/node.exe` on Windows), produced by a `download` step that has an artifact for each platform listed. On a listed platform, `npm` steps run with the `npm` bundled beside that binary and a `node` sidecar runs with it, so the user needs no Node.js of their own; elsewhere both fall back to the user's Node. Needs `"mahfouz": ">=0.9.0"`. |
 | `frontend` | ES module the app imports. It must export `activate(host)` and may export `deactivate()`. **Ship a single bundled file**: relative imports aren't refreshed on update until the app restarts. |
+| `network` | `{ "hosts": [...] }`: the only hosts `host.http.request` (and the app's downloads for an importer's attachments) may reach, over https. Each is an exact lowercase DNS name with at least two labels (`api.notion.com`), or `*.` followed by one (`*.notion.so`: any subdomain, never `notion.so` itself). No scheme, port, path, IP address, bare `*` or `*.<tld>`. Without it the plugin has no network access through the host. Needs `"mahfouz": ">=0.12.0"`. |
+| `secrets` | `{ "<name>": { "hosts": [...] } }`: session secrets the user pastes into the app (an importer's `credential.secretName`), each bound to the hosts it may be sent to. Every host must also be in `network.hosts`; names follow the id rules. The app attaches the secret as a bearer token only to those hosts and never hands it to the plugin. Needs `"mahfouz": ">=0.12.0"`. |
 | `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the plugin's `node` for the user's platform, or the user's Node when there isn't one. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
 
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
@@ -224,9 +229,39 @@ note editor is open.
   - `host.ui.saveFile({ defaultName, filters?, data })` opens the native save dialog and resolves to
     the path written, or null if cancelled. It rejects on the web.
   - `ctx.theme`, `ctx.onThemeChange` and a toolbar button's `menu` (see Tabs).
+  - `host.registerImporter(importer)` and `host.http` (see Importers). Absent before Mahfouz 0.12.0
+    and on the web.
 - Plugin UI can use the app's `presentation-*` classes (`presentation-status`,
   `presentation-status-title`, `presentation-spinner`, `presentation-log`, `presentation-cta`,
   `presentation-frame`) to match the app's own panes.
+
+### Importers
+
+`host.registerImporter({ id, label, credential?, options?, prepare(ctx) })` adds a source to the
+**Import** dialog. The app owns everything around it: the dialog, the destination, the people
+mapping, the attachment downloads and every vault write (one commit, undone on a failure).
+`prepare` only reads the source and returns an `ImportPlan` (`host.ts`): pages with Markdown
+bodies (no title heading), attributes, children, database columns and structured comments, plus
+the attachments, people and warnings. References use the `mahfouz-import:` link scheme —
+`[text](mahfouz-import:page/<id>)`, `…:file/<ref>`, `…:person/<id>` — and the app rewrites them
+into wikilinks, `/files/…` paths and `@login`s. Never emit one from your source's own text.
+
+- `credential: { label, helpUrl, secretName }` puts a secret field in the dialog. The value goes
+  straight to the app's native side and stays in memory until the app quits; the plugin never sees
+  it. Name it in a request (`secret: "<secretName>"`) and the app attaches it as a bearer token,
+  only to the hosts the manifest's `secrets` lists for it.
+- `options: [{ id, label, hint?, default }]` are checkboxes; `ctx.options[id]` has the answers.
+- `ctx.http.request({ url, method?, headers?, body?, secret? })` resolves to
+  `{ status, headers, body }` for every status (the body parsed when it's JSON). Only the
+  manifest's `network` hosts, https only; credential and framing headers (`Authorization`,
+  `Cookie`, `Host`, `Proxy-*`, `Content-Length`, …) are refused. `ctx.signal` aborts when the user cancels; `ctx.progress(detail, percent?)` shows
+  in the dialog.
+- An attachment's `resolve()` returns the request for its bytes and is called right before its
+  download, after `prepare` has returned, so it can fetch a fresh signed URL.
+
+Plugins share one webview, so this isn't isolation between plugins: another plugin could *use*
+a session secret through `host.http`, but only against the hosts it's bound to, and can never
+read it.
 
 API v1 covers embeds (`registerEmbed`, `editor.insertEmbed`), tabs (`registerTabType`, `openTab`),
 the toolbar (`registerToolbarItem`), commands, overlays, export formats, notes, `provide`/`use`,
