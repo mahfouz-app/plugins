@@ -1,4 +1,4 @@
-// Vendored from mahfouz-app/app src/app/src/plugins/toolbar.ts — keep in sync.
+// Vendored from mahfouz-app/app src/core/src/plugins/toolbar.ts — keep in sync.
 import type { Disposable } from "./api";
 import type { CommandNote } from "./host";
 

@@ -1,4 +1,4 @@
-// Vendored from mahfouz-app/app src/app/src/plugins/tabs.ts — keep in sync.
+// Vendored from mahfouz-app/app src/core/src/plugins/tabs.ts — keep in sync.
 
 /** The app's resolved light/dark theme. */
 export type ResolvedTheme = "light" | "dark";
