@@ -30,9 +30,6 @@ jobs:
         with:
           node-version: 22
 
-      - name: Tests
-        run: npm test
-
       - name: Manifests and version bumps
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -54,6 +51,11 @@ jobs:
             (cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund)
             echo "::endgroup::"
           done
+
+      # After the lockfiles: plugins' tests import their own npm
+      # dependencies (the Slidev header/footer tests need markdown-it).
+      - name: Tests
+        run: npm test
 
       # On a PR: the artifacts of plugins whose manifest changed. On main and
       # weekly: all of them.

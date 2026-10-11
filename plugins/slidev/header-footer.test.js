@@ -20,3 +20,8 @@ test("layerHtml: titleSlide hides slide 1 only", () => {
 test("escapeHtml escapes markup", () => {
   assert.equal(escapeHtml(`<b>"a" & 'b'</b>`), "&lt;b&gt;&quot;a&quot; &amp; &#39;b&#39;&lt;/b&gt;");
 });
+
+test("page tokens fill in as numbers and leave escaped markup inert", () => {
+  const cfg = { header: "&lt;img src=x onerror=alert(1)&gt; {PAGE}/{total}" };
+  assert.equal(layerHtml(cfg, "header", 4, 10), "&lt;img src=x onerror=alert(1)&gt; 4/10");
+});
