@@ -29,7 +29,21 @@
 //   the layer components even though the note itself comes in by `src:`.
 // - `slide-top.vue` in the project root renders inside every slide, in the
 //   dev server and in `slidev export` alike; each slide's wrapper carries
-//   `slidev-page-<n>`.
+//   `slidev-page-<n>`. Slide-top.vue sits directly inside that wrapper, so
+//   it reaches the page with `closest('.slidev-page')` and stamps
+//   `data-layout`/`data-class` there; Vue only patches the attributes it
+//   binds on it (`data-slidev-no`, `class`, `style`, `lang`).
+// - The server picks a slide's layout as `(frontmatter.layout ??
+//   defaults.layout) || (slide 1 ? "cover" : "default")`, and `default` for
+//   an unknown name; the stamp mirrors the first part (layout-stamp.js).
+//   The client can't check a name against the layouts: `#slidev/layouts`
+//   generates `import __layout_two-cols …`, a SyntaxError that stops the
+//   whole deck, so no layer component may import it.
+// - Changing `fonts` (one of CONFIG_RESTART_FIELDS) restarts the dev
+//   server; `colorSchema` and `mahfouz:` only invalidate `/@slidev/configs`.
+//   So a v2 template's fonts come from its stylesheet, never `fonts:`.
+// - `slidev export` waits for each `.slidev-slide-loading` in the page to
+//   detach before rendering it (global-top.vue's font and image wait).
 // - A presented note's HTML and Vue run as script on the dev server's
 //   origin. `setup/vite-plugins.ts` (harden.js) leaves that server only
 //   able to read, and only the vaults in use stay linked under `vaults/`.
@@ -120,14 +134,35 @@ export function templateCss(t) {
   return rules.filter(Boolean).join("\n");
 }
 
-/** Headmatter lines for a template (JSON is valid YAML), or "" for none.
- * `header`/`footer` are inline Markdown rendered with `renderInline`
- * (markdown-it in the sidecar; plain escaping by default). */
+/** JSON for one headmatter line. JSON is valid YAML, but JSON.stringify
+ * leaves U+0085, U+2028 and U+2029 raw, which a YAML 1.1 parser reads as
+ * line breaks; they're escaped (a template's raw css can hold anything,
+ * `</style>` and `\n---\n` included, which JSON already keeps on one line). */
+export function yamlJson(value) {
+  return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+const COLOR_SCHEMAS = ["light", "dark"];
+
+/** Headmatter lines for a template, or "" for none. `header`/`footer` are
+ * inline Markdown rendered with `renderInline` (markdown-it in the sidecar;
+ * plain escaping by default).
+ *
+ * An app with v2 templates sends `stylesheet`, the whole look as CSS, fonts
+ * included (`@import`/`@font-face`), so it's used byte for byte and Slidev's
+ * `fonts:` isn't set. An older app doesn't, and the plugin builds its own
+ * CSS (templateCss) and `fonts:` as before. `colorSchema` is a headmatter
+ * key of its own: Slidev follows it for `html.dark` (Shiki, the default
+ * theme) and the export emulates it. Why fonts never go in `fonts:` for v2:
+ * the header's "Facts this relies on". */
 export function templateHeadmatter(t, renderInline = escapeHtml) {
   if (!t) return "";
+  const v2 = typeof t.stylesheet === "string";
+  const fontFamilies = Array.isArray(t.fontFamilies) ? t.fontFamilies.filter((f) => typeof f === "string") : [];
   const data = Object.fromEntries(
     Object.entries({
-      css: templateCss(t),
+      css: v2 ? t.stylesheet : templateCss(t),
+      fontFamilies: fontFamilies.length ? fontFamilies : undefined,
       logo: t.logo,
       coverLogo: t.cover?.logo,
       logoPosition: t.logoPosition,
@@ -136,8 +171,9 @@ export function templateHeadmatter(t, renderInline = escapeHtml) {
       titleSlide: t.titleSlide,
     }).filter(([, v]) => v)
   );
-  let out = `mahfouz: ${JSON.stringify(data)}\n`;
-  if (t.font) out += `fonts: ${JSON.stringify({ sans: t.font })}\n`;
+  let out = `mahfouz: ${yamlJson(data)}\n`;
+  if (!v2 && t.font) out += `fonts: ${JSON.stringify({ sans: t.font })}\n`;
+  if (COLOR_SCHEMAS.includes(t.colorSchema)) out += `colorSchema: ${JSON.stringify(t.colorSchema)}\n`;
   return out;
 }
 

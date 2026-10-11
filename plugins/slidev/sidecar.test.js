@@ -182,6 +182,87 @@ test("a bare template (name \"\") with only a footer still writes headmatter", (
   assert.deepEqual(JSON.parse(/^mahfouz: (.*)$/m.exec(lines)[1]), { logoPosition: "top-right", footer: "F" });
 });
 
+// A v2 template (the app's `stylesheet`, `colorSchema`, `fontFamilies`): the
+// app builds the whole look, fonts included, so the plugin passes it through.
+// Raw css inside it is the vault owner's and can hold anything.
+const HOSTILE_CSS = 'h1 { color: red; }\n</style><script>alert(1)</script>\n---\nlayout: x\n---\na\u2028b\u2029c\u0085d { }';
+const V2 = {
+  ...BRAND,
+  stylesheet: `@import url("https://fonts.googleapis.com/css2?family=Inter&display=swap");\n.slidev-page:where([data-layout="quote"]) { --mahfouz-text: #111; }\n${HOSTILE_CSS}`,
+  colorSchema: "dark",
+  fontFamilies: ["Inter", "mahfouz-brand"],
+};
+const mahfouzLine = (lines) => JSON.parse(/^mahfouz: (.*)$/m.exec(lines)[1]);
+
+test("a v2 template's stylesheet is the CSS, byte for byte, with no fonts: line", () => {
+  const lines = templateHeadmatter(V2);
+  assert.equal(mahfouzLine(lines).css, V2.stylesheet);
+  assert.doesNotMatch(lines, /^fonts:/m);
+});
+
+test("an empty stylesheet is still the v2 path: no legacy CSS and no fonts: line", () => {
+  const lines = templateHeadmatter({ ...BRAND, stylesheet: "" });
+  assert.equal(mahfouzLine(lines).css, undefined);
+  assert.doesNotMatch(lines, /^fonts:/m);
+});
+
+test("without a stylesheet (an older app) the plugin's own CSS and fonts: stay", () => {
+  const lines = templateHeadmatter({ ...BRAND, stylesheet: 42 });
+  assert.equal(mahfouzLine(lines).css, templateCss(BRAND));
+  assert.match(lines, /^fonts: \{"sans":"Inter"\}$/m);
+});
+
+test("colorSchema goes in the headmatter only as light or dark", () => {
+  assert.match(templateHeadmatter(V2), /^colorSchema: "dark"$/m);
+  assert.match(templateHeadmatter({ ...V2, colorSchema: "light" }), /^colorSchema: "light"$/m);
+  for (const colorSchema of [undefined, "auto", "purple", 1]) {
+    assert.doesNotMatch(templateHeadmatter({ ...V2, colorSchema }), /colorSchema/);
+  }
+});
+
+test("fontFamilies reach the layer components through mahfouz:, strings only", () => {
+  assert.deepEqual(mahfouzLine(templateHeadmatter(V2)).fontFamilies, ["Inter", "mahfouz-brand"]);
+  assert.deepEqual(mahfouzLine(templateHeadmatter({ ...V2, fontFamilies: ["Inter", 3, null] })).fontFamilies, ["Inter"]);
+  assert.equal(mahfouzLine(templateHeadmatter({ ...V2, fontFamilies: "Inter" })).fontFamilies, undefined);
+  assert.equal(mahfouzLine(templateHeadmatter({ ...V2, fontFamilies: [] })).fontFamilies, undefined);
+});
+
+test("the mahfouz: line has no character a YAML parser could break a line on", () => {
+  const lines = templateHeadmatter(V2);
+  assert.doesNotMatch(lines, /[\u0085\u2028\u2029]/);
+  assert.equal(lines.split("\n").filter((l) => l.startsWith("mahfouz: ")).length, 1);
+  const stub = stubContent("./a.md", V2);
+  assert.equal(stub.split("\n").filter((l) => l === "---").length, 2, "a `---` inside the CSS can't end the headmatter");
+});
+
+test("Present's stub and the export entry carry the same mahfouz: line", () => {
+  const line = (s) => /^mahfouz: .*$/m.exec(s)[0];
+  assert.equal(line(stubContent("./a.md", V2)), line(exportEntryContent("./a.md", false, V2)));
+  assert.equal(line(stubContent("./a.md", V2)), line(exportEntryContent("./a.md", true, V2)));
+  assert.equal(mahfouzLine(stubContent("./a.md", V2)).css, V2.stylesheet);
+});
+
+// The `yaml` package is the one Slidev parses headmatter with (a dependency
+// of @slidev/parser, from the plugin's npm install).
+let YAML = null;
+try {
+  YAML = await import("yaml");
+} catch (err) {
+  if (process.env.CI) throw err;
+}
+const withYaml = { skip: YAML ? false : "yaml isn't installed (npm ci in plugins/slidev)" };
+
+test("Slidev's YAML parser reads a sample template back from both entries (the mahfouz: line test guards the escaping)", withYaml, () => {
+  const headmatter = (entry) => YAML.parse(/^---\n([\s\S]*?)\n---\n$/.exec(entry)[1]);
+  for (const entry of [stubContent("./a.md", V2), exportEntryContent("./a.md", true, V2)]) {
+    const data = headmatter(entry);
+    assert.equal(data.mahfouz.css, V2.stylesheet);
+    assert.equal(data.colorSchema, "dark");
+    assert.deepEqual(data.mahfouz.fontFamilies, ["Inter", "mahfouz-brand"]);
+    assert.equal(data.fonts, undefined);
+  }
+});
+
 // markdown-it comes from the plugin's own npm install (CI runs `npm ci` in
 // plugins/slidev before the tests). Without it, these tests are skipped
 // locally and fail in CI.

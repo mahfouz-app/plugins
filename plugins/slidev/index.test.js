@@ -223,6 +223,64 @@ test("the note's slides template goes to both exports and to Present", async () 
   assert.deepEqual(started.calls, ["ready", "start /v a.md Brand"]);
 });
 
+/** Just enough `document` for the Present tab's status panel and frame. */
+function fakeDocument() {
+  const el = () => ({
+    children: [],
+    isConnected: false,
+    setAttribute() {},
+    addEventListener() {},
+    replaceChildren() {
+      this.children = [];
+    },
+    appendChild(c) {
+      this.children.push(c);
+      c.isConnected = true;
+    },
+    append(...cs) {
+      cs.forEach((c) => this.appendChild(c));
+    },
+    remove() {
+      this.isConnected = false;
+    },
+    focus() {},
+  });
+  return { createElement: el, body: el() };
+}
+
+test("Present and both exports, each through the plugin's own wiring, send the same stylesheet bytes", async () => {
+  const stylesheet = '.slidev-page { --mahfouz-text: #111; }\n</style>\n---\n\u2028';
+  const v2 = { name: "Brand", stylesheet, colorSchema: "dark", fontFamilies: ["Inter"] };
+  const seen = [];
+  const capture = fakeEngine({
+    start: async (_v, _r, template) => (seen.push(["present", template.stylesheet]), { url: "http://localhost:3030/", fresh: false }),
+    exportDeck: async (_v, _r, { format, template }) => (seen.push([format, template.stylesheet]), `/tmp/out.${format}`),
+  });
+  // Each lookup returns a fresh copy, as the app's does.
+  const a = fakeHost(true, { resolveTemplate: async () => structuredClone(v2) });
+  activate(a.host, capture.engine);
+  await a.reg.provided.exportPdf(note, { orientation: "landscape" }, () => {});
+  await a.reg.formats[0].export({ note: { ...note, attributes: {} } }, () => {});
+
+  // Present: the note menu's command opens the tab, and the tab type the
+  // plugin registered renders it.
+  await a.reg.commands.find((c) => c.id === "present").run(note);
+  const [[tabId, tabNote]] = a.reg.tabsOpened;
+  const tab = a.reg.tabs.find((t) => t.id === tabId);
+  globalThis.document = fakeDocument();
+  try {
+    const container = document.createElement("div");
+    const dispose = tab.render(container, { note: tabNote, setToolbar: () => {} });
+    for (let i = 0; i < 5 && seen.length < 3; i++) await flush();
+    dispose();
+  } finally {
+    delete globalThis.document;
+  }
+
+  assert.deepEqual(seen.map(([kind]) => kind), ["pdf", "pptx", "present"]);
+  for (const [kind, bytes] of seen) assert.equal(bytes, stylesheet, kind);
+});
+
 test("no template support on the host, or a failing lookup, means no template", async () => {
   const quiet = console.warn;
   console.warn = () => {};
