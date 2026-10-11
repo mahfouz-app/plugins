@@ -107,7 +107,19 @@ export interface ResolvedSlidesTemplate {
     textColor?: string;
     logo?: string;
   };
+  /** The template's raw base css (also inside `stylesheet`). */
   css: string;
+  /** The whole look as one CSS string, built from the fields, the applied
+   * sections and the css (`slidesStylesheet`). Fonts come from it too
+   * (`@import` / `@font-face`), not from Slidev's `fonts:`. Optional here:
+   * an app that predates it doesn't send it, and the plugin then builds its
+   * own CSS from the v1 keys above. */
+  stylesheet?: string;
+  /** Slidev's `colorSchema`, from the base background's luminance; unset
+   * (Slidev's `auto`) when that's unset or a named colour. */
+  colorSchema?: "light" | "dark";
+  /** The font families `stylesheet` loads, to wait for before export. */
+  fontFamilies?: string[];
 }
 
 // ---- import (src/core/src/import/types.ts)

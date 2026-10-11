@@ -2,13 +2,29 @@
   The note's slides template logo, header and footer, drawn on every slide
   (in the dev server and in `slidev export`). The cover logo, when the
   template has one, replaces the logo on slide 1.
+
+  It also stamps its slide's page element (`.slidev-page`) with
+  `data-layout` and `data-class` (layout-stamp.js), which a template's
+  stylesheet scopes its layout sections and variants on. It stamps with or
+  without a template: cheap, and the CSS contract stays uniform.
 -->
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { configs, useSlideContext } from '@slidev/client'
+import layouts from '#slidev/layouts'
 import { layerHtml } from './header-footer.js'
+import { slideClass, slideLayout, stampPage } from './layout-stamp.js'
 
-const { $page, $nav } = useSlideContext()
+const { $page, $nav, $frontmatter } = useSlideContext()
+const anchor = ref(null)
+const knownLayouts = Object.keys(layouts)
+const layout = computed(() => slideLayout($frontmatter, configs.defaults, $page.value, knownLayouts))
+const cls = computed(() => slideClass($frontmatter?.class))
+// The page is the wrapper this component renders in; `flush: 'post'` runs
+// after Vue has patched it, so a re-render can't race the stamp.
+const stamp = () => stampPage(anchor.value?.closest('.slidev-page'), { layout: layout.value, cls: cls.value })
+onMounted(stamp)
+watch([layout, cls], stamp, { flush: 'post' })
 const t = computed(() => configs.mahfouz ?? null)
 const logo = computed(() => {
   if (!t.value) return null
@@ -22,6 +38,7 @@ const footer = computed(() => layerHtml(t.value, 'footer', $page.value, total.va
 </script>
 
 <template>
+  <span ref="anchor" class="mahfouz-anchor" hidden />
   <img v-if="logo" :src="logo" alt="" class="mahfouz-logo" :class="`mahfouz-logo--${position}`">
   <div v-if="header" class="mahfouz-header" v-html="header" />
   <div v-if="footer" class="mahfouz-footer" v-html="footer" />
