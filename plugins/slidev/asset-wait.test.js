@@ -22,8 +22,10 @@ function fakeFonts({ loadNever = false } = {}) {
     },
     add: (family) => faces.push({ family }),
     [Symbol.iterator]: () => faces[Symbol.iterator](),
-    load: (descriptor) => {
+    texts: [],
+    load(descriptor, text) {
       loads.push(descriptor);
+      this.texts.push(text);
       return loadNever ? new Promise(() => {}) : Promise.resolve([]);
     },
     get ready() {
@@ -79,9 +81,32 @@ test("a load or decode that never settles resolves by the cap", async () => {
   assert.equal(await waitForAssets({ fonts, families: ["Inter"], images, capMs: 60, pollMs: 5 }), "timeout");
 });
 
-test("the default cap is 5 seconds", async () => {
-  const { WAIT_CAP_MS } = await import("./asset-wait.js");
-  assert.equal(WAIT_CAP_MS, 5000);
+test("loads each face against the page's text, so faces split by unicode-range load what the slide uses", async () => {
+  const fonts = fakeFonts();
+  fonts.add("Inter");
+  assert.equal(await waitForAssets({ fonts, families: ["Inter"], text: "مرحبا Hello", capMs: 1000, pollMs: 5 }), "ready");
+  assert.deepEqual(fonts.texts, ["مرحبا Hello", "مرحبا Hello", "مرحبا Hello"]);
+  const bare = fakeFonts();
+  bare.add("Inter");
+  await waitForAssets({ fonts: bare, families: ["Inter"], capMs: 1000, pollMs: 5 });
+  assert.deepEqual(bare.texts, [" ", " ", " "], "no text still names a character, as load() requires one to fetch");
+});
+
+test("a declared family matches its name ignoring case, as CSS font-family does", async () => {
+  const fonts = fakeFonts();
+  fonts.add('"INTER"');
+  assert.equal(await waitForAssets({ fonts, families: ["Inter"], capMs: 1000, pollMs: 5 }), "ready");
+  assert.equal(fonts.loads.length, 3);
+});
+
+test("polling stops at the cap", async () => {
+  const fonts = fakeFonts();
+  let polls = 0;
+  fonts[Symbol.iterator] = () => (polls++, [][Symbol.iterator]());
+  assert.equal(await waitForAssets({ fonts, families: ["Inter"], capMs: 40, pollMs: 5 }), "timeout");
+  const after = polls;
+  await delay(40);
+  assert.equal(polls, after);
 });
 
 test("nothing to wait for is ready at once; names that aren't plain strings are skipped", async () => {

@@ -32,9 +32,9 @@ test("an unknown layout is stamped as default, as the server renders it", () => 
   assert.equal(slideLayout({ layout: 3 }, undefined, 2, KNOWN), "default");
 });
 
-test("without the layout list, the name is kept as Slidev's fallback picks it", () => {
-  assert.equal(slideLayout({ layout: "anything" }, undefined, 2, null), "anything");
-  assert.equal(slideLayout({}, undefined, 1, null), "cover");
+test("the layout list is required", () => {
+  assert.throws(() => slideLayout({ layout: "quote" }, undefined, 2, null), TypeError);
+  assert.throws(() => slideLayout({ layout: "quote" }, undefined, 2), TypeError);
 });
 
 test("class tokens come from a string or an array, keeping only plain names", () => {
