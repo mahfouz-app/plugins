@@ -181,6 +181,20 @@ function parseErrorOf(doc) {
  * errors instead of reporting them.
  */
 export function drawDiagram(holder, source, viewer, parseXml) {
+  const drawn = createDiagramViewer(holder, source, viewer, parseXml);
+  return drawn ? hasShapes(drawn.graph) : true;
+}
+
+/** Whether `graph` (an mxGraph) holds any shape or edge. */
+function hasShapes(graph) {
+  const model = graph?.getModel();
+  if (!model) return true;
+  return model.getDescendants(model.getRoot()).some((cell) => model.isVertex(cell) || model.isEdge(cell));
+}
+
+/** `drawDiagram`'s drawing: the GraphViewer it made, or null when the viewer
+ * didn't call back. Throws as `drawDiagram` does. */
+function createDiagramViewer(holder, source, viewer, parseXml) {
   if (!viewer?.createViewerForElement) throw new Error("draw.io's viewer didn't load");
   const doc = parseXml(source);
   const parseError = parseErrorOf(doc);
@@ -197,9 +211,7 @@ export function drawDiagram(holder, source, viewer, parseXml) {
   let drawn = null;
   // Calls back synchronously for inline XML.
   viewer.createViewerForElement(holder, (v) => (drawn = v));
-  const model = drawn?.graph?.getModel();
-  if (!model) return true;
-  return model.getDescendants(model.getRoot()).some((cell) => model.isVertex(cell) || model.isEdge(cell));
+  return drawn;
 }
 
 // ---- the app's side: embed + tab -------------------------------------------
@@ -221,6 +233,120 @@ function loadViewerScript(baseUrl) {
     document.head.appendChild(script);
   });
   return viewerScript;
+}
+
+// ---- published pages ------------------------------------------------------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * Whether `svg` keeps the rules a published page's diagram must (the
+ * publishing service's allowlist, which is stricter): no <foreignObject>,
+ * script, image or other embedded document, no link, no event attribute,
+ * no reference outside the document (`href` only `#…`, `url()` only
+ * `url(#…)`) and no @import. A quick screen so a render that would be
+ * refused is published as code straight away; the service still checks
+ * every element.
+ */
+export function isPublishableSvg(svg) {
+  if (typeof svg !== "string" || !/^<svg[\s>]/.test(svg)) return false;
+  if (/<(?:[\w-]+:)?(?:foreignObject|script|iframe|object|embed|image|a|animate\w*|set)[\s/>]/i.test(svg)) return false;
+  if (/\son[a-z]+\s*=/i.test(svg)) return false;
+  for (const m of svg.matchAll(/\s(?:xlink:)?href\s*=\s*(["'])(.*?)\1/gi)) {
+    if (!m[2].trim().startsWith("#")) return false;
+  }
+  for (const m of svg.matchAll(/url\(\s*(["']?)([^)]*?)\1\s*\)/gi)) {
+    if (!m[2].startsWith("#")) return false;
+  }
+  return !/@import|javascript:/i.test(svg);
+}
+
+/**
+ * The SVG of the diagram `graph` (a GraphViewer's Graph) shows, as an
+ * <svg> element: draw.io's own export (`Graph.getSvg`), transparent, links
+ * removed, with every label as SVG text. An HTML label is converted to
+ * native SVG text (draw.io's `convertHtmlToSvg`, wrapping included); one it
+ * can't convert, which the export would put in a <foreignObject>, is drawn
+ * as plain text lines instead. Colours are pinned to their light side.
+ */
+export function exportDiagramSvg(graph, mxUtils) {
+  const createSvgCanvas = graph.createSvgCanvas;
+  graph.createSvgCanvas = function (...args) {
+    const canvas = createSvgCanvas.apply(this, args);
+    // Each label sets this from its cell's `convertToSvg` style before it
+    // draws; held on for every label here.
+    Object.defineProperty(canvas, "allowConvertHtmlToSvg", { get: () => true, set() {}, configurable: true });
+    canvas.addForeignObject = function (x, y, w, h, str, align, valign, wrap, format, overflow, clip, rotation, dir, div) {
+      const text = div ? mxUtils.extractTextWithWhitespace(div.childNodes) : String(str ?? "");
+      this.plainText(x + this.state.dx, y + this.state.dy, w, h, text, align, valign, wrap, overflow, clip, rotation, dir);
+    };
+    return canvas;
+  };
+  let root;
+  try {
+    // (background, scale, border, nocrop, crisp, ignoreSelection, showText,
+    // imgExport, linkTarget, hasShadow, incExtFonts, theme, exportType,
+    // cells, noCssClass, disableLinks)
+    root = graph.getSvg(null, 1, 8, false, true, true, true, null, null, false, false, null, "diagram", null, true, true);
+  } finally {
+    graph.createSvgCanvas = createSvgCanvas;
+  }
+  // A cell's link, which disableLinks only makes inert, becomes a plain
+  // group: the page shows the diagram without it.
+  for (const link of [...root.getElementsByTagNameNS(SVG_NS, "a")]) {
+    const group = root.ownerDocument.createElementNS(SVG_NS, "g");
+    for (const name of ["id", "class", "transform"]) {
+      const value = link.getAttribute(name);
+      if (value !== null) group.setAttribute(name, value);
+    }
+    while (link.firstChild) group.appendChild(link.firstChild);
+    link.parentNode.replaceChild(group, link);
+  }
+  // light-dark() colours resolve to the light side.
+  root.setAttribute("style", `${root.getAttribute("style") ?? ""} color-scheme: light;`.trim());
+  return root;
+}
+
+/**
+ * The renderer for `host.registerPublishRenderer`: the fence's diagram drawn
+ * off screen by draw.io's viewer (as the preview is), exported by
+ * `exportDiagramSvg` and serialized with XMLSerializer. Null for an empty or
+ * invalid diagram, on any error, or for an SVG that fails
+ * `isPublishableSvg` (an image shape, for one). Leaves nothing in the page.
+ * `deps` exist for tests.
+ */
+export function createPublishRenderer(host, deps = {}) {
+  const loadViewer =
+    deps.loadViewer ?? (() => loadViewerScript(host.plugin.baseUrl).then(() => ({ viewer: window.GraphViewer, mxUtils: window.mxUtils })));
+  const parseXml = deps.parseXml ?? ((xml) => new DOMParser().parseFromString(xml, "text/xml"));
+  const serialize = deps.serialize ?? ((node) => new XMLSerializer().serializeToString(node));
+  const doc = () => deps.document ?? document;
+
+  return async (_lang, source) => {
+    if (!source.trim()) return null;
+    let holder = null;
+    let drawn = null;
+    try {
+      const { viewer, mxUtils } = await loadViewer();
+      holder = doc().createElement("div");
+      holder.setAttribute("style", "position:absolute;left:-100000px;top:0;width:1200px;visibility:hidden;pointer-events:none;");
+      holder.setAttribute("aria-hidden", "true");
+      doc().body.appendChild(holder);
+      drawn = createDiagramViewer(holder, source, viewer, parseXml);
+      if (!drawn?.graph || !hasShapes(drawn.graph)) return null;
+      const svg = serialize(exportDiagramSvg(drawn.graph, mxUtils));
+      return isPublishableSvg(svg) ? svg : null;
+    } catch {
+      return null;
+    } finally {
+      try {
+        drawn?.graph?.destroy?.();
+      } catch {
+        // The diagram is gone with its holder either way.
+      }
+      holder?.remove();
+    }
+  };
 }
 
 function createRenderer(host) {
@@ -335,6 +461,8 @@ function createEditorTab(host) {
 export function activate(host) {
   host.registerEmbed("drawio", createRenderer(host));
   host.registerTabType(createEditorTab(host));
+  // Absent in apps older than published diagrams.
+  host.registerPublishRenderer?.(["drawio"], createPublishRenderer(host));
 
   if (host.isEnabled()) {
     host.registerToolbarItem({

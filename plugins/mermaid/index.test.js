@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
+import { checkSvg } from "../../scripts/svg-allowlist.js";
 import {
   activate,
   bannerActions,
@@ -11,7 +12,9 @@ import {
   createRenderTracker,
   createMermaidRenderer,
   createMermaidRuntime,
+  createPublishRenderer,
   exportFileName,
+  isPublishableSvg,
   loadSplit,
   MERMAID_LANGUAGE,
   MERMAID_SAMPLES,
@@ -1203,4 +1206,116 @@ test("render tracker: a render started over another wins, and the older one is d
   assert.equal(t.isPending(), true);
   assert.equal(t.settle(b), true);
   assert.equal(t.isPending(), false);
+});
+
+// ---- published pages ------------------------------------------------------
+
+const publishFixture = (name) => readFileSync(new URL(`./testdata/publish-${name}.svg`, import.meta.url), "utf8");
+
+test("activate registers a publish renderer for mermaid fences when the host has the hook", async () => {
+  const host = fakeHost();
+  const registered = [];
+  host.registerPublishRenderer = (languages, render) => {
+    registered.push([languages, render]);
+    return { dispose() {} };
+  };
+  activate(host);
+  assert.equal(registered.length, 1);
+  assert.deepEqual(registered[0][0], ["mermaid"]);
+  assert.equal(typeof registered[0][1], "function");
+});
+
+test("activate works on a host without registerPublishRenderer (apps before published diagrams)", () => {
+  const host = fakeHost();
+  assert.equal(host.registerPublishRenderer, undefined);
+  activate(host);
+  assert.equal(host.embeds.get("mermaid").label, "Mermaid diagram");
+});
+
+test("publish render: the light theme with text labels, on its own render id, through toXml", async () => {
+  const mermaid = fakeMermaid(async (id) => ({ svg: `<svg id="${id}"></svg>` }));
+  const runtime = createMermaidRuntime(fakeHost(), { loadModule: async () => mermaid });
+  const seen = [];
+  const render = createPublishRenderer(runtime, {
+    toXml: (markup) => {
+      seen.push(markup);
+      return markup.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ');
+    },
+  });
+  const first = await render("mermaid", "graph TD\n  A --> B");
+  const second = await render("mermaid", "graph TD\n  A --> C");
+  assert.match(first, /^<svg xmlns="http:\/\/www.w3.org\/2000\/svg" id="mahfouz-mermaid-\d+"><\/svg>$/);
+  assert.notEqual(seen[0], seen[1], "each render gets its own id");
+  assert.deepEqual(mermaid.calls.initialize, [
+    {
+      startOnLoad: false,
+      securityLevel: "strict",
+      suppressErrorRendering: true,
+      theme: "default",
+      htmlLabels: false,
+      flowchart: { htmlLabels: false },
+    },
+  ]);
+});
+
+test("publish render: the embeds' own renders keep HTML labels", async () => {
+  const mermaid = fakeMermaid();
+  const runtime = createMermaidRuntime(fakeHost(), { loadModule: async () => mermaid });
+  await createPublishRenderer(runtime, { toXml: () => '<svg xmlns="http://www.w3.org/2000/svg"/>' })("mermaid", "a");
+  await runtime.renderSvg("b", "light");
+  assert.equal(mermaid.calls.initialize.length, 2);
+  assert.equal("htmlLabels" in mermaid.calls.initialize[1], false);
+  assert.equal(mermaid.calls.initialize[1].flowchart, undefined);
+});
+
+test("publish render: null when mermaid can't parse the diagram, the load fails or toXml throws", async () => {
+  const failing = fakeMermaid(async () => {
+    throw new Error("Parse error on line 2:");
+  });
+  const ok = (m) => createMermaidRuntime(fakeHost(), { loadModule: async () => m });
+  assert.equal(await createPublishRenderer(ok(failing), { toXml: (x) => x })("mermaid", "graph TD\n  A -->"), null);
+  const noModule = createMermaidRuntime(fakeHost(), { loadModule: () => Promise.reject(new Error("404")) });
+  assert.equal(await createPublishRenderer(noModule, { toXml: (x) => x })("mermaid", "a"), null);
+  const throwing = createPublishRenderer(ok(fakeMermaid()), {
+    toXml: () => {
+      throw new Error("mermaid returned no <svg>");
+    },
+  });
+  assert.equal(await throwing("mermaid", "a"), null);
+});
+
+test("publish render: null for an SVG that breaks the publishing rules", async () => {
+  const runtime = createMermaidRuntime(fakeHost(), { loadModule: async () => fakeMermaid() });
+  const bad = '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div>x</div></foreignObject></svg>';
+  assert.equal(await createPublishRenderer(runtime, { toXml: () => bad })("mermaid", "a"), null);
+});
+
+test("real publish renders (flowchart, sequence, class) pass the publishing service's allowlist", () => {
+  for (const name of ["flowchart", "sequence", "class"]) {
+    const svg = publishFixture(name);
+    assert.equal(svg.includes("foreignObject"), false, name);
+    assert.equal(isPublishableSvg(svg), true, name);
+    assert.deepEqual(checkSvg(svg), { ok: true }, name);
+  }
+});
+
+test("isPublishableSvg refuses what the publishing service refuses", () => {
+  const svg = (inner, attrs = "") => `<svg xmlns="http://www.w3.org/2000/svg"${attrs}>${inner}</svg>`;
+  assert.equal(isPublishableSvg(svg('<path d="M0 0" marker-end="url(#m)"/><use href="#m"/>')), true);
+  for (const bad of [
+    svg("<foreignObject/>"),
+    svg("<script>alert(1)</script>"),
+    svg('<a href="#x"><text>x</text></a>'),
+    svg('<image href="#x"/>'),
+    svg('<rect onclick="x()"/>'),
+    svg('<use href="https://example.com/x.svg#a"/>'),
+    svg('<use xlink:href="data:image/svg+xml,x"/>'),
+    svg('<rect fill="url(https://example.com/x)"/>'),
+    svg("<style>@import 'x.css';</style>"),
+    svg("<animate attributeName=\"href\"/>"),
+    '<?xml version="1.0"?><!DOCTYPE svg><svg/>',
+    null,
+  ]) {
+    assert.equal(isPublishableSvg(bad), false, String(bad));
+  }
 });

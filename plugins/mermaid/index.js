@@ -175,7 +175,7 @@ export function createMermaidRuntime(host, options = {}) {
     });
   }
 
-  async function renderNow(source, theme) {
+  async function renderNow(source, theme, textLabels) {
     const mermaid = await load();
     // securityLevel is mermaid's default, pinned so it can't drift: it
     // sanitises labels and turns off click handlers in the SVG.
@@ -188,14 +188,27 @@ export function createMermaidRuntime(host, options = {}) {
       suppressErrorRendering: true,
       theme: theme === "dark" ? "dark" : "default",
     };
+    // SVG <text> labels instead of HTML ones in a <foreignObject>, for a
+    // published page. Only flowcharts read the per-diagram key; the others
+    // read the top-level one.
+    if (textLabels) Object.assign(config, { htmlLabels: false, flowchart: { htmlLabels: false } });
     const key = JSON.stringify(config);
     if (initializedConfig !== key) {
       mermaid.initialize(config);
       initializedConfig = key;
     }
     renderCounter += 1;
-    const { svg } = await withTimeout(mermaid.render(`mahfouz-mermaid-${renderCounter}`, source));
-    return svg;
+    const id = `mahfouz-mermaid-${renderCounter}`;
+    try {
+      const { svg } = await withTimeout(mermaid.render(id, source));
+      return svg;
+    } finally {
+      // mermaid.render() removes its scratch element (`#d<id>`, holding the
+      // SVG `#<id>`) itself, but not when it throws partway through.
+      if (typeof document !== "undefined") {
+        for (const leftover of [`d${id}`, id, `i${id}`]) document.getElementById(leftover)?.remove();
+      }
+    }
   }
 
   return {
@@ -203,8 +216,8 @@ export function createMermaidRuntime(host, options = {}) {
     isLoaded: () => cached !== null,
 
     /** Renders `source` to SVG markup; rejects with mermaid's error. */
-    renderSvg(source, theme) {
-      const result = queue.then(() => renderNow(source, theme));
+    renderSvg(source, theme, { textLabels = false } = {}) {
+      const result = queue.then(() => renderNow(source, theme, textLabels));
       queue = result.catch(() => {});
       return result;
     },
@@ -253,6 +266,73 @@ export function createMermaidRenderer(host, options = {}) {
       panZoomUndo.get(container)?.();
       panZoomUndo.delete(container);
     },
+  };
+}
+
+// ---- published pages ------------------------------------------------------
+
+/**
+ * Whether `svg` keeps the rules a published page's diagram must (the
+ * publishing service's allowlist, which is stricter): no <foreignObject>,
+ * script or other embedded document, no event attribute, no reference
+ * outside the document (`href` only `#…`, `url()` only `url(#…)`) and no
+ * @import. A quick screen so a render that would be refused is published
+ * as code straight away; the service still checks every element.
+ */
+export function isPublishableSvg(svg) {
+  if (typeof svg !== "string" || !/^<svg[\s>]/.test(svg)) return false;
+  if (/<(?:[\w-]+:)?(?:foreignObject|script|iframe|object|embed|image|a|animate\w*|set)[\s/>]/i.test(svg)) return false;
+  if (/\son[a-z]+\s*=/i.test(svg)) return false;
+  for (const m of svg.matchAll(/\s(?:xlink:)?href\s*=\s*(["'])(.*?)\1/gi)) {
+    if (!m[2].trim().startsWith("#")) return false;
+  }
+  for (const m of svg.matchAll(/url\(\s*(["']?)([^)]*?)\1\s*\)/gi)) {
+    if (!m[2].startsWith("#")) return false;
+  }
+  return !/@import|javascript:/i.test(svg);
+}
+
+/**
+ * mermaid's SVG markup (an HTML serialization: `<br>`, `&nbsp;`) as XML,
+ * through the browser's own parser and XMLSerializer. A `click` line's
+ * link (an <a>, which strict mode still draws) becomes a plain group and
+ * its tooltip is dropped, so the diagram is published without them. Throws when the markup holds no
+ * <svg>.
+ */
+export function svgMarkupToXml(markup) {
+  const doc = new DOMParser().parseFromString(markup, "text/html");
+  const svg = doc.querySelector("svg");
+  if (!svg) throw new Error("mermaid returned no <svg>");
+  for (const link of [...svg.getElementsByTagNameNS(SVG_NS, "a")]) {
+    const group = doc.createElementNS(SVG_NS, "g");
+    for (const name of ["id", "class", "transform"]) {
+      const value = link.getAttribute(name);
+      if (value !== null) group.setAttribute(name, value);
+    }
+    group.append(...link.childNodes);
+    link.replaceWith(group);
+  }
+  // The same line's tooltip: an attribute a published page has no use for.
+  for (const el of svg.querySelectorAll("[title]")) el.removeAttribute("title");
+  return new XMLSerializer().serializeToString(svg);
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * The renderer for `host.registerPublishRenderer`: the fence drawn by the
+ * shared runtime in the light theme, with text labels, as XML. Null on any
+ * error, including a diagram mermaid can't parse or an SVG that fails
+ * `isPublishableSvg`. `toXml` exists for tests (Node has no DOMParser).
+ */
+export function createPublishRenderer(runtime, { toXml = svgMarkupToXml } = {}) {
+  return async (_lang, source) => {
+    try {
+      const xml = toXml(await runtime.renderSvg(source, "light", { textLabels: true }));
+      return isPublishableSvg(xml) ? xml : null;
+    } catch {
+      return null;
+    }
   };
 }
 
@@ -1186,6 +1266,8 @@ export function activate(host) {
     };
   }
   host.registerEmbed("mermaid", renderer);
+  // Absent in apps older than published diagrams.
+  host.registerPublishRenderer?.(["mermaid"], createPublishRenderer(runtime));
 
   if (host.isEnabled()) {
     host.registerToolbarItem({
