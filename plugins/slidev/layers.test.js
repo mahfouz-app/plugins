@@ -1,7 +1,9 @@
 // Run with `npm test` (node --test) from the repo root. The layer
 // components themselves, mounted: slide-top.vue and global-top.vue are
 // compiled with @vue/compiler-sfc and rendered with Vue's own renderer over
-// a few fake nodes, with `@slidev/client` and `#slidev/layouts` stubbed.
+// a few fake nodes, with `@slidev/client` stubbed. Any other import fails
+// the test: `#slidev/layouts` in particular breaks every deck
+// (slidev-contract.test.js).
 // What's checked is what Slidev's export and a template's stylesheet see:
 // the `data-layout`/`data-class` stamps on the page element, and the
 // `.slidev-slide-loading` marker. Vue and the compiler come from the
@@ -26,14 +28,12 @@ try {
 }
 const withVue = { skip: sfc && vue ? false : "vue or @vue/compiler-sfc isn't installed (npm ci in plugins/slidev)" };
 
-const LAYOUTS = ["cover", "default", "quote", "two-cols", "center"];
 const dataModule = (code) => `data:text/javascript,${encodeURIComponent(code)}`;
 // Read live, so each test's stub applies to the one cached module.
 const CLIENT = dataModule(
   "export const configs = new Proxy({}, { get: (_, key) => globalThis.__slidevStub.configs[key] });\n" +
     "export const useSlideContext = () => globalThis.__slidevStub.context;\n"
 );
-const LAYOUTS_MODULE = dataModule(`export default ${JSON.stringify(Object.fromEntries(LAYOUTS.map((l) => [l, {}])))};`);
 
 /** The component in `file`, compiled the way Slidev's Vite plugin does
  * (`<script setup>` with the template inlined) and imported. */
@@ -45,7 +45,6 @@ async function load(file) {
   const code = content.replace(/(\bfrom\s*)(['"])([^'"]+)\2/g, (_m, from, _q, spec) => {
     if (spec === "vue") return `${from}"${vueUrl}"`;
     if (spec === "@slidev/client") return `${from}"${CLIENT}"`;
-    if (spec === "#slidev/layouts") return `${from}"${LAYOUTS_MODULE}"`;
     if (spec.startsWith("./")) return `${from}"${new URL(spec, url).href}"`;
     throw new Error(`unexpected import ${spec} in ${file}`);
   });
@@ -125,7 +124,7 @@ test("slide-top stamps its page's layout and class on mount, and again when the 
   await vue.nextTick();
   assert.deepEqual({ ...page.dataset }, { layout: "two-cols", class: "dark a b" });
   delete ctx.$frontmatter.class;
-  ctx.$frontmatter.layout = "nope";
+  ctx.$frontmatter.layout = "";
   await vue.nextTick();
   assert.deepEqual({ ...page.dataset }, { layout: "default" });
   unmount();

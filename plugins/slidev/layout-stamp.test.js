@@ -8,33 +8,28 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { slideClass, slideLayout, stampPage } from "./layout-stamp.js";
 
-const KNOWN = ["cover", "default", "quote", "two-cols", "center"];
-
 test("the slide's own layout wins, then defaults.layout, then cover for slide 1 and default after", () => {
-  assert.equal(slideLayout({ layout: "quote" }, { layout: "center" }, 3, KNOWN), "quote");
-  assert.equal(slideLayout({}, { layout: "center" }, 1, KNOWN), "center");
-  assert.equal(slideLayout({}, { layout: "center" }, 4, KNOWN), "center");
-  assert.equal(slideLayout({}, undefined, 1, KNOWN), "cover");
-  assert.equal(slideLayout({}, undefined, 2, KNOWN), "default");
-  assert.equal(slideLayout(undefined, null, 2, KNOWN), "default");
+  assert.equal(slideLayout({ layout: "quote" }, { layout: "center" }, 3), "quote");
+  assert.equal(slideLayout({}, { layout: "center" }, 1), "center");
+  assert.equal(slideLayout({}, { layout: "center" }, 4), "center");
+  assert.equal(slideLayout({}, undefined, 1), "cover");
+  assert.equal(slideLayout({}, undefined, 2), "default");
+  assert.equal(slideLayout(undefined, null, 2), "default");
 });
 
 test("an empty layout falls through like the server's `||`", () => {
   // serve: (frontmatter.layout ?? defaults.layout) || (index === 0 ? "cover" : "default")
-  assert.equal(slideLayout({ layout: "" }, { layout: "center" }, 1, KNOWN), "cover");
-  assert.equal(slideLayout({ layout: null }, { layout: "center" }, 2, KNOWN), "center");
+  assert.equal(slideLayout({ layout: "" }, { layout: "center" }, 1), "cover");
+  assert.equal(slideLayout({ layout: null }, { layout: "center" }, 2), "center");
 });
 
-test("an unknown layout is stamped as default, as the server renders it", () => {
-  assert.equal(slideLayout({ layout: "nope" }, undefined, 2, KNOWN), "default");
-  assert.equal(slideLayout({}, { layout: "nope" }, 1, KNOWN), "default");
-  assert.equal(slideLayout({ layout: "toString" }, undefined, 2, KNOWN), "default");
-  assert.equal(slideLayout({ layout: 3 }, undefined, 2, KNOWN), "default");
-});
-
-test("the layout list is required", () => {
-  assert.throws(() => slideLayout({ layout: "quote" }, undefined, 2, null), TypeError);
-  assert.throws(() => slideLayout({ layout: "quote" }, undefined, 2), TypeError);
+test("a name that isn't a layout is stamped as written (Slidev renders it with default); a non-string is default", () => {
+  // The client can't list the layouts: `#slidev/layouts` doesn't compile
+  // when a layout's name has a hyphen (slidev-contract.test.js).
+  assert.equal(slideLayout({ layout: "nope" }, undefined, 2), "nope");
+  assert.equal(slideLayout({}, { layout: "two-cols" }, 1), "two-cols");
+  assert.equal(slideLayout({ layout: 3 }, undefined, 2), "default");
+  assert.equal(slideLayout({ layout: ["quote"] }, undefined, 2), "default");
 });
 
 test("class tokens come from a string or an array, keeping only plain names", () => {

@@ -44,13 +44,23 @@ test("SlideTop renders inside the element carrying getSlideClass, whose first cl
   assert.match(read(client, "utils.ts"), /function getSlideClass\([^)]*\)\s*\{\s*const classes = \['slidev-page'/);
 });
 
-test("the /@slidev/layouts virtual module exists, and #slidev/* aliases to /@slidev/*", withSlidev, () => {
+// The layer components can't learn the layout names from `#slidev/layouts`:
+// its generated module names each import `__layout_<name>`, which isn't an
+// identifier for `two-cols` (a layout every deck has), so importing it fails
+// the whole deck with a SyntaxError. If this starts failing, Slidev changed
+// the generator; the unknown-layout mapping (layout-stamp.js) could then
+// use it again.
+test("#slidev/layouts can't be imported: its identifiers break on hyphenated layout names", withSlidev, () => {
   const serve = dist("serve");
   assert.match(serve, /id: "\/@slidev\/layouts"/);
-  assert.match(serve, /export default \{\\n\$\{Object\.entries\(layouts\)/, "its default export maps each layout name");
-  const virtual = /const (RE_SLIDEV_VIRTUAL) = \/\^#slidev\\\/\(\.\*\)\//.exec(serve);
-  assert.ok(virtual, "the #slidev/ pattern");
-  assert.match(serve, /find: RE_SLIDEV_VIRTUAL,\s*replacement: "\/@slidev\/\$1"/);
+  assert.match(serve, /imports\.push\(`import __layout_\$\{k\} from "\$\{toAtFS\(v\)\}"`\)/);
+  assert.ok(fs.existsSync(path.join(client, "layouts", "two-cols.vue")));
+});
+
+test("no layer component imports #slidev/layouts", () => {
+  for (const f of ["slide-top.vue", "global-top.vue"]) {
+    assert.doesNotMatch(fs.readFileSync(new URL(f, import.meta.url), "utf8"), /#slidev\/layouts/, f);
+  }
 });
 
 test("the server's layout rule: own layout, then defaults, then cover for slide 1; unknown is default", withSlidev, () => {
