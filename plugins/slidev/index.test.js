@@ -223,6 +223,25 @@ test("the note's slides template goes to both exports and to Present", async () 
   assert.deepEqual(started.calls, ["ready", "start /v a.md Brand"]);
 });
 
+test("Present and both exports receive identical stylesheet bytes", async () => {
+  const stylesheet = '.slidev-page { --mahfouz-text: #111; }\n</style>\n---\n\u2028';
+  const v2 = { name: "Brand", stylesheet, colorSchema: "dark", fontFamilies: ["Inter"] };
+  const seen = [];
+  const capture = fakeEngine({
+    start: async (_v, _r, template) => (seen.push(["present", template]), { url: "http://localhost:3030/", fresh: false }),
+    exportDeck: async (_v, _r, { format, template }) => (seen.push([format, template]), `/tmp/out.${format}`),
+  });
+  const a = fakeHost(true, { resolveTemplate: async () => structuredClone(v2) });
+  activate(a.host, capture.engine);
+  await a.reg.provided.exportPdf(note, { orientation: "landscape" }, () => {});
+  await a.reg.formats[0].export({ note: { ...note, attributes: {} } }, () => {});
+  startDeck(capture.engine, async () => ({ vaultPath: "/v", relPath: "a.md", template: await a.host.slides.resolveTemplate(note) }), () => {});
+  await flush();
+  await flush();
+  assert.deepEqual(seen.map(([kind]) => kind), ["pdf", "pptx", "present"]);
+  for (const [, template] of seen) assert.deepEqual(template, v2);
+});
+
 test("no template support on the host, or a failing lookup, means no template", async () => {
   const quiet = console.warn;
   console.warn = () => {};
