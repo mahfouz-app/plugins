@@ -30,6 +30,9 @@
 // - `slide-top.vue` in the project root renders inside every slide, in the
 //   dev server and in `slidev export` alike; each slide's wrapper carries
 //   `slidev-page-<n>`.
+// - A presented note's HTML and Vue run as script on the dev server's
+//   origin. `setup/vite-plugins.ts` (harden.js) leaves that server only
+//   able to read, and only the vaults in use stay linked under `vaults/`.
 // - The dev server listens on `localhost`, which on modern Node resolves to
 //   `::1` first; readiness polling goes through `localhost` too.
 
@@ -285,6 +288,35 @@ export function linkVault(workspace, vaultPath) {
   return id;
 }
 
+/** Removes the `vaults/<id>` links not in `keep`. Script in a presented
+ * note runs on the dev server's origin and can read what the server can
+ * reach, so only the vaults a Present or an export is using stay linked:
+ * a note never reaches a vault other than its own (and, while an export
+ * of another vault runs, that one). Only symlinks are removed. */
+export function pruneVaultLinks(workspace, keep) {
+  const dir = path.join(workspace, "vaults");
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (keep.has(name)) continue;
+    const link = path.join(dir, name);
+    if (fs.lstatSync(link).isSymbolicLink()) fs.unlinkSync(link);
+  }
+}
+
+/** The vault the Present server shows, and the exports running per vault. */
+const linked = { present: null, exports: new Map() };
+
+function linkedIds() {
+  const ids = new Set(linked.exports.keys());
+  if (linked.present) ids.add(linked.present);
+  return ids;
+}
+
 function checkNote(vaultPath, relPath, verb) {
   const full = safeJoin(vaultPath, relPath);
   if (!fs.statSync(full, { throwIfNoEntry: false })?.isFile()) throw new Error(`note file not found: ${full}`);
@@ -425,6 +457,8 @@ export const methods = {
   async start({ vaultPath, relPath, template }) {
     checkNote(vaultPath, relPath, "presented");
     const id = linkVault(WORKSPACE, vaultPath);
+    linked.present = id;
+    pruneVaultLinks(WORKSPACE, linkedIds());
     fs.writeFileSync(
       path.join(WORKSPACE, "deck.md"),
       stubContent(`./vaults/${id}/${relPath}`, template ?? null, template ? await markdownInline() : undefined)
@@ -449,43 +483,20 @@ export const methods = {
     assertInstalled();
     checkNote(vaultPath, relPath, "exported");
     const id = linkVault(WORKSPACE, vaultPath);
-    let src = `./vaults/${id}/${relPath}`;
-    if (typeof content === "string") {
-      fs.writeFileSync(path.join(WORKSPACE, "export-src.md"), content);
-      src = "./export-src.md";
+    linked.exports.set(id, (linked.exports.get(id) ?? 0) + 1);
+    try {
+      pruneVaultLinks(WORKSPACE, linkedIds());
+      return await runExport(id, relPath, orientation, content, template, format, slidevFormat);
+    } finally {
+      const n = linked.exports.get(id) - 1;
+      if (n > 0) linked.exports.set(id, n);
+      else linked.exports.delete(id);
     }
-    const entry = path.join(WORKSPACE, "export.md");
-    fs.writeFileSync(
-      entry,
-      exportEntryContent(src, orientation === "portrait", template ?? null, template ? await markdownInline() : undefined)
-    );
-    const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.${format}`);
-    const log = tail();
-    const child = spawn(
-      process.execPath,
-      [cliEntry(WORKSPACE), "export", entry, "--output", output, "--format", slidevFormat],
-      { cwd: WORKSPACE, env: { ...process.env, NO_COLOR: "1", CI: "1" }, stdio: ["ignore", "pipe", "pipe"] }
-    );
-    child.stdout.setEncoding("utf8").on("data", (d) => log.add(d));
-    child.stderr.setEncoding("utf8").on("data", (d) => log.add(d));
-    const code = await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        child.kill();
-        resolve("timeout");
-      }, EXPORT_TIMEOUT_MS);
-      child.on("exit", (c, signal) => {
-        clearTimeout(timer);
-        resolve(signal ?? c);
-      });
-    });
-    if (code === "timeout") throw new Error(`slidev export did not finish within ${EXPORT_TIMEOUT_MS / 1000}s:\n${log.text}`);
-    if (code !== 0) throw new Error(`slidev export failed (${code}):\n${log.text}`);
-    if (!fs.existsSync(output)) throw new Error("slidev export exited successfully but produced no file");
-    return output;
   },
 
   stop() {
     stopServer();
+    linked.present = null;
     return null;
   },
 
@@ -494,6 +505,43 @@ export const methods = {
     return server.output.text;
   },
 };
+
+/** `export`'s work, once its vault is linked and marked in use. */
+async function runExport(id, relPath, orientation, content, template, format, slidevFormat) {
+  let src = `./vaults/${id}/${relPath}`;
+  if (typeof content === "string") {
+    fs.writeFileSync(path.join(WORKSPACE, "export-src.md"), content);
+    src = "./export-src.md";
+  }
+  const entry = path.join(WORKSPACE, "export.md");
+  fs.writeFileSync(
+    entry,
+    exportEntryContent(src, orientation === "portrait", template ?? null, template ? await markdownInline() : undefined)
+  );
+  const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.${format}`);
+  const log = tail();
+  const child = spawn(
+    process.execPath,
+    [cliEntry(WORKSPACE), "export", entry, "--output", output, "--format", slidevFormat],
+    { cwd: WORKSPACE, env: { ...process.env, NO_COLOR: "1", CI: "1" }, stdio: ["ignore", "pipe", "pipe"] }
+  );
+  child.stdout.setEncoding("utf8").on("data", (d) => log.add(d));
+  child.stderr.setEncoding("utf8").on("data", (d) => log.add(d));
+  const code = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve("timeout");
+    }, EXPORT_TIMEOUT_MS);
+    child.on("exit", (c, signal) => {
+      clearTimeout(timer);
+      resolve(signal ?? c);
+    });
+  });
+  if (code === "timeout") throw new Error(`slidev export did not finish within ${EXPORT_TIMEOUT_MS / 1000}s:\n${log.text}`);
+  if (code !== 0) throw new Error(`slidev export failed (${code}):\n${log.text}`);
+  if (!fs.existsSync(output)) throw new Error("slidev export exited successfully but produced no file");
+  return output;
+}
 
 // ---- JSON-RPC over stdio -----------------------------------------------------
 

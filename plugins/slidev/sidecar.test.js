@@ -16,6 +16,7 @@ import {
   slidevExportFormat,
   linkVault,
   methods,
+  pruneVaultLinks,
   nodeVersionOk,
   safeInlineHtml,
   safeJoin,
@@ -293,4 +294,23 @@ test("safeInlineHtml falls back to escaped source for anything else", () => {
   ]) {
     assert.equal(safeInlineHtml(html, source), "&lt;b&gt;x&lt;/b&gt;", html);
   }
+});
+
+test("pruning keeps only the vault links in use, and only removes links", () => {
+  const ws = tempDir("prune");
+  const vaults = ["a", "b", "c"].map((n) => {
+    const v = tempDir(`vault-${n}`);
+    fs.writeFileSync(path.join(v, "note.md"), "# n\n");
+    return v;
+  });
+  const ids = vaults.map((v) => linkVault(ws, v));
+  fs.writeFileSync(path.join(ws, "vaults", "not-a-link"), "x");
+  pruneVaultLinks(ws, new Set([ids[1]]));
+  assert.deepEqual(fs.readdirSync(path.join(ws, "vaults")).sort(), [ids[1], "not-a-link"].sort());
+  // The vaults themselves are untouched.
+  for (const v of vaults) assert.ok(fs.existsSync(path.join(v, "note.md")));
+});
+
+test("pruning a workspace that has no vaults/ yet is a no-op", () => {
+  assert.doesNotThrow(() => pruneVaultLinks(tempDir("empty"), new Set()));
 });
