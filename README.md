@@ -12,8 +12,8 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 
 | Plugin | What it does | Installs |
 |---|---|---|
-| `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams, and edits one in a split editor tab | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
-| `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, and edits one in a draw.io tab | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
+| `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams, edits one in a split editor tab, and draws them as images on published pages | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
+| `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, edits one in a draw.io tab, and draws them as images on published pages | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
 | `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Node.js 24.21.0 (~50 MB), then Slidev, its default theme and playwright-chromium with `npm ci` from the committed lockfile. No Node.js needed. macOS, Linux and Windows (x64 and Apple Silicon/arm64) |
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
@@ -232,6 +232,14 @@ note editor is open.
   - `ctx.theme`, `ctx.onThemeChange` and a toolbar button's `menu` (see Tabs).
   - `host.registerImporter(importer)` and `host.http` (see Importers). Absent before Mahfouz 0.12.0
     and on the web.
+  - `host.registerPublishRenderer(languages, publishRender)` draws a fence language to an SVG
+    when a note is published, so the page shows the diagram instead of its code.
+    `publishRender(lang, source)` resolves to the SVG or null (publish the fence as code). It must
+    be a light-theme, self-contained SVG serialized with `XMLSerializer` and with text labels: no
+    `<foreignObject>`, script, `on*` attributes, `href` other than `#…`, `url(…)` other than
+    `url(#…)`, or `@import`. The publishing service checks it against an allowlist
+    (`scripts/svg-allowlist.js` is a copy for tests) and drops one that breaks a rule. Call it
+    optional-chained (`host.registerPublishRenderer?.(…)`).
 - Plugin UI can use the app's `presentation-*` classes (`presentation-status`,
   `presentation-status-title`, `presentation-spinner`, `presentation-log`, `presentation-cta`,
   `presentation-frame`) to match the app's own panes.

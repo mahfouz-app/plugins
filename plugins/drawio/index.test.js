@@ -2,12 +2,17 @@
 // DOM-free parts: block helpers and the editor protocol session.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import { checkSvg } from "../../scripts/svg-allowlist.js";
 import {
   activate,
   countDrawioBlocksBefore,
   createEditorSession,
+  createPublishRenderer,
   drawDiagram,
+  exportDiagramSvg,
   extractDrawioBlockAt,
+  isPublishableSvg,
   replaceDrawioBlockAt,
 } from "./index.js";
 
@@ -288,4 +293,198 @@ test("drawDiagram lets the viewer's own errors through", () => {
     },
   };
   assert.throws(() => drawDiagram(fakeHolder(), "<mxfile/>", viewer, () => parsed("mxfile")), /Cannot read properties/);
+});
+
+// ---- published pages ------------------------------------------------------
+
+test("activate registers a publish renderer for drawio fences when the host has the hook", () => {
+  const registered = [];
+  activate({
+    registerEmbed: () => {},
+    registerTabType: () => {},
+    isEnabled: () => false,
+    registerPublishRenderer: (languages, render) => (registered.push([languages, typeof render]), { dispose() {} }),
+  });
+  assert.deepEqual(registered, [[["drawio"], "function"]]);
+});
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const GOOD_SVG = `<svg xmlns="${SVG_NS}"><g><rect width="1" height="1"/><text>Box</text></g></svg>`;
+
+// Enough of draw.io's export root for exportDiagramSvg: attributes and a
+// list of <a> elements to unwrap.
+function fakeSvgRoot(links = []) {
+  const attrs = { style: "background: transparent;" };
+  const root = {
+    attrs,
+    getAttribute: (k) => attrs[k] ?? null,
+    setAttribute: (k, v) => (attrs[k] = v),
+    getElementsByTagNameNS: (ns, tag) => (ns === SVG_NS && tag === "a" ? links : []),
+    ownerDocument: {
+      createElementNS: (ns, tag) => {
+        const el = { ns, tag, attrs: {}, children: [] };
+        el.setAttribute = (k, v) => (el.attrs[k] = v);
+        el.appendChild = (c) => el.children.push(c);
+        return el;
+      },
+    },
+  };
+  return root;
+}
+
+function fakeLink(attrs, children) {
+  const link = { attrs, kids: [...children] };
+  link.getAttribute = (k) => attrs[k] ?? null;
+  Object.defineProperty(link, "firstChild", { get: () => link.kids[0] ?? null });
+  link.parentNode = { replaced: null, replaceChild: (next, old) => (link.parentNode.replaced = [next, old]) };
+  // What the group's appendChild does to the link: moves its first child out.
+  link.moveOut = () => link.kids.shift();
+  return link;
+}
+
+// A draw.io Graph whose getSvg draws one HTML label: the label sets
+// allowConvertHtmlToSvg from its style first (false here), then, when the
+// conversion is off, falls back to a <foreignObject>.
+function fakeGraph({ cells = ["vertex"], root = fakeSvgRoot(), log = [] } = {}) {
+  const model = {
+    getRoot: () => "root",
+    getDescendants: () => cells,
+    isVertex: (c) => c === "vertex",
+    isEdge: (c) => c === "edge",
+  };
+  const graph = {
+    log,
+    destroyed: 0,
+    getModel: () => model,
+    createSvgCanvas() {
+      const canvas = {
+        allowConvertHtmlToSvg: false,
+        state: { dx: 1, dy: 2 },
+        addForeignObject() {
+          log.push("foreignObject");
+        },
+        plainText(x, y, w, h, str) {
+          log.push(["plainText", x, y, str]);
+        },
+      };
+      return canvas;
+    },
+    getSvg(...args) {
+      log.push(["getSvg", args[0], args[12], args[15]]);
+      const canvas = this.createSvgCanvas();
+      canvas.allowConvertHtmlToSvg = false;
+      if (canvas.allowConvertHtmlToSvg) log.push("converted");
+      canvas.addForeignObject(0, 0, 10, 10, "<b>Hi</b>", "center", "middle", true, "html", null, false, 0, null, { childNodes: ["Hi"] });
+      return root;
+    },
+    destroy() {
+      graph.destroyed += 1;
+    },
+  };
+  return graph;
+}
+
+const mxUtils = { extractTextWithWhitespace: (nodes) => nodes.join("") };
+
+test("exportDiagramSvg converts every HTML label to SVG text, and an unconvertible one to plain text", () => {
+  const graph = fakeGraph();
+  const originalCanvas = graph.createSvgCanvas;
+  const root = exportDiagramSvg(graph, mxUtils);
+  assert.deepEqual(graph.log, [
+    // transparent, whole diagram, links off
+    ["getSvg", null, "diagram", true],
+    "converted",
+    ["plainText", 1, 2, "Hi"],
+  ]);
+  assert.equal(graph.createSvgCanvas, originalCanvas, "the graph's own canvas factory is put back");
+  assert.equal(root.attrs.style, "background: transparent; color-scheme: light;");
+});
+
+test("exportDiagramSvg turns a cell's link into a plain group", () => {
+  const child = { name: "shape" };
+  const link = fakeLink({ "xlink:href": "https://example.com", transform: "t", style: "pointer-events: none;" }, [child]);
+  const root = fakeSvgRoot([link]);
+  // The group's appendChild moves the child out of the link, as the DOM does.
+  const createElementNS = root.ownerDocument.createElementNS;
+  root.ownerDocument.createElementNS = (ns, tag) => {
+    const el = createElementNS(ns, tag);
+    el.appendChild = (c) => (link.moveOut(), el.children.push(c));
+    return el;
+  };
+  exportDiagramSvg(fakeGraph({ root }), mxUtils);
+  const [group, old] = link.parentNode.replaced;
+  assert.equal(old, link);
+  assert.deepEqual([group.ns, group.tag, group.attrs, group.children], [SVG_NS, "g", { transform: "t" }, [child]]);
+});
+
+function fakeDocument() {
+  const doc = { added: [], removed: [] };
+  doc.createElement = (tag) => {
+    const el = { tag, attrs: {}, setAttribute: (k, v) => (el.attrs[k] = v), remove: () => doc.removed.push(el) };
+    return el;
+  };
+  doc.body = { appendChild: (el) => doc.added.push(el) };
+  return doc;
+}
+
+function publishDeps({ graph = fakeGraph(), serialized = GOOD_SVG, viewer, root = "mxGraphModel", parseError } = {}) {
+  const doc = fakeDocument();
+  const v = viewer ?? { createViewerForElement: (el, done) => done({ graph }) };
+  return {
+    doc,
+    graph,
+    deps: {
+      document: doc,
+      loadViewer: async () => ({ viewer: v, mxUtils }),
+      parseXml: () => parsed(root, parseError),
+      serialize: () => serialized,
+    },
+  };
+}
+
+test("publish render: draws off screen, returns the serialized SVG and leaves nothing behind", async () => {
+  const { doc, graph, deps } = publishDeps();
+  const svg = await createPublishRenderer({}, deps)("drawio", "<mxGraphModel/>");
+  assert.equal(svg, GOOD_SVG);
+  assert.equal(doc.added.length, 1);
+  assert.deepEqual(doc.removed, doc.added);
+  assert.match(doc.added[0].attrs.style, /visibility:hidden/);
+  assert.equal(graph.destroyed, 1);
+});
+
+test("publish render: null for an empty source, an empty diagram, bad XML, or a viewer that fails", async () => {
+  assert.equal(await createPublishRenderer({}, publishDeps().deps)("drawio", "  \n"), null);
+  const empty = publishDeps({ graph: fakeGraph({ cells: ["other"] }) });
+  assert.equal(await createPublishRenderer({}, empty.deps)("drawio", "<mxGraphModel/>"), null);
+  assert.deepEqual(empty.doc.removed, empty.doc.added);
+  const bad = publishDeps({ parseError: "error on line 1" });
+  assert.equal(await createPublishRenderer({}, bad.deps)("drawio", "<mxGraph"), null);
+  assert.deepEqual(bad.doc.removed, bad.doc.added);
+  const notDiagram = publishDeps({ root: "svg" });
+  assert.equal(await createPublishRenderer({}, notDiagram.deps)("drawio", "<svg/>"), null);
+  const throwing = publishDeps({
+    viewer: {
+      createViewerForElement: () => {
+        throw new Error("boom");
+      },
+    },
+  });
+  assert.equal(await createPublishRenderer({}, throwing.deps)("drawio", "<mxfile/>"), null);
+  assert.deepEqual(throwing.doc.removed, throwing.doc.added);
+  const noViewer = { ...publishDeps().deps, loadViewer: () => Promise.reject(new Error("failed to load draw.io's viewer")) };
+  assert.equal(await createPublishRenderer({}, noViewer)("drawio", "<mxfile/>"), null);
+});
+
+test("publish render: null for an SVG that breaks the publishing rules (an image shape)", async () => {
+  const { deps } = publishDeps({ serialized: `<svg xmlns="${SVG_NS}"><image href="https://example.com/x.png"/></svg>` });
+  assert.equal(await createPublishRenderer({}, deps)("drawio", "<mxGraphModel/>"), null);
+});
+
+test("real publish renders (HTML labels, a linked cell) pass the publishing service's allowlist", () => {
+  for (const name of ["labels", "link"]) {
+    const svg = readFileSync(new URL(`./testdata/publish-${name}.svg`, import.meta.url), "utf8");
+    assert.equal(svg.includes("foreignObject"), false, name);
+    assert.equal(isPublishableSvg(svg), true, name);
+    assert.deepEqual(checkSvg(svg), { ok: true }, name);
+  }
 });

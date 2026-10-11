@@ -41,6 +41,9 @@ import type { ToolbarItem } from "./toolbar";
 /** A qualified plugin id, `<registry>/<id>` (the app's `src/core/src/settings.ts`). */
 type PluginId = `${string}/${string}`;
 
+/** Draws a fence to an SVG for a published page, or null when it can't. `source` is the fence's text as the app's publish/fenceKey.ts normalizes it (the app's `src/core/src/plugins/publishRender.ts`). */
+type PublishRenderer = (lang: string, source: string) => Promise<string | null>;
+
 export type {
   CommandNote,
   EmbedContext,
@@ -68,6 +71,7 @@ export type {
   PluginId,
   PluginTabContext,
   PluginTabType,
+  PublishRenderer,
   ResolvedSlidesTemplate,
   ToolbarButton,
 };
@@ -189,6 +193,19 @@ export interface MahfouzPluginHost {
    * rebind it in `.config/settings.md` under `<plugin>:<item id>`, like a
    * command; item and command ids share one namespace. */
   registerToolbarItem(item: ToolbarItem): Disposable;
+  /** Draws `languages` fences (e.g. `["mermaid"]`) to an SVG when a note
+   * is published, so the page shows the diagram instead of its code.
+   * `publishRender(lang, source)` gets the fence's text (CRLF as LF, shared
+   * indentation and the trailing newline removed) and resolves to the SVG,
+   * or null to publish the fence as code. Used only while the vault has this
+   * plugin on; a render that takes over 10 seconds, throws, or returns over
+   * 2 MB is published as code. The SVG must use a light theme and text
+   * labels (Mermaid `htmlLabels: false`, Draw.io's text export): no
+   * `<foreignObject>`, script, `on*` attributes, `href` other than `#…`,
+   * `url(…)` other than `url(#…)`, or `@import`. The publishing service
+   * sanitizes it with an allowlist and drops one that breaks a rule. Absent
+   * in apps older than published diagrams. */
+  registerPublishRenderer?(languages: string[], publishRender: PublishRenderer): Disposable;
   /** A source in the Import dialog. The app owns the dialog, the
    * credential field (the secret goes straight to the app's native side,
    * never to `prepare`), the people mapping, the attachment downloads and
