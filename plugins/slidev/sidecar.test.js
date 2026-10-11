@@ -252,7 +252,7 @@ try {
 }
 const withYaml = { skip: YAML ? false : "yaml isn't installed (npm ci in plugins/slidev)" };
 
-test("Slidev's YAML parser reads the stylesheet back unchanged from both entries", withYaml, () => {
+test("Slidev's YAML parser reads a sample template back from both entries (the mahfouz: line test guards the escaping)", withYaml, () => {
   const headmatter = (entry) => YAML.parse(/^---\n([\s\S]*?)\n---\n$/.exec(entry)[1]);
   for (const entry of [stubContent("./a.md", V2), exportEntryContent("./a.md", true, V2)]) {
     const data = headmatter(entry);
