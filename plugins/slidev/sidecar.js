@@ -35,7 +35,10 @@
 //   binds on it (`data-slidev-no`, `class`, `style`, `lang`).
 // - The server picks a slide's layout as `(frontmatter.layout ??
 //   defaults.layout) || (slide 1 ? "cover" : "default")`, and `default` for
-//   an unknown name; the stamp mirrors it (layout-stamp.js).
+//   an unknown name; the stamp mirrors the first part (layout-stamp.js).
+//   The client can't check a name against the layouts: `#slidev/layouts`
+//   generates `import __layout_two-cols …`, a SyntaxError that stops the
+//   whole deck, so no layer component may import it.
 // - Changing `fonts` (one of CONFIG_RESTART_FIELDS) restarts the dev
 //   server; `colorSchema` and `mahfouz:` only invalidate `/@slidev/configs`.
 //   So a v2 template's fonts come from its stylesheet, never `fonts:`.

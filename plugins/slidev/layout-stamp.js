@@ -7,13 +7,13 @@
 // and image has none.
 
 /** The layout Slidev renders slide `page` (1-based) with, by the server's
- * rule (sidecar.js, "Facts this relies on"). `known` is the layout names
- * (`#slidev/layouts`' keys), an array. */
-export function slideLayout(frontmatter, defaults, page, known) {
+ * rule (sidecar.js, "Facts this relies on"). A name that isn't a layout is
+ * kept as written, where the server renders `default`: the client has no
+ * list of layouts to check it against (`#slidev/layouts` doesn't compile). */
+export function slideLayout(frontmatter, defaults, page) {
   const name = frontmatter?.layout ?? defaults?.layout;
   const layout = name || (page === 1 ? "cover" : "default");
   if (typeof layout !== "string") return "default";
-  if (!known.includes(layout)) return "default";
   return layout;
 }
 
