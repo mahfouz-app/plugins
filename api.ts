@@ -244,7 +244,7 @@ export interface MahfouzPluginHost {
     createPanZoom?(container: HTMLElement): PanZoomControls;
     /** Asks where to save `data` in the native save dialog and writes it
      * there. Resolves to the path written, or null when the user cancelled.
-     * Rejects where there is no save dialog (the web). */
+     * On the web it downloads `data` instead and resolves to the file name. */
     saveFile?(options: SaveFileOptions): Promise<string | null>;
   };
 }
