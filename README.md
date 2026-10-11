@@ -227,7 +227,8 @@ note editor is open.
   - `host.ui.createPanZoom(container)` gives `{ zoomIn, zoomOut, fit, reset, refresh, dispose }`;
     unlike `attachPanZoom` it survives the content being re-rendered.
   - `host.ui.saveFile({ defaultName, filters?, data })` opens the native save dialog and resolves to
-    the path written, or null if cancelled. It rejects on the web.
+    the path written, or null if cancelled. On the web it downloads the file instead and resolves to
+    its name.
   - `ctx.theme`, `ctx.onThemeChange` and a toolbar button's `menu` (see Tabs).
   - `host.registerImporter(importer)` and `host.http` (see Importers). Absent before Mahfouz 0.12.0
     and on the web.
