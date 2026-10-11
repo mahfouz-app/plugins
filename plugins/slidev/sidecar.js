@@ -150,8 +150,8 @@ const COLOR_SCHEMAS = ["light", "dark"];
  * `fonts:` isn't set. An older app doesn't, and the plugin builds its own
  * CSS (templateCss) and `fonts:` as before. `colorSchema` is a headmatter
  * key of its own: Slidev follows it for `html.dark` (Shiki, the default
- * theme) and the export emulates it. Unlike `fonts`, it isn't one of the
- * config fields whose change restarts the dev server. */
+ * theme) and the export emulates it. Why fonts never go in `fonts:` for v2:
+ * the header's "Facts this relies on". */
 export function templateHeadmatter(t, renderInline = escapeHtml) {
   if (!t) return "";
   const v2 = typeof t.stylesheet === "string";

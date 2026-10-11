@@ -28,7 +28,7 @@ const pending = ref(Boolean(configs.mahfouz))
 onMounted(async () => {
   if (!pending.value) return
   try {
-    await waitForAssets({ fonts: document.fonts, families, images: document.images })
+    await waitForAssets({ fonts: document.fonts, families, images: document.images, text: document.body?.innerText || ' ' })
   } finally {
     pending.value = false
   }

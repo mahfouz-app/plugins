@@ -6,15 +6,14 @@
 // The layout's own class names can't serve: two-cols renders `two-columns`
 // and image has none.
 
-/** The layout Slidev renders slide `page` (1-based) with, the way its server
- * picks it: `(frontmatter.layout ?? defaults.layout) || (cover for slide 1,
- * default after)`, and `default` for a name that isn't a layout. `known` is
- * the layout names (`#slidev/layouts`' keys); null skips that check. */
+/** The layout Slidev renders slide `page` (1-based) with, by the server's
+ * rule (sidecar.js, "Facts this relies on"). `known` is the layout names
+ * (`#slidev/layouts`' keys), an array. */
 export function slideLayout(frontmatter, defaults, page, known) {
   const name = frontmatter?.layout ?? defaults?.layout;
   const layout = name || (page === 1 ? "cover" : "default");
   if (typeof layout !== "string") return "default";
-  if (known && !Array.from(known).includes(layout)) return "default";
+  if (!known.includes(layout)) return "default";
   return layout;
 }
 
