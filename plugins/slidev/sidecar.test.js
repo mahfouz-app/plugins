@@ -6,15 +6,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { layerHtml } from "./header-footer.js";
 import {
   deckUrl,
   entryModuleSrc,
   ensureLink,
   exportEntryContent,
+  inlineRenderer,
   slidevExportFormat,
   linkVault,
   methods,
   nodeVersionOk,
+  safeInlineHtml,
   safeJoin,
   stubContent,
   templateCss,
@@ -176,4 +179,118 @@ test("template headmatter renders header and footer and carries titleSlide", () 
 test("a bare template (name \"\") with only a footer still writes headmatter", () => {
   const lines = templateHeadmatter({ name: "", logoPosition: "top-right", cover: {}, css: "", footer: "F" });
   assert.deepEqual(JSON.parse(/^mahfouz: (.*)$/m.exec(lines)[1]), { logoPosition: "top-right", footer: "F" });
+});
+
+// markdown-it comes from the plugin's own npm install (CI runs `npm ci` in
+// plugins/slidev before the tests). Without it, these tests are skipped
+// locally and fail in CI.
+let MarkdownIt = null;
+try {
+  ({ default: MarkdownIt } = await import("markdown-it"));
+} catch (err) {
+  if (process.env.CI) throw err;
+}
+const withMarkdownIt = { skip: MarkdownIt ? false : "markdown-it isn't installed (npm ci in plugins/slidev)" };
+
+const HOSTILE = [
+  "<img src=x onerror=alert(1)>",
+  "<script>alert(1)</script>",
+  "<svg onload=alert(1)>",
+  "<a href=\"javascript:alert(1)\">x</a>",
+  "<iframe src=\"https://evil.example\"></iframe>",
+  "<!-- x --><b onclick=alert(1)>b</b>",
+  "[x](javascript:alert(1))",
+  "[x](JaVaScRiPt:alert(1))",
+  "[x](vbscript:msgbox(1))",
+  "![x](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+)",
+  "[x](data:text/html,<script>alert(1)</script>)",
+  "[x](&#106;avascript:alert(1))",
+  "**<img src=x onerror=alert(1)>** {page}",
+];
+
+/** Whether `html`, parsed the way a browser would, could run script: any
+ * element other than the inline Markdown ones, any on* attribute, or a
+ * script-capable URL. A deliberately simple model of the DOM; the inputs are
+ * markdown-it's output or escaped text. */
+function runsScript(html) {
+  for (const [, name, attrs] of html.matchAll(/<([a-zA-Z][^\s>\/]*)([^>]*)>/g)) {
+    if (!["a", "img", "strong", "em", "s", "code", "br"].includes(name)) return true;
+    if (/\son/i.test(attrs)) return true;
+    for (const [, url] of attrs.matchAll(/(?:href|src)="([^"]*)"/g)) {
+      const decoded = url.replace(/&amp;/g, "&").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n));
+      if (/^\s*(?:javascript|vbscript|data:(?!image\/(?:gif|png|jpeg|webp);))/i.test(decoded)) return true;
+    }
+  }
+  return false;
+}
+
+test("a hostile header or footer renders as inert text", withMarkdownIt, () => {
+  const render = inlineRenderer(MarkdownIt);
+  for (const header of HOSTILE) {
+    const html = render(header);
+    assert.equal(runsScript(html), false, `${header} → ${html}`);
+    const shown = layerHtml({ header: html }, "header", 2, 5);
+    assert.equal(runsScript(shown), false, `${header} → ${shown}`);
+  }
+  assert.equal(render("<img src=x onerror=alert(1)>"), "&lt;img src=x onerror=alert(1)&gt;");
+  assert.equal(render("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;/script&gt;");
+});
+
+test("a hostile header stays inert through the template headmatter", withMarkdownIt, () => {
+  const lines = templateHeadmatter(
+    { ...BRAND, header: "<img src=x onerror=alert(1)> {page}", footer: "<script>alert(1)</script>" },
+    inlineRenderer(MarkdownIt)
+  );
+  const data = JSON.parse(/^mahfouz: (.*)$/m.exec(lines)[1]);
+  assert.equal(data.header, "&lt;img src=x onerror=alert(1)&gt; {page}");
+  assert.equal(data.footer, "&lt;script&gt;alert(1)&lt;/script&gt;");
+  assert.equal(layerHtml(data, "header", 3, 7), "&lt;img src=x onerror=alert(1)&gt; 3");
+});
+
+test("inline Markdown still renders in a header and footer", withMarkdownIt, () => {
+  const render = inlineRenderer(MarkdownIt);
+  assert.equal(render("**Acme** · *Q3* {page} / {total}"), "<strong>Acme</strong> · <em>Q3</em> {page} / {total}");
+  assert.equal(render("~~old~~ `code`"), "<s>old</s> <code>code</code>");
+  assert.equal(render("[Site](https://acme.example \"Home\")"), '<a href="https://acme.example" title="Home">Site</a>');
+  assert.equal(render("![logo](/files/logo.png)"), '<img src="/files/logo.png" alt="logo">');
+  assert.equal(render("[mail](mailto:a@acme.example)"), '<a href="mailto:a@acme.example">mail</a>');
+  assert.equal(render("Tom & Jerry <3"), "Tom &amp; Jerry &lt;3");
+  assert.equal(layerHtml({ footer: render("**{page}** of {total}") }, "footer", 2, 9), "<strong>2</strong> of 9");
+});
+
+test("safeInlineHtml passes inline Markdown markup through", () => {
+  for (const html of [
+    "<strong>a</strong> <em>b</em> <s>c</s> <code>d</code><br>",
+    '<a href="https://x.example/?a=1&amp;b=2" title="t">x</a>',
+    '<a href="#top">top</a> <a href="/files/a.pdf">a</a>',
+    '<img src="/files/logo.png" alt="logo"> <img src="data:image/png;base64,AAAA" alt="">',
+    "plain &amp; &lt;text&gt; &quot;q&quot;",
+  ]) {
+    assert.equal(safeInlineHtml(html, "src"), html);
+  }
+});
+
+test("safeInlineHtml falls back to escaped source for anything else", () => {
+  const source = "<b>x</b>";
+  for (const html of [
+    "<b>x</b>",
+    "<img src=x onerror=alert(1)>",
+    '<img src="x" onerror="alert(1)">',
+    '<a href="javascript:alert(1)">x</a>',
+    '<a href=" JAVASCRIPT:alert(1)">x</a>',
+    '<a href="&#106;avascript:alert(1)">x</a>',
+    '<a href="data:text/html,x">x</a>',
+    '<img src="data:image/svg+xml;base64,AAAA" alt="">',
+    '<a href="https://x.example" style="color:red">x</a>',
+    "<STRONG>x</STRONG>",
+    "<strong >x</strong>",
+    "</strong x>",
+    "<!-- x -->",
+    "<script>alert(1)</script>",
+    "<svg/onload=alert(1)>",
+    "a < b",
+    "<a",
+  ]) {
+    assert.equal(safeInlineHtml(html, source), "&lt;b&gt;x&lt;/b&gt;", html);
+  }
 });

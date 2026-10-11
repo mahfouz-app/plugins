@@ -138,12 +138,63 @@ export function templateHeadmatter(t, renderInline = escapeHtml) {
   return out;
 }
 
-/** Inline Markdown → HTML for a template's header and footer. Loaded lazily:
- * the sidecar also runs before the npm install that provides markdown-it.
- * Raw HTML is allowed, as in the note body Slidev renders. If markdown-it
- * can't be loaded (e.g. the install hasn't completed yet), falls back to
- * escaped plain text so Present/export still work, just without Markdown
- * formatting in the header/footer. */
+/** The tags and attributes markdown-it's inline renderer emits with raw
+ * HTML off (and linkify, typographer, breaks off, its defaults). */
+const INLINE_TAGS = {
+  a: ["href", "title"],
+  img: ["src", "alt", "title"],
+  strong: [],
+  em: [],
+  s: [],
+  code: [],
+  br: [],
+};
+const ENTITY = /&(?!(?:amp|lt|gt|quot);)/;
+const SAFE_URL = /^(?![a-z][a-z0-9+.-]*:)|^(?:https?|mailto):|^data:image\/(?:gif|png|jpeg|webp);/i;
+
+/** `html` when it holds only the markup markdown-it's inline renderer makes
+ * from Markdown (no raw HTML, no event handlers, no script URLs), else
+ * `source` escaped as plain text. A check, not a rewrite: anything
+ * unexpected means the renderer isn't configured the way this relies on. */
+export function safeInlineHtml(html, source) {
+  const plain = escapeHtml(source);
+  if (html.includes("<!--")) return plain;
+  for (const [, close, name, attrs] of html.matchAll(/<(\/?)([^\s>\/]*)([^>]*)>/g)) {
+    const allowed = INLINE_TAGS[name.toLowerCase()];
+    if (!allowed || name !== name.toLowerCase()) return plain;
+    if (close) {
+      if (attrs !== "") return plain;
+      continue;
+    }
+    const rest = attrs.replace(/ ([a-z]+)="([^"<>]*)"/g, (_, key, value) => {
+      if (!allowed.includes(key) || ENTITY.test(value)) return "\0";
+      if ((key === "href" || key === "src") && !SAFE_URL.test(value.replace(/&amp;/g, "&").trim())) return "\0";
+      return "";
+    });
+    if (rest !== "") return plain;
+  }
+  // A stray `<` or `>` outside a tag would be a tag the regex above didn't see.
+  if (/[<>]/.test(html.replace(/<\/?[a-z]+(?: [a-z]+="[^"<>]*")*>/g, ""))) return plain;
+  return html;
+}
+
+/** Inline Markdown → HTML for a template's header and footer, given
+ * markdown-it's constructor. The header and footer come from the vault's
+ * `.config/slides.md` and a note's attributes, which a collaborator's commit
+ * can change, and slide-top.vue injects the result with `v-html` on every
+ * slide: so raw HTML is off (it's shown as text) and the output is checked
+ * against what Markdown alone produces. Bold, italics, code, links and
+ * images still render. */
+export function inlineRenderer(MarkdownIt) {
+  const md = new MarkdownIt({ html: false });
+  return (s) => safeInlineHtml(md.renderInline(s), s);
+}
+
+/** The header/footer renderer, loaded lazily: the sidecar also runs before
+ * the npm install that provides markdown-it. If markdown-it can't be loaded
+ * (e.g. the install hasn't completed yet), falls back to escaped plain text
+ * so Present/export still work, just without Markdown formatting in the
+ * header/footer. */
 let markdown = null;
 let markdownUnavailable = false;
 async function markdownInline() {
@@ -151,14 +202,14 @@ async function markdownInline() {
   if (!markdown) {
     try {
       const { default: MarkdownIt } = await import("markdown-it");
-      markdown = new MarkdownIt({ html: true });
+      markdown = inlineRenderer(MarkdownIt);
     } catch (err) {
       markdownUnavailable = true;
       console.error("markdown-it unavailable; header/footer text will be escaped, not rendered as Markdown:", err);
       return escapeHtml;
     }
   }
-  return (s) => markdown.renderInline(s);
+  return markdown;
 }
 
 /** The stub entry deck: imports `src` (relative to the workspace, through

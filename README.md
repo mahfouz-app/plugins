@@ -43,12 +43,12 @@ upstream (npm, GitHub releases) and is pinned by sha256.
 
 `.github/workflows/ci.yml` runs on every PR, on `main`, and weekly:
 
-- `npm test`
 - `node scripts/check.mjs --base <base branch>`: every manifest against the rules the app's
   parser enforces (fields, slugs, versions, the `mahfouz` range, paths staying inside the plugin,
   dependencies, the files `frontend`/`sidecar`/npm steps name, fields newer than the `mahfouz` range
   allows), plus the version-bump rule
 - `npm ci --ignore-scripts` wherever there's a lockfile, so it's known to match its `package.json`
+- `npm test`, after those installs, since a plugin's tests can import its own dependencies
 - `node scripts/check.mjs --artifacts`: downloads each artifact and checks its sha256 (on a PR,
   only for plugins whose manifest changed; weekly, all of them, in case an upstream URL breaks)
 
