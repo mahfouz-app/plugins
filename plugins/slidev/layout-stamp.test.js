@@ -3,8 +3,8 @@
 // renders the slide with) and `data-class` (the slide's `class:` tokens), so
 // a template's stylesheet can scope rules with
 // `.slidev-page:where([data-layout="quote"])` and `[data-class~="wide"]`.
+// The component itself is mounted in layers.test.js.
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import { test } from "node:test";
 import { slideClass, slideLayout, stampPage } from "./layout-stamp.js";
 
@@ -52,21 +52,4 @@ test("stamping sets data-layout and data-class, and clears data-class when there
   stampPage(page, { layout: "default", cls: "" });
   assert.deepEqual({ ...page.dataset }, { layout: "default" });
   assert.doesNotThrow(() => stampPage(null, { layout: "cover", cls: "" }));
-});
-
-const read = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
-
-test("slide-top.vue stamps its page on mount and after each change, once the DOM is patched", () => {
-  const src = read("./slide-top.vue");
-  assert.match(src, /from '\.\/layout-stamp\.js'/);
-  assert.match(src, /closest\('\.slidev-page'\)/);
-  assert.match(src, /onMounted\(stamp\)/);
-  assert.match(src, /watch\([^)]*,\s*stamp,\s*\{\s*flush:\s*'post'\s*\}\)/);
-  assert.doesNotMatch(src, /immediate:\s*true/);
-});
-
-test("global-top.vue holds the export with a loading marker until the template's assets are in", () => {
-  const src = read("./global-top.vue");
-  assert.match(src, /from '\.\/asset-wait\.js'/);
-  assert.match(src, /class="slidev-slide-loading/);
 });
