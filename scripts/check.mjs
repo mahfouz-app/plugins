@@ -41,12 +41,33 @@ const RUST_WS = "\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2
 // Top-level fields newer than the app's first plugin release, and the first
 // app version that understands each. An older app rejects an unknown field, so
 // the plugin's `mahfouz` range must start at that version or later.
-export const FIELD_SINCE = { node: "0.9.0", icon: "0.8.0", logo: "0.8.0" };
+export const FIELD_SINCE = { node: "0.9.0", icon: "0.8.0", logo: "0.8.0", network: "0.12.0", secrets: "0.12.0" };
 // The same for fields of a download step's artifact.
 export const ARTIFACT_FIELD_SINCE = { extract: "0.9.0" };
 const EXTRACTS = ["none", "tar.gz", "zip"];
 
 // ---- helpers --------------------------------------------------------------------
+
+/** A lowercase DNS name of at least two labels whose last label isn't all
+ * digits (no IPv4 literal; IPv6 fails the charset): `is_dns_name` in
+ * manifest.rs. */
+function isDnsName(s) {
+  const labels = s.split(".");
+  return (
+    s.length <= 253 &&
+    labels.length >= 2 &&
+    labels.every((l) => l.length >= 1 && l.length <= 63 && /^[a-z0-9-]+$/.test(l) && !l.startsWith("-") && !l.endsWith("-")) &&
+    !/^\d+$/.test(labels[labels.length - 1])
+  );
+}
+
+/** A host a manifest's `network`/`secrets` may name: an exact DNS name, or
+ * `*.` followed by one (any subdomain, on a dot boundary). No scheme, port,
+ * path, uppercase, IP literal, bare `*` or `*.<tld>`: `is_host_pattern` in
+ * manifest.rs. */
+export function isHostPattern(s) {
+  return typeof s === "string" && isDnsName(s.startsWith("*.") ? s.slice(2) : s);
+}
 
 /** -1 / 0 / 1; a prerelease sorts before its release. Null if not semver. */
 export function compareVersions(a, b) {
@@ -119,7 +140,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
 
   onlyKeys(
     m,
-    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo"],
+    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets"],
     where,
     errors
   );
@@ -300,6 +321,45 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
         }
       }
     }
+  }
+
+  // `network` and `secrets`, as `validate_network` in manifest.rs reads them.
+  let network = [];
+  if ("network" in m) {
+    if (!isObject(m.network)) errors.push(`${where}: network must be { "hosts": [...] }`);
+    else {
+      onlyKeys(m.network, ["hosts"], `${where}: network`, errors);
+      if (!Array.isArray(m.network.hosts)) errors.push(`${where}: network.hosts must be an array`);
+      else {
+        network = m.network.hosts;
+        if (network.length === 0) errors.push(`${where}: network.hosts must not be empty`);
+        for (const h of network) {
+          if (!isHostPattern(h)) {
+            errors.push(`${where}: network host ${JSON.stringify(h)} must be a lowercase DNS name, or *. followed by one`);
+          }
+        }
+      }
+    }
+  }
+  if ("secrets" in m) {
+    if (!isObject(m.secrets)) errors.push(`${where}: secrets must map names to { "hosts": [...] }`);
+    else
+      for (const [name, spec] of Object.entries(m.secrets)) {
+        const at = `${where}: secrets["${name}"]`;
+        if (!SLUG.test(name)) errors.push(`${at}: name must be lowercase letters, digits and dashes (max 32)`);
+        if (!isObject(spec)) {
+          errors.push(`${at}: must be { "hosts": [...] }`);
+          continue;
+        }
+        onlyKeys(spec, ["hosts"], at, errors);
+        if (!Array.isArray(spec.hosts) || spec.hosts.length === 0) {
+          errors.push(`${at}: must name at least one host`);
+          continue;
+        }
+        for (const h of spec.hosts) {
+          if (!network.includes(h)) errors.push(`${at}: host ${JSON.stringify(h)} must also be in network.hosts`);
+        }
+      }
   }
 
   for (const [at, field, since] of newer) {

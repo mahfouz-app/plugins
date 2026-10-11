@@ -1,4 +1,5 @@
-// Vendored from mahfouz-app/app src/app/src/plugins/{commands,exportFormats,fencedBlocks,notes,overlay}.ts — keep in sync.
+// Vendored from mahfouz-app/app src/core/src/plugins/{commands,exportFormats,fencedBlocks,notes,overlay}.ts,
+// src/core/src/db/slidesTemplates.ts and src/core/src/import/types.ts — keep in sync.
 import type { NoteRef } from "./tabs";
 
 export interface CommandNote {
@@ -107,4 +108,196 @@ export interface ResolvedSlidesTemplate {
     logo?: string;
   };
   css: string;
+}
+
+// ---- import (src/core/src/import/types.ts)
+//
+// What an importer hands core: an `ImportPlan`, plain data describing the
+// pages to create. Importers (registry plugins such as `mahfouz/notion`)
+// only read their source and build a plan; every vault write is core's
+// (`writeImportPlan`, write.ts), so a plugin never gets a note-create or
+// file-write API.
+//
+// References between pages, to attachments and to people are ordinary
+// Markdown links with the `mahfouz-import:` scheme, which every Markdown
+// parser keeps intact: `[text](mahfouz-import:page/<id>)`,
+// `[text](mahfouz-import:file/<ref>)` (or `![alt](…)` for an embed) and
+// `[text](mahfouz-import:person/<id>)`. Core rewrites them (refs.ts); ids
+// match `^[A-Za-z0-9-]{1,64}$`.
+
+/** The attribute types a database column can have (the app's `src/core/src/db/attributes.ts`). */
+export type AttributeType =
+  | "text"
+  | "number"
+  | "checkbox"
+  | "url"
+  | "email"
+  | "phone"
+  | "date"
+  | "datetime"
+  | "select"
+  | "multiselect"
+  | "color"
+  | "font"
+  | "attachment"
+  | "image"
+  | "audio"
+  | "video";
+
+/** The `ImportPlan` shape this build reads. */
+export const IMPORT_PLAN_VERSION = 1;
+
+/**
+ * One HTTP request an importer asks core to make. Rust makes it
+ * (`plugin_http_request`), under the plugin's manifest allowlist: https
+ * only, to the manifest's `network` hosts.
+ */
+export interface HttpRequestSpec {
+  url: string;
+  method?: "GET" | "POST" | "PATCH";
+  headers?: Record<string, string>;
+  body?: string;
+  /** The name of a session secret (`Importer.credential.secretName`) Rust attaches as a bearer token; never the secret itself. */
+  secret?: string;
+}
+
+export interface HttpResponse {
+  status: number;
+  headers: Record<string, string>;
+  /** Parsed JSON when the response is JSON, else the text. */
+  body: unknown;
+}
+
+/** Someone the plan mentions, comments as or assigns tasks to. */
+export interface ImportPerson {
+  id: string;
+  name: string;
+  email?: string;
+}
+
+/**
+ * A file the plan references by `ref`. `resolve` gives a fresh request for
+ * its bytes right before the download (signed URLs expire). Its name and
+ * type are hints only: core picks the file's name and how it's linked.
+ */
+export interface ImportAttachment {
+  ref: string;
+  filenameHint: string;
+  resolve(): Promise<HttpRequestSpec>;
+}
+
+/** An attachment downloaded into a staging directory (import/download.ts), ready to copy into the vault. */
+export interface StagedAttachment {
+  ref: string;
+  /** Absolute path of the staged file, as `vaultFs.copyInto` takes it. */
+  path: string;
+  size: number;
+  /** Hex SHA-256 of the bytes, computed while staging: files with the same one are copied once. */
+  sha256: string;
+}
+
+/** One comment of a thread. `text` is plain text that may hold `mahfouz-import:` references. */
+export interface ImportCommentEntry {
+  personId: string;
+  /** ISO 8601 date or date-time. */
+  date: string;
+  text: string;
+}
+
+/**
+ * A comment thread, structured (core renders it as CriticMarkup). `page`
+ * anchors it to the page; `blockIndex` to the page body's top-level
+ * Markdown block at that 0-based index, as the editor's grammar reads the
+ * body.
+ */
+export interface ImportComment {
+  anchor: "page" | { blockIndex: number };
+  entries: ImportCommentEntry[];
+}
+
+/** A database column. `key` names it in the rows' `attributes`; core derives the attribute key from `label`. */
+export interface ImportColumn {
+  key: string;
+  label: string;
+  type: AttributeType;
+  /** select and multiselect only. */
+  options?: string[];
+}
+
+export interface ImportPage {
+  /** The page's id in its source; page references name it. */
+  sourceId: string;
+  title: string;
+  /** Markdown, with no title heading: core puts `# <title>` first. */
+  body: string;
+  /**
+   * Attributes by key (a database row's by its columns' `key`). A
+   * multiselect value is a list of its members; any other value a string.
+   * Values may hold `mahfouz-import:` references.
+   */
+  attributes: Record<string, string | string[]>;
+  /** Sub-pages; a database's rows. */
+  children: ImportPage[];
+  /** Set when the page is a database: its children are its rows. */
+  database?: { columns: ImportColumn[] };
+  comments?: ImportComment[];
+}
+
+export interface ImportPlan {
+  version: typeof IMPORT_PLAN_VERSION;
+  /** The roots, each landing directly in the destination. */
+  pages: ImportPage[];
+  attachments: ImportAttachment[];
+  people: ImportPerson[];
+  /** What the importer couldn't bring over, for the preview. */
+  warnings: string[];
+}
+
+/** What an importer's `prepare` gets from core. */
+export interface ImportContext {
+  progress(detail: string, percent?: number): void;
+  /** Aborted when the user cancels. */
+  signal: AbortSignal;
+  /** Requests through Rust under the importer's plugin's allowlist; a `secret` names the session secret Rust attaches. */
+  http: { request(spec: HttpRequestSpec): Promise<HttpResponse> };
+  /** The dialog's value for each of `Importer.options`, by id. */
+  options: Record<string, boolean>;
+}
+
+/** A checkbox the Import dialog shows for an importer. */
+export interface ImporterOption {
+  id: string;
+  label: string;
+  /** A line under the label. */
+  hint?: string;
+  default: boolean;
+}
+
+export interface Importer {
+  id: string;
+  label: string;
+  /**
+   * A secret the user pastes into the Import dialog. Core hands it straight
+   * to Rust, which keeps it in memory under `secretName` until the app
+   * quits; plugin code never sees it. `helpUrl` (http or https) says where
+   * to get one.
+   */
+  credential?: { label: string; helpUrl: string; secretName: string };
+  options?: ImporterOption[];
+  prepare(ctx: ImportContext): Promise<ImportPlan>;
+}
+
+/** Where an import lands: the vault root, inside a note (made a directory note first), or a plain folder. */
+export type ImportDestination = { kind: "root" } | { kind: "note"; noteId: string } | { kind: "folder"; folderPath: string };
+
+/** What a finished import created. */
+export interface ImportResult {
+  /** The created notes' ids, parent-first. */
+  ids: string[];
+  /** The ids of the plan's roots, in order. */
+  rootIds: string[];
+  /** Vault-relative paths of the copied attachments. */
+  files: string[];
+  /** The plan's warnings followed by the writer's own. */
+  warnings: string[];
 }

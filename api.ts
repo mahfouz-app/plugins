@@ -10,7 +10,7 @@
 // The plugins repo vendors a copy of this file. Changing an existing member
 // is a breaking change and needs a new `apiVersion`; adding one is not.
 
-// Vendored from mahfouz-app/app src/app/src/plugins/api.ts — keep in sync.
+// Vendored from mahfouz-app/app src/core/src/plugins/api.ts — keep in sync.
 import type { EmbedContext, EmbedRenderer } from "./embed";
 import type {
   CommandNote,
@@ -18,6 +18,18 @@ import type {
   ExportRequest,
   ExportResult,
   FencedBlock,
+  HttpRequestSpec,
+  HttpResponse,
+  ImportAttachment,
+  ImportColumn,
+  ImportComment,
+  ImportCommentEntry,
+  ImportContext,
+  Importer,
+  ImporterOption,
+  ImportPage,
+  ImportPerson,
+  ImportPlan,
   NoteInfo,
   OverlaySpec,
   PluginCommand,
@@ -26,7 +38,9 @@ import type {
 import type { NoteRef, PluginTabContext, PluginTabType, ToolbarButton } from "./tabs";
 import type { ToolbarItem } from "./toolbar";
 
-export type PluginId = `${string}/${string}`;
+/** A qualified plugin id, `<registry>/<id>` (the app's `src/core/src/settings.ts`). */
+type PluginId = `${string}/${string}`;
+
 export type {
   CommandNote,
   EmbedContext,
@@ -35,13 +49,26 @@ export type {
   ExportRequest,
   ExportResult,
   FencedBlock,
+  HttpRequestSpec,
+  HttpResponse,
+  ImportAttachment,
+  ImportColumn,
+  ImportComment,
+  ImportCommentEntry,
+  ImportContext,
+  Importer,
+  ImporterOption,
+  ImportPage,
+  ImportPerson,
+  ImportPlan,
   NoteInfo,
   NoteRef,
   OverlaySpec,
   PluginCommand,
+  PluginId,
   PluginTabContext,
-  ResolvedSlidesTemplate,
   PluginTabType,
+  ResolvedSlidesTemplate,
   ToolbarButton,
 };
 export type { ToolbarItem, ToolbarDropdownOption } from "./toolbar";
@@ -162,9 +189,22 @@ export interface MahfouzPluginHost {
    * rebind it in `.config/settings.md` under `<plugin>:<item id>`, like a
    * command; item and command ids share one namespace. */
   registerToolbarItem(item: ToolbarItem): Disposable;
+  /** A source in the Import dialog. The app owns the dialog, the
+   * credential field (the secret goes straight to the app's native side,
+   * never to `prepare`), the people mapping, the attachment downloads and
+   * every vault write; `prepare` only reads the source and returns an
+   * `ImportPlan`. */
+  registerImporter?(importer: Importer): Disposable;
+  /** HTTP through the app's native side, limited to the hosts this
+   * plugin's manifest lists under `network` (https only). `secret` names a
+   * session secret (an importer's `credential.secretName`) the app attaches
+   * as a bearer token, only to the hosts the manifest lists for it. Every
+   * status resolves; the body is parsed when the response is JSON, else
+   * it's text. Desktop only. */
+  http?: { request(spec: HttpRequestSpec): Promise<HttpResponse> };
   editor: {
     /** Inserts one of this plugin's registered embeds at the cursor, as
-     * the Embed menu does. False when no note editor is focused. */
+     * the Embed menu does. False when no note editor is open. */
     insertEmbed(language: string): boolean;
   };
   notes: {
@@ -196,9 +236,14 @@ export interface MahfouzPluginHost {
   };
   slides: {
     /** The slides template that applies to `note` — its `slides_template`
-     * attribute, else the vault default from `.config/slides.md` — or null
-     * (none defined, or the note opted out with `none`). Image paths are
-     * root-absolute `/files/<name>`. Absent before Mahfouz 0.8.0. */
+     * attribute, else the vault default from `.config/slides.md` — with the
+     * note's own `header` / `footer` attributes applied over the template's
+     * (`none` turns one off) and fields expanded; `{page}` and `{total}` are
+     * left for you to fill per slide. `titleSlide` means draw neither on
+     * slide 1. Null when there's no template and the note sets no header or
+     * footer of its own; with no template but its own header/footer, a bare
+     * template (name "") carrying just those. Image paths are root-absolute
+     * `/files/<name>`. */
     resolveTemplate(note: NoteRef): Promise<ResolvedSlidesTemplate | null>;
   };
   /** Makes `api` available to plugins that declare this one as a dependency. */
@@ -213,7 +258,7 @@ export interface MahfouzPluginHost {
     /** Notifications the sidecar sends (`{"jsonrpc":"2.0","method":…,"params":…}`). */
     onNotify(method: string, fn: (params: unknown) => void): Disposable;
   };
-  /** Status-bar progress for a long task; pass an empty `detail` to clear it. */
+  /** Notification-center progress for a long task; pass an empty `detail` to clear it. */
   progress(detail: string, percent?: number): void;
   toast(message: string, kind?: "info" | "error"): void;
   /** Whether this plugin is turned on for the current vault (false when it

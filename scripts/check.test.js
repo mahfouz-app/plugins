@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { check, compareVersions, isContained, isVersionRange, rangeFloor, validateManifest, versionBumpError } from "./check.mjs";
+import { check, compareVersions, isContained, isHostPattern, isVersionRange, rangeFloor, validateManifest, versionBumpError } from "./check.mjs";
 
 const quiet = () => {};
 
@@ -323,4 +323,38 @@ test("icon/logo require a mahfouz range that excludes versions before 0.8.0", ()
   }
   // No icon/logo set: the guard doesn't apply, even on an old range.
   assert.deepEqual(validateManifest({ ...base, mahfouz: ">=0.4.0" }, ctx), []);
+});
+
+test("host patterns: what manifest.rs's is_host_pattern accepts", () => {
+  for (const ok of ["api.notion.com", "file.notion.so", "*.notion.so", "a-b.c1.example", "prod-files-secure.s3.us-west-2.amazonaws.com"]) {
+    assert.equal(isHostPattern(ok), true, ok);
+  }
+  for (const bad of ["*", "*.com", "com", "API.notion.com", "https://api.notion.com", "api.notion.com:443", "api.notion.com/v1",
+    "127.0.0.1", "[::1]", "::1", "-a.example.com", "a-.example.com", "a..example.com", "*.*.example.com", "a.*.example.com", "", 42]) {
+    assert.equal(isHostPattern(bad), false, String(bad));
+  }
+});
+
+test("network and secrets: checked as manifest.rs does, from Mahfouz 0.12.0", () => {
+  const base = minimal("p", { mahfouz: ">=0.12.0" });
+  const errs = (over) => validate({ ...base, ...over }).join("\n");
+  const ok = { network: { hosts: ["api.notion.com", "*.s3.amazonaws.com"] }, secrets: { token: { hosts: ["api.notion.com"] } } };
+  assert.equal(errs(ok), "");
+  assert.equal(errs({ network: { hosts: ["api.notion.com"] } }), "");
+
+  assert.match(errs({ network: { hosts: [] } }), /network.hosts must not be empty/);
+  assert.match(errs({ network: ["api.notion.com"] }), /network must be/);
+  assert.match(errs({ network: { hosts: ["api.notion.com"], extra: 1 } }), /network: unknown field "extra"/);
+  assert.match(errs({ network: { hosts: ["*.com"] } }), /network host "\*\.com"/);
+  assert.match(errs({ network: { hosts: ["10.0.0.1"] } }), /network host "10\.0\.0\.1"/);
+  assert.match(errs({ ...ok, secrets: { token: { hosts: ["file.notion.so"] } } }), /host "file\.notion\.so" must also be in network.hosts/);
+  assert.match(errs({ ...ok, secrets: { token: { hosts: [] } } }), /must name at least one host/);
+  assert.match(errs({ ...ok, secrets: { Token: { hosts: ["api.notion.com"] } } }), /name must be lowercase/);
+  assert.match(errs({ ...ok, secrets: { token: { hosts: ["api.notion.com"], header: "x" } } }), /unknown field "header"/);
+  assert.match(errs({ secrets: { token: { hosts: ["api.notion.com"] } } }), /must also be in network.hosts/);
+
+  // Older apps reject the unknown fields: the range must start at 0.12.0.
+  const old = (over) => validate({ ...minimal("p", { mahfouz: ">=0.11.0" }), ...over }).join("\n");
+  assert.match(old({ network: ok.network }), /"network" needs Mahfouz 0\.12\.0/);
+  assert.match(old(ok), /"secrets" needs Mahfouz 0\.12\.0/);
 });

@@ -1,4 +1,4 @@
-// Vendored from mahfouz-app/app src/app/src/editor/embeds/registry.ts — keep in sync.
+// Vendored from mahfouz-app/app src/core/src/editor/embeds/registry.ts — keep in sync.
 import type { EditorView } from "@codemirror/view";
 
 /** Where a rendered block sits. */
