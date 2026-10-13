@@ -3,6 +3,7 @@
 // and nothing outside that vault's `files/`.
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -90,20 +91,33 @@ test("nothing outside the vault's files/ is served", () => {
   }
 });
 
-/** Runs the plugin's middleware on a request, returning what it sent (or
- * `next` when it passed the request on). */
-function request(plugin, url, method = "GET") {
+/** Runs the plugin's middleware on a request through a real HTTP server,
+ * returning what it sent (or `next` when it passed the request on). */
+async function request(plugin, url, method = "GET", reqHeaders = {}) {
   const stack = [];
   plugin.configureServer({ middlewares: { stack } });
-  return new Promise((resolve) => {
-    const headers = {};
-    const res = {
-      statusCode: 200,
-      setHeader: (k, v) => (headers[k.toLowerCase()] = v),
-      end: (body) => resolve({ status: res.statusCode, headers, body: body === undefined ? "" : String(body) }),
-    };
-    stack[0].handle({ method, url }, res, () => resolve("next"));
-  });
+  const server = http.createServer((req, res) =>
+    stack[0].handle(req, res, () => {
+      res.setHeader("X-Next", "1");
+      res.end();
+    }),
+  );
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    return await new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port: server.address().port, path: url, method, headers: reqHeaders }, (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () =>
+          resolve(res.headers["x-next"] ? "next" : { status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString() }),
+        );
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  } finally {
+    server.close();
+  }
 }
 
 test("the middleware serves /files/<name> from the run's vault, 404s anything else under /files/, and passes the rest on", async () => {
@@ -141,4 +155,100 @@ test("an import of /files/<name> is a module exporting the URL, served by the mi
   assert.equal(plugin.resolveId("/filesystem.png"), null);
   assert.equal(plugin.resolveId("./files/a.png"), null);
   assert.equal(plugin.load("/files/a.png"), null);
+});
+
+test("a single byte range is a 206 with Content-Range; a full response says Accept-Ranges", async () => {
+  const f = fixture();
+  try {
+    // "logo of A" is 9 bytes.
+    const a = vaultFilesPlugin({ entry: f.entry(ID_A), userRoot: f.ws });
+    const full = await request(a, "/files/logo.png");
+    assert.equal(full.status, 200);
+    assert.equal(full.headers["accept-ranges"], "bytes");
+    assert.equal(full.headers["content-length"], "9");
+    for (const [range, body, contentRange] of [
+      ["bytes=0-3", "logo", "bytes 0-3/9"],
+      ["bytes=4-", " of A", "bytes 4-8/9"],
+      ["bytes=-2", " A", "bytes 7-8/9"],
+      ["bytes=8-8", "A", "bytes 8-8/9"],
+      ["bytes=5-100", "f A", "bytes 5-8/9"],
+      ["bytes=-100", "logo of A", "bytes 0-8/9"],
+    ]) {
+      const got = await request(a, "/files/logo.png", "GET", { Range: range });
+      assert.equal(got.status, 206, range);
+      assert.equal(got.body, body, range);
+      assert.equal(got.headers["content-range"], contentRange, range);
+      assert.equal(got.headers["content-length"], String(body.length), range);
+      assert.equal(got.headers["content-type"], "image/png", range);
+      assert.equal(got.headers["x-content-type-options"], "nosniff", range);
+    }
+  } finally {
+    f.done();
+  }
+});
+
+test("an unsatisfiable range is a 416; a malformed, multi or If-Range one gets the whole file", async () => {
+  const f = fixture();
+  try {
+    const a = vaultFilesPlugin({ entry: f.entry(ID_A), userRoot: f.ws });
+    for (const range of ["bytes=9-", "bytes=100-200", "bytes=-0"]) {
+      const got = await request(a, "/files/logo.png", "GET", { Range: range });
+      assert.equal(got.status, 416, range);
+      assert.equal(got.headers["content-range"], "bytes */9", range);
+      assert.equal(got.body, "", range);
+    }
+    for (const range of ["bytes=abc", "bytes=3-1", "bytes=-", "bytes=", "items=0-3", "bytes=0-1,4-5", "bytes=1.5-3", "bytes=0x1-3", "bytes = 0-3"]) {
+      const got = await request(a, "/files/logo.png", "GET", { Range: range });
+      assert.equal(got.status, 200, range);
+      assert.equal(got.body, "logo of A", range);
+      assert.equal(got.headers["content-range"], undefined, range);
+    }
+    const ifRange = await request(a, "/files/logo.png", "GET", { Range: "bytes=0-3", "If-Range": '"x"' });
+    assert.equal(ifRange.status, 200);
+    assert.equal(ifRange.body, "logo of A");
+    // An empty file has no satisfiable range.
+    fs.writeFileSync(path.join(f.vaults.A, "files", "empty.png"), "");
+    assert.equal((await request(a, "/files/empty.png")).status, 200);
+    assert.equal((await request(a, "/files/empty.png", "GET", { Range: "bytes=0-" })).status, 416);
+    // Containment is unchanged for a ranged request.
+    assert.equal((await request(a, "/files/..%2Fsecret.md", "GET", { Range: "bytes=0-3" })).status, 404);
+  } finally {
+    f.done();
+  }
+});
+
+test("HEAD with a Range sends the 206 headers and no body", async () => {
+  const f = fixture();
+  try {
+    const a = vaultFilesPlugin({ entry: f.entry(ID_A), userRoot: f.ws });
+    const got = await request(a, "/files/logo.png", "HEAD", { Range: "bytes=0-3" });
+    assert.equal(got.status, 206);
+    assert.equal(got.body, "");
+    assert.equal(got.headers["content-range"], "bytes 0-3/9");
+    assert.equal(got.headers["content-length"], "4");
+    const head = await request(a, "/files/logo.png", "HEAD");
+    assert.equal(head.headers["content-length"], "9");
+    assert.equal(head.headers["accept-ranges"], "bytes");
+  } finally {
+    f.done();
+  }
+});
+
+test("a file larger than one read chunk streams through whole", async () => {
+  const f = fixture();
+  try {
+    const big = Buffer.alloc(300_000, "x");
+    big.write("END", big.length - 3);
+    fs.writeFileSync(path.join(f.vaults.A, "files", "clip.mp4"), big);
+    const a = vaultFilesPlugin({ entry: f.entry(ID_A), userRoot: f.ws });
+    const got = await request(a, "/files/clip.mp4");
+    assert.equal(got.headers["content-type"], "video/mp4");
+    assert.equal(got.body.length, big.length);
+    assert.ok(got.body.endsWith("END"));
+    const tail = await request(a, "/files/clip.mp4", "GET", { Range: "bytes=-3" });
+    assert.equal(tail.status, 206);
+    assert.equal(tail.body, "END");
+  } finally {
+    f.done();
+  }
 });
