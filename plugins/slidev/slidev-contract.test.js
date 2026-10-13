@@ -102,6 +102,22 @@ test("export waits for every .slidev-slide-loading to detach, and PDF and PowerP
   assert.match(dist("pptx"), /async function exportPptxEditable\(ctx, output\) \{\s*await ctx\.go\("print"\);/);
 });
 
+// The template preview (sidecar.js `preview`) reads its PNGs back by name:
+// without --with-clicks (PNG's default) and --per-slide (never passed), each
+// slide is `<n>.png`, n its unpadded number. The real export below needs
+// Chromium; this reads the CLI's source, so CI checks it too.
+test("a PNG export names each slide <n>.png, unpadded, by default", withSlidev, () => {
+  const exp = dist("export");
+  const onePiece = /async function genPagePngOnePiece\(writeToDisk\) \{([\s\S]*?)\n\t\}\n/.exec(exp);
+  assert.ok(onePiece, "genPagePngOnePiece");
+  assert.match(onePiece[1], /const slideNo = \+id\.split\("-"\)\[0\];/);
+  assert.match(onePiece[1], /const filename = `\$\{withClicks \? id : slideNo\}\.png`;/);
+  assert.match(onePiece[1], /await fs\.writeFile\(path\.join\(writeToDisk, filename\), buffer\);/);
+  assert.match(exp, /return perSlide \? genPagePngPerSlide\(writeToDisk\) : genPagePngOnePiece\(writeToDisk\);/);
+  assert.match(exp, /withClicks: withClicks \?\? !!format\?\.startsWith\("pptx"\)/);
+  assert.match(exp, /perSlide: perSlide \|\| false/);
+});
+
 // The template preview (sidecar.js `preview`) reads `slidev export --format
 // png --output <dir>`'s files back as slides by their names: one `<n>.png`
 // per slide, numbered from 1 and not zero-padded (one piece through print,

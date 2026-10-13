@@ -309,47 +309,27 @@ function previewHost(enabled) {
   return { ...fakeHost(enabled, slides), renderers };
 }
 
-const previewEngine = (over = {}) =>
-  fakeEngine({
-    previewDeck: async () => ({ slides: [{ png: "iVBORw0KGgoAAAA=" }, { png: "iVBORw0KGgoBBBB=" }] }),
-    ...over,
-  });
-
-test("enabled: registers a preview renderer when the host has the method", async () => {
-  const { engine } = previewEngine();
-  const { host, renderers } = previewHost(true);
-  activate(host, engine);
-  await flush();
-  assert.equal(renderers.length, 1);
-  assert.equal(typeof renderers[0], "function");
-});
-
-test("as PDF export's dependency only: registers no preview renderer", async () => {
-  const { engine } = previewEngine();
-  const { host, renderers } = previewHost(false);
-  activate(host, engine);
-  await flush();
-  assert.deepEqual(renderers, []);
-});
-
-test("an older app without registerPreviewRenderer still gets everything else", async () => {
-  for (const slides of [undefined, { resolveTemplate: async () => null }]) {
-    const { engine } = previewEngine();
-    const { host, reg } = fakeHost(true, slides);
-    assert.doesNotThrow(() => activate(host, engine));
+test("registers a preview renderer only when enabled, and only on a host that has the method", async () => {
+  for (const enabled of [true, false]) {
+    const { host, renderers } = previewHost(enabled);
+    activate(host, fakeEngine().engine);
     await flush();
-    assert.deepEqual(reg.tabs.map((t) => t.id), ["present"]);
-    assert.deepEqual(reg.formats.map((f) => f.id), ["pptx"]);
+    assert.equal(renderers.length, enabled ? 1 : 0, `enabled: ${enabled}`);
+  }
+  // An older app: no slides at all, or slides without the method.
+  for (const slides of [undefined, { resolveTemplate: async () => null }]) {
+    const { host, reg } = fakeHost(true, slides);
+    assert.doesNotThrow(() => activate(host, fakeEngine().engine));
+    await flush();
+    assert.deepEqual([reg.tabs.map((t) => t.id), reg.formats.map((f) => f.id)], [["present"], ["pptx"]]);
   }
 });
 
 test("the preview renderer checks Node, renders the sample with the template, and returns PNG data URLs", async () => {
   const template = { name: "Brand", stylesheet: ".slidev-page { color: red; }" };
-  const seen = [];
-  const { engine, calls } = previewEngine({
+  const { engine, calls } = fakeEngine({
     previewDeck: async (vaultPath, markdown, t) => (
-      calls.push(`preview ${vaultPath}`),
-      seen.push([markdown, t]),
+      calls.push(`preview ${vaultPath} ${JSON.stringify(markdown)} ${t.name}`),
       { slides: [{ png: "iVBORw0KGgoAAAA=" }, { png: "iVBORw0KGgoBBBB=" }] }
     ),
   });
@@ -361,12 +341,11 @@ test("the preview renderer checks Node, renders the sample with the template, an
   assert.deepEqual(result, {
     slides: [{ png: "data:image/png;base64,iVBORw0KGgoAAAA=" }, { png: "data:image/png;base64,iVBORw0KGgoBBBB=" }],
   });
-  assert.deepEqual(calls, ["ready", "preview /vault"]);
-  assert.deepEqual(seen, [["# One\n\n---\n\n# Two\n", template]]);
+  assert.deepEqual(calls, ["ready", 'preview /vault "# One\\n\\n---\\n\\n# Two\\n" Brand']);
 });
 
 test("a failed preview render carries the server log, like an export", async () => {
-  const { engine } = previewEngine({ previewDeck: async () => Promise.reject(new Error("chromium crashed")) });
+  const { engine } = fakeEngine({ previewDeck: async () => Promise.reject(new Error("chromium crashed")) });
   const { host, renderers } = previewHost(true);
   activate(host, engine);
   await flush();
