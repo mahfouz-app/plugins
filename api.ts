@@ -34,6 +34,8 @@ import type {
   OverlaySpec,
   PluginCommand,
   ResolvedSlidesTemplate,
+  SlidesPreviewRequest,
+  SlidesPreviewResult,
 } from "./host";
 import type { NoteRef, PluginTabContext, PluginTabType, ToolbarButton } from "./tabs";
 import type { ToolbarItem } from "./toolbar";
@@ -262,6 +264,13 @@ export interface MahfouzPluginHost {
      * template (name "") carrying just those. Image paths are root-absolute
      * `/files/<name>`. */
     resolveTemplate(note: NoteRef): Promise<ResolvedSlidesTemplate | null>;
+    /** Renders Settings → Slides' sample deck exactly, for "Render with
+     * Slidev": `render` gets the sample Markdown and a resolved template and
+     * returns the slides as PNG data URLs (at most 30, each at most 4 MB,
+     * within 200 seconds; the app refuses anything else). The app keeps the latest renderer an enabled
+     * plugin registered, for the active vault only. Desktop only.
+     * Optional: absent in apps older than Render with Slidev. */
+    registerPreviewRenderer?(render: (req: SlidesPreviewRequest) => Promise<SlidesPreviewResult>): Disposable;
   };
   /** Makes `api` available to plugins that declare this one as a dependency. */
   provide(api: object): void;

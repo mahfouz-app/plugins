@@ -1,5 +1,5 @@
 // Vendored from mahfouz-app/app src/core/src/plugins/{commands,exportFormats,fencedBlocks,notes,overlay}.ts,
-// src/core/src/db/slidesTemplates.ts and src/core/src/import/types.ts — keep in sync.
+// src/core/src/db/slidesTemplates.ts, src/core/src/plugins/slidesPreview.ts and src/core/src/import/types.ts — keep in sync.
 import type { NoteRef } from "./tabs";
 
 export interface CommandNote {
@@ -120,6 +120,26 @@ export interface ResolvedSlidesTemplate {
   colorSchema?: "light" | "dark";
   /** The font families `stylesheet` loads, to wait for before export. */
   fontFamilies?: string[];
+}
+
+// ---- slides preview (src/core/src/plugins/slidesPreview.ts)
+
+/** What Settings → Slides' "Render with Slidev" asks a preview renderer
+ * for: the app's sample deck rendered with a template. */
+export interface SlidesPreviewRequest {
+  /** The active vault's absolute path, for the template's `/files/` images. */
+  vaultPath: string;
+  /** The sample deck: Slidev Markdown, at most 64 KB. */
+  markdown: string;
+  /** The template being edited, resolved as `resolveTemplate` resolves
+   * one, with the sample deck's header and footer applied. */
+  template: ResolvedSlidesTemplate;
+}
+
+/** The rendered slides, in order: at most 30, each a
+ * `data:image/png;base64,…` URL of at most 4 MB. The app checks both. */
+export interface SlidesPreviewResult {
+  slides: { png: string }[];
 }
 
 // ---- import (src/core/src/import/types.ts)

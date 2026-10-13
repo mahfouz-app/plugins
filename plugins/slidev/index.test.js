@@ -296,3 +296,67 @@ test("no template support on the host, or a failing lookup, means no template", 
   assert.deepEqual(old.calls, ["ready", "export talks/deck.md portrait pdf"]);
   assert.deepEqual(broken.calls, ["ready", "export talks/deck.md portrait pdf"]);
 });
+
+// ---- the template preview renderer -------------------------------------------
+//
+// Settings → Slides' "Render with Slidev": the app hands a renderer its
+// sample deck and a resolved template (`host.slides.registerPreviewRenderer`,
+// absent in older apps) and gets the slides back as PNG data URLs.
+
+function previewHost(enabled) {
+  const renderers = [];
+  const slides = { resolveTemplate: async () => null, registerPreviewRenderer: (render) => (renderers.push(render), { dispose() {} }) };
+  return { ...fakeHost(enabled, slides), renderers };
+}
+
+test("registers a preview renderer only when enabled, and only on a host that has the method", async () => {
+  for (const enabled of [true, false]) {
+    const { host, renderers } = previewHost(enabled);
+    activate(host, fakeEngine().engine);
+    await flush();
+    assert.equal(renderers.length, enabled ? 1 : 0, `enabled: ${enabled}`);
+  }
+  // An older app: no slides at all, or slides without the method.
+  for (const slides of [undefined, { resolveTemplate: async () => null }]) {
+    const { host, reg } = fakeHost(true, slides);
+    assert.doesNotThrow(() => activate(host, fakeEngine().engine));
+    await flush();
+    assert.deepEqual([reg.tabs.map((t) => t.id), reg.formats.map((f) => f.id)], [["present"], ["pptx"]]);
+  }
+});
+
+test("the preview renderer checks Node, renders the sample with the template, and returns PNG data URLs", async () => {
+  const template = { name: "Brand", stylesheet: ".slidev-page { color: red; }" };
+  const { engine, calls } = fakeEngine({
+    previewDeck: async (vaultPath, markdown, t) => (
+      calls.push(`preview ${vaultPath} ${JSON.stringify(markdown)} ${t.name}`),
+      { slides: [{ png: "iVBORw0KGgoAAAA=" }, { png: "iVBORw0KGgoBBBB=" }] }
+    ),
+  });
+  const { host, renderers } = previewHost(true);
+  activate(host, engine);
+  await flush();
+  calls.length = 0;
+  const result = await renderers[0]({ vaultPath: "/vault", markdown: "# One\n\n---\n\n# Two\n", template });
+  assert.deepEqual(result, {
+    slides: [{ png: "data:image/png;base64,iVBORw0KGgoAAAA=" }, { png: "data:image/png;base64,iVBORw0KGgoBBBB=" }],
+  });
+  assert.deepEqual(calls, ["ready", 'preview /vault "# One\\n\\n---\\n\\n# Two\\n" Brand']);
+});
+
+test("a failed preview render carries the server log, like an export", async () => {
+  const { engine } = fakeEngine({ previewDeck: async () => Promise.reject(new Error("chromium crashed")) });
+  const { host, renderers } = previewHost(true);
+  activate(host, engine);
+  await flush();
+  await assert.rejects(renderers[0]({ vaultPath: "/vault", markdown: "# a", template: null }), {
+    message: "chromium crashed\n\nserver log tail",
+  });
+});
+
+test("the engine's previewDeck is the sidecar's preview method", async () => {
+  const { host, reg } = fakeHost(true);
+  const template = { name: "Brand" };
+  await sidecarEngine(host).previewDeck("/v", "# a", template);
+  assert.deepEqual(reg.sidecarCalls, [["preview", { vaultPath: "/v", markdown: "# a", template }]]);
+});

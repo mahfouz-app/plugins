@@ -25,6 +25,7 @@ import {
   templateHeadmatter,
   vaultLinkId,
 } from "./sidecar.js";
+import * as sidecar from "./sidecar.js";
 
 function tempDir(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `mahfouz-slidev-${name}-`));
@@ -394,4 +395,390 @@ test("pruning keeps only the vault links in use, and only removes links", () => 
 
 test("pruning a workspace that has no vaults/ yet is a no-op", () => {
   assert.doesNotThrow(() => pruneVaultLinks(tempDir("empty"), new Set()));
+});
+
+// ---- the template preview ------------------------------------------------------
+//
+// `preview` renders the app's sample deck with a slides template to PNGs
+// (Settings → Slides' "Render with Slidev"). Its helpers are read through
+// the `sidecar` namespace, so a missing export fails only these tests.
+
+/** The bytes a PNG file starts with, then a marker so files differ. */
+const pngBytes = (n) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(String(n))]);
+
+test("the preview entry is headmatter only, ordered and escaped like the export entry, importing ./preview-src.md", () => {
+  const render = (s) => `<r>${s}</r>`;
+  assert.equal(sidecar.previewEntryContent(null), '---\nsrc: "./preview-src.md"\n---\n');
+  for (const template of [BRAND, V2, { ...V2, header: "**H** {page}", titleSlide: true }]) {
+    assert.equal(sidecar.previewEntryContent(template), exportEntryContent("./preview-src.md", false, template));
+    assert.equal(sidecar.previewEntryContent(template, render), exportEntryContent("./preview-src.md", false, template, render));
+  }
+  const entry = sidecar.previewEntryContent(V2);
+  assert.ok(entry.startsWith('---\nsrc: "./preview-src.md"\nmahfouz: '));
+  assert.doesNotMatch(entry, /aspectRatio/);
+  assert.equal(entry.split("\n").filter((l) => l === "---").length, 2, "a `---` inside the CSS can't end the headmatter");
+});
+
+test("pngSlides reads the PNGs in slide order (1, 2, 10), as base64", () => {
+  const dir = tempDir("pngs");
+  for (const n of [10, 2, 1]) fs.writeFileSync(path.join(dir, `${n}.png`), pngBytes(n));
+  const slides = sidecar.pngSlides(dir);
+  assert.deepEqual(slides, [1, 2, 10].map((n) => pngBytes(n).toString("base64")));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("pngSlides refuses a PNG whose name isn't a slide number", () => {
+  assert.equal(typeof sidecar.pngSlides, "function");
+  for (const name of ["cover.png", "1-1.png", "x2.png"]) {
+    const dir = tempDir("pngs-bad");
+    fs.writeFileSync(path.join(dir, "1.png"), pngBytes(1));
+    fs.writeFileSync(path.join(dir, name), pngBytes(2));
+    assert.throws(() => sidecar.pngSlides(dir), /slide number/, name);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pngSlides refuses two PNGs for one slide, and an export with no PNGs", () => {
+  const dir = tempDir("pngs-dup");
+  fs.writeFileSync(path.join(dir, "1.png"), pngBytes(1));
+  fs.writeFileSync(path.join(dir, "01.png"), pngBytes(2));
+  assert.throws(() => sidecar.pngSlides(dir), /twice/);
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  const empty = tempDir("pngs-empty");
+  fs.writeFileSync(path.join(empty, "notes.txt"), "not a slide");
+  assert.throws(() => sidecar.pngSlides(empty), /no slides/);
+  fs.rmSync(empty, { recursive: true, force: true });
+});
+
+// The preview's tests run the sidecar's real spawn path against a stand-in
+// Slidev CLI (at `cliEntry(ws)` in a temp workspace) that does what `slidev
+// export` would: writes the PNGs (or, for a PDF, the file) named by
+// `fixture.json` into `--output`. Each run records what it saw (its
+// arguments, cwd, env, the entry and sample deck, the vault links) in
+// `calls.jsonl`; with `block`, a PNG run waits for a `release` file.
+const STAND_IN_CLI = `
+import fs from "node:fs";
+import path from "node:path";
+const ws = process.cwd();
+const cfg = JSON.parse(fs.readFileSync(path.join(ws, "fixture.json"), "utf8"));
+const args = process.argv.slice(2);
+const at = (flag) => args[args.indexOf(flag) + 1];
+const out = at("--output");
+const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : null);
+const linksDir = path.join(ws, "vaults");
+const links = {};
+if (fs.existsSync(linksDir)) for (const name of fs.readdirSync(linksDir)) links[name] = fs.readlinkSync(path.join(linksDir, name));
+fs.appendFileSync(
+  path.join(ws, "calls.jsonl"),
+  JSON.stringify({
+    args,
+    cwd: process.cwd(),
+    env: { NO_COLOR: process.env.NO_COLOR, CI: process.env.CI },
+    entry: read(args[1]),
+    src: read(path.join(ws, "preview-src.md")),
+    links,
+  }) + "\\n"
+);
+if (at("--format") !== "png") {
+  fs.writeFileSync(out, "%PDF-");
+  process.exit(0);
+}
+if (cfg.block) while (!fs.existsSync(path.join(ws, "release"))) await new Promise((r) => setTimeout(r, 10));
+fs.mkdirSync(out, { recursive: true });
+for (const [name, spec] of Object.entries(cfg.pngs ?? {})) {
+  const bytes = typeof spec === "number" ? Buffer.alloc(spec) : Buffer.from(spec, "base64");
+  fs.writeFileSync(path.join(out, name), bytes);
+}
+if (cfg.fail) {
+  console.error(cfg.fail);
+  process.exit(1);
+}
+`;
+
+/**
+ * A fresh sidecar module whose workspace is a temp dir holding the stand-in
+ * CLI, and a vault (real paths, so a resolved vault path is the same string).
+ * The module is imported again per call, so its state starts empty.
+ */
+let instances = 0;
+async function previewSidecar(fixture = { pngs: { "1.png": pngBytes(1).toString("base64") } }) {
+  const ws = fs.realpathSync(tempDir("preview-ws"));
+  const cli = sidecar.cliEntry(ws);
+  fs.mkdirSync(path.dirname(cli), { recursive: true });
+  fs.writeFileSync(cli, STAND_IN_CLI);
+  const vault = fs.realpathSync(tempDir("preview-vault"));
+  fs.mkdirSync(path.join(vault, "files"));
+  const setFixture = (f) => fs.writeFileSync(path.join(ws, "fixture.json"), JSON.stringify(f));
+  setFixture(fixture);
+  const saved = process.env.MAHFOUZ_PLUGIN_DIR;
+  process.env.MAHFOUZ_PLUGIN_DIR = ws;
+  try {
+    const mod = await import(`./sidecar.js?preview=${++instances}`);
+    const calls = () => {
+      const file = path.join(ws, "calls.jsonl");
+      return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
+    };
+    return { mod, ws, vault, calls, setFixture, release: () => fs.writeFileSync(path.join(ws, "release"), "") };
+  } finally {
+    if (saved === undefined) delete process.env.MAHFOUZ_PLUGIN_DIR;
+    else process.env.MAHFOUZ_PLUGIN_DIR = saved;
+  }
+}
+
+/** `--output <dir>` from a run's arguments. */
+function outputDir(args) {
+  const i = args.indexOf("--output");
+  assert.ok(i >= 0 && typeof args[i + 1] === "string", `--output in ${args.join(" ")}`);
+  return args[i + 1];
+}
+
+const b64 = (n) => pngBytes(n).toString("base64");
+const MB = 1024 * 1024;
+
+async function until(cond, what) {
+  for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(cond(), what);
+}
+
+const LEFTOVERS = ["preview.md", "preview-src.md", "deck.md", "export.md", "export-src.md"];
+const noLeftovers = (ws) => {
+  for (const name of LEFTOVERS) assert.equal(fs.existsSync(path.join(ws, name)), false, `${name} is left in the workspace`);
+};
+
+test("preview renders the markdown with the template through slidev's PNG export and returns the slides in order", async () => {
+  const { mod, ws, vault, calls } = await previewSidecar({ pngs: { "2.png": b64(2), "1.png": b64(1), "10.png": b64(10) } });
+  const markdown = "# One\n\n---\n\n# Two\n";
+  const template = { ...V2, header: undefined, footer: undefined };
+  const result = await mod.methods.preview({ vaultPath: vault, markdown, template });
+  assert.deepEqual(result, { slides: [{ png: b64(1) }, { png: b64(2) }, { png: b64(10) }] });
+
+  const [run] = calls();
+  assert.equal(calls().length, 1);
+  // Export's command line, cwd and env (one runner for both).
+  assert.deepEqual(run.args.slice(0, 2), ["export", path.join(ws, "preview.md")]);
+  assert.equal(run.args[run.args.indexOf("--format") + 1], "png");
+  assert.equal(run.cwd, ws);
+  assert.deepEqual(run.env, { NO_COLOR: "1", CI: "1" });
+  // While it ran: the entry, the sample deck, and the vault linked for `/files/` images.
+  assert.equal(run.entry, mod.previewEntryContent(template));
+  assert.equal(run.src, markdown);
+  assert.equal(run.links[vaultLinkId(vault)], vault);
+
+  const out = outputDir(run.args);
+  assert.equal(path.dirname(out), os.tmpdir(), "a fresh dir directly under the OS temp dir");
+  assert.equal(fs.existsSync(out), false, "the output dir is removed after a render");
+  noLeftovers(ws);
+});
+
+test("preview renders a template's header and footer as Markdown, like export", withMarkdownIt, async () => {
+  const { mod, vault, calls } = await previewSidecar();
+  const template = { ...V2, header: "**H** {page}", footer: "*F*" };
+  await mod.methods.preview({ vaultPath: vault, markdown: "# a", template });
+  const run = calls()[0];
+  assert.equal(run.entry, mod.previewEntryContent(template, inlineRenderer(MarkdownIt)));
+  const data = mahfouzLine(run.entry);
+  assert.equal(data.header, "<strong>H</strong> {page}");
+  assert.equal(data.footer, "<em>F</em>");
+});
+
+test("each preview renders into its own temp dir", async () => {
+  const { mod, vault, calls } = await previewSidecar();
+  await mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null });
+  await mod.methods.preview({ vaultPath: vault, markdown: "# b", template: null });
+  const [a, b] = calls().map((c) => outputDir(c.args));
+  assert.notEqual(a, b);
+});
+
+test("preview refuses bad params before writing or rendering anything", async () => {
+  const { mod, ws, vault, calls } = await previewSidecar();
+  const aFile = path.join(vault, "note.md");
+  fs.writeFileSync(aFile, "# n\n");
+  const bad = [
+    [{ vaultPath: vault, markdown: 42 }, /markdown/],
+    [{ vaultPath: vault }, /markdown/],
+    [{ vaultPath: vault, markdown: "x".repeat(64 * 1024 + 1) }, /markdown/],
+    // 32 K characters, 64 KB + 2 bytes: the cap is on bytes.
+    [{ vaultPath: vault, markdown: "é".repeat(32 * 1024 + 1) }, /markdown/],
+    [{ vaultPath: "relative/vault", markdown: "# a" }, /vaultPath|absolute/],
+    [{ vaultPath: 7, markdown: "# a" }, /vaultPath|absolute/],
+    [{ markdown: "# a" }, /vaultPath|absolute/],
+    [{ vaultPath: path.join(vault, "missing"), markdown: "# a" }, /vault/],
+    [{ vaultPath: aFile, markdown: "# a" }, /vault/],
+    [{ vaultPath: "/", markdown: "# a" }, /vault/],
+    [{ vaultPath: vault, markdown: "# a", template: "Brand" }, /template/],
+    [{ vaultPath: vault, markdown: "# a", template: 42 }, /template/],
+    [{ vaultPath: vault, markdown: "# a", template: [] }, /template/],
+    [{ vaultPath: vault, markdown: "# a", template: { stylesheet: 42 } }, /template|stylesheet/],
+    [{ vaultPath: vault, markdown: "# a", template: { header: 1 } }, /template|header/],
+    [{ vaultPath: vault, markdown: "# a", template: { footer: {} } }, /template|footer/],
+    [{ vaultPath: vault, markdown: "# a", template: { stylesheet: "x".repeat(256 * 1024 + 1) } }, /template|stylesheet/],
+  ];
+  for (const [params, message] of bad) {
+    await assert.rejects(mod.methods.preview({ template: null, ...params }), message, JSON.stringify(params).slice(0, 80));
+  }
+  assert.deepEqual(calls(), []);
+  for (const name of ["preview.md", "preview-src.md", "vaults"]) assert.equal(fs.existsSync(path.join(ws, name)), false, name);
+});
+
+test("preview takes 64 KB of markdown, a 256 KB stylesheet, and a vault path that resolves to the vault", async () => {
+  const { mod, vault, calls } = await previewSidecar();
+  fs.mkdirSync(path.join(vault, "sub"));
+  const ok = await mod.methods.preview({
+    vaultPath: path.join(vault, "sub", ".."),
+    markdown: "x".repeat(64 * 1024),
+    template: { name: "T", stylesheet: "x".repeat(256 * 1024), header: "H", footer: "F" },
+  });
+  assert.equal(ok.slides.length, 1);
+  assert.equal(calls()[0].links[vaultLinkId(vault)], vault, "the link id comes from the resolved path");
+});
+
+test("a failed render removes the output dir and the entries, and reports slidev's output", async () => {
+  const { mod, ws, vault, calls } = await previewSidecar({ pngs: { "1.png": b64(1) }, fail: "chromium crashed" });
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /chromium crashed/);
+  assert.equal(calls().length, 1);
+  assert.equal(fs.existsSync(outputDir(calls()[0].args)), false);
+  noLeftovers(ws);
+});
+
+test("PNGs slidev didn't name by slide number fail the render and are removed with the output dir", async () => {
+  const { mod, ws, vault, calls } = await previewSidecar({ pngs: { "1.png": b64(1), "1-1.png": b64(2) } });
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /slide number/);
+  assert.equal(calls().length, 1);
+  assert.equal(fs.existsSync(outputDir(calls()[0].args)), false);
+  noLeftovers(ws);
+});
+
+// The app takes a slide's data URL of at most 4 MiB characters
+// (SLIDES_PREVIEW_MAX_PNG_BYTES in the app's slidesPreview.ts), prefix
+// included: so a PNG may have as many bytes as base64 fits in what's left.
+const APP_DATA_URL_MAX = 4 * MB;
+const DATA_URL_PREFIX = "data:image/png;base64,";
+const dataUrlLength = (bytes) => DATA_URL_PREFIX.length + 4 * Math.ceil(bytes / 3);
+const PNG_CAP = Math.floor((APP_DATA_URL_MAX - DATA_URL_PREFIX.length) / 4) * 3;
+
+test("the per-PNG cap is the largest PNG whose data URL the app takes", () => {
+  assert.equal(sidecar.PREVIEW_PNG_CAP, PNG_CAP);
+  assert.ok(dataUrlLength(PNG_CAP) <= APP_DATA_URL_MAX);
+  assert.ok(dataUrlLength(PNG_CAP + 1) > APP_DATA_URL_MAX);
+});
+
+test("a PNG whose data URL would be over the app's 4 MB is refused, and the output dir removed", async () => {
+  const { mod, vault, calls } = await previewSidecar({ pngs: { "1.png": b64(1), "2.png": PNG_CAP + 1 } });
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /4 MB/);
+  assert.equal(fs.existsSync(outputDir(calls()[0].args)), false);
+});
+
+test("a PNG at the cap is fine, and its data URL fits the app's limit", async () => {
+  const { mod, vault } = await previewSidecar({ pngs: { "1.png": PNG_CAP } });
+  const { slides } = await mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null });
+  assert.equal(Buffer.from(slides[0].png, "base64").length, PNG_CAP);
+  assert.ok(DATA_URL_PREFIX.length + slides[0].png.length <= APP_DATA_URL_MAX);
+});
+
+test("a render over 30 MB of PNGs in all is refused, and its output dir removed", async () => {
+  const pngs = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`${i + 1}.png`, PNG_CAP]));
+  const { mod, vault, calls } = await previewSidecar({ pngs });
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /30 MB/);
+  assert.equal(fs.existsSync(outputDir(calls()[0].args)), false);
+});
+
+test("a preview asked for while one runs is refused at once as busy; the next one after it runs", async () => {
+  const { mod, vault, calls, setFixture, release } = await previewSidecar({ pngs: { "1.png": b64(1) }, block: true, fail: "first fails" });
+  const params = { vaultPath: vault, markdown: "# a", template: null };
+  const first = mod.methods.preview(params);
+  const firstSettled = assert.rejects(first, /first fails/);
+  await until(() => calls().length === 1, "the first render started");
+  await assert.rejects(mod.methods.preview(params), /busy/);
+  // Refused without running.
+  assert.equal(calls().length, 1);
+  setFixture({ pngs: { "1.png": b64(2) } });
+  release();
+  await firstSettled;
+  assert.deepEqual(await mod.methods.preview(params), { slides: [{ png: b64(2) }] }, "a failed preview doesn't block the next");
+  assert.equal(calls().length, 2);
+});
+
+test("a preview keeps its vault linked through another vault's export, and unlinks it when done", async () => {
+  const { mod, ws, vault, calls, setFixture, release } = await previewSidecar({ pngs: { "1.png": b64(1) }, block: true });
+  const other = fs.realpathSync(tempDir("preview-other"));
+  fs.writeFileSync(path.join(other, "a.md"), "# a\n");
+  const link = (v) => path.join(ws, "vaults", vaultLinkId(v));
+
+  const preview = mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null });
+  await until(() => calls().length === 1, "the preview started");
+  // The export prunes the links not in use; the preview's is in use.
+  const pdf = await mod.methods.export({ vaultPath: other, relPath: "a.md", orientation: "landscape", template: null, format: "pdf" });
+  fs.rmSync(pdf, { force: true });
+  assert.equal(calls()[1].cwd, ws, "export runs slidev the same way");
+  assert.deepEqual(calls()[1].env, calls()[0].env);
+  assert.equal(fs.readlinkSync(link(vault)), vault, "still linked mid-render");
+  release();
+  await preview;
+  assert.equal(fs.existsSync(link(vault)), false, "unlinked after the preview");
+
+  // And after a failed one.
+  fs.rmSync(path.join(ws, "release"));
+  setFixture({ fail: "boom" });
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /boom/);
+  assert.equal(fs.existsSync(link(vault)), false, "unlinked after a failed preview");
+});
+
+test("null template fields are taken as absent", async () => {
+  const { mod, vault, calls } = await previewSidecar();
+  const template = { name: "T", logoPosition: "top-right", cover: {}, css: "", stylesheet: null, header: null, footer: null };
+  const { slides } = await mod.methods.preview({ vaultPath: vault, markdown: "# a", template });
+  assert.equal(slides.length, 1);
+  assert.equal(calls()[0].entry, mod.previewEntryContent(template));
+});
+
+test("a preview whose temp dir can't be made leaves no vault linked and no entries behind", async () => {
+  const { mod, ws, vault, calls } = await previewSidecar();
+  const saved = process.env.TMPDIR;
+  process.env.TMPDIR = path.join(ws, "no-such-tmp");
+  try {
+    await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /ENOENT/);
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+  }
+  assert.deepEqual(calls(), []);
+  assert.equal(fs.existsSync(path.join(ws, "vaults", vaultLinkId(vault))), false, "the vault isn't left linked");
+  noLeftovers(ws);
+  // Nothing is left counted either: the next one renders, and unlinks after.
+  assert.equal((await mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null })).slides.length, 1);
+  assert.equal(fs.existsSync(path.join(ws, "vaults", vaultLinkId(vault))), false);
+});
+
+// The app shows a failed render's first line only, so it names the cause:
+// the last line of Slidev's output that isn't blank or a stack frame.
+test("logCause is the last non-empty, non-stack line of the output, trimmed to 200 characters", () => {
+  assert.equal(typeof sidecar.logCause, "function");
+  assert.equal(sidecar.logCause("vite ready\nError: chromium crashed\n    at launch (x.js:1:2)\n    at async main\n\n"), "Error: chromium crashed");
+  assert.equal(sidecar.logCause("  [slidev] Theme not found  \n"), "[slidev] Theme not found");
+  assert.equal(sidecar.logCause(""), "");
+  assert.equal(sidecar.logCause("\n    at a (b:1:1)\n"), "");
+  const long = sidecar.logCause(`E${"x".repeat(500)}`);
+  assert.ok(long.length <= 200, `${long.length} characters`);
+  assert.ok(long.startsWith("Exxx"));
+});
+
+test("a failed render's first line carries the cause, and the full output follows", async () => {
+  const fail = "warming up\nError: chromium crashed\n    at launch (/x/export.mjs:1:2)";
+  const { mod, vault } = await previewSidecar({ pngs: {}, fail });
+  const err = await mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }).then(
+    () => assert.fail("the preview should fail"),
+    (e) => e
+  );
+  const [first, ...rest] = err.message.split("\n");
+  assert.equal(first, "slidev export failed (1): Error: chromium crashed");
+  assert.ok(rest.join("\n").includes(fail), err.message);
+});
+
+test("a failed render with no output still has a first line", async () => {
+  const { mod, vault } = await previewSidecar({ pngs: {}, fail: " " });
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), (e) => {
+    assert.equal(e.message.split("\n")[0], "slidev export failed (1)");
+    return true;
+  });
 });

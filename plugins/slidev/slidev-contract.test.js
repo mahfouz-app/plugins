@@ -6,11 +6,15 @@
 // so they're found by prefix. Skipped without the plugin's npm install;
 // CI has it, and fails instead.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { slidevExportFormat } from "./sidecar.js";
+import { cliEntry, slidevExportFormat } from "./sidecar.js";
 
 const require = createRequire(import.meta.url);
 let client = null;
@@ -96,4 +100,70 @@ test("export waits for every .slidev-slide-loading to detach, and PDF and PowerP
   assert.match(exp, /else if \(format === "pptx-editable"\) await genPagePptxEditable\(\);/);
   assert.match(exp, /await exportPptxEditable\(\{[^}]*\bgo\b[^}]*\}, output\)/);
   assert.match(dist("pptx"), /async function exportPptxEditable\(ctx, output\) \{\s*await ctx\.go\("print"\);/);
+});
+
+// The template preview (sidecar.js `preview`) reads its PNGs back by name:
+// without --with-clicks (PNG's default) and --per-slide (never passed), each
+// slide is `<n>.png`, n its unpadded number. The real export below needs
+// Chromium; this reads the CLI's source, so CI checks it too.
+test("a PNG export names each slide <n>.png, unpadded, by default", withSlidev, () => {
+  const exp = dist("export");
+  const onePiece = /async function genPagePngOnePiece\(writeToDisk\) \{([\s\S]*?)\n\t\}\n/.exec(exp);
+  assert.ok(onePiece, "genPagePngOnePiece");
+  assert.match(onePiece[1], /const slideNo = \+id\.split\("-"\)\[0\];/);
+  assert.match(onePiece[1], /const filename = `\$\{withClicks \? id : slideNo\}\.png`;/);
+  assert.match(onePiece[1], /await fs\.writeFile\(path\.join\(writeToDisk, filename\), buffer\);/);
+  assert.match(exp, /return perSlide \? genPagePngPerSlide\(writeToDisk\) : genPagePngOnePiece\(writeToDisk\);/);
+  assert.match(exp, /withClicks: withClicks \?\? !!format\?\.startsWith\("pptx"\)/);
+  assert.match(exp, /perSlide: perSlide \|\| false/);
+});
+
+// The template preview (sidecar.js `preview`) reads `slidev export --format
+// png --output <dir>`'s files back as slides by their names: one `<n>.png`
+// per slide, numbered from 1 and not zero-padded (one piece through print,
+// without clicks; `--per-slide` would pad them). A real export, so it also
+// needs the headless Chromium playwright downloads in its postinstall, which
+// CI's `npm ci --ignore-scripts` skips: skipped there too.
+let chromium = null;
+try {
+  const path_ = require("playwright-chromium").chromium.executablePath();
+  if (fs.existsSync(path_)) chromium = path_;
+} catch {
+  // not installed
+}
+const withChromium = {
+  skip: !(client && cli)
+    ? "@slidev/cli isn't installed (npm ci in plugins/slidev)"
+    : chromium
+      ? false
+      : "playwright's Chromium isn't installed (npm ci in plugins/slidev, with scripts)",
+  timeout: 240_000,
+};
+
+test("a PNG export of a two-slide deck writes 1.png and 2.png", withChromium, async () => {
+  const workspace = path.dirname(fileURLToPath(import.meta.url));
+  // Slidev's project root is the entry's directory, where its theme is installed.
+  const entry = path.join(workspace, `contract-png-${randomUUID()}.md`);
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-slidev-contract-png-"));
+  fs.writeFileSync(entry, "---\ntitle: Contract\n---\n\n# One\n\n---\n\n# Two\n");
+  try {
+    const log = [];
+    const child = spawn(process.execPath, [cliEntry(workspace), "export", entry, "--output", output, "--format", "png"], {
+      cwd: workspace,
+      env: { ...process.env, NO_COLOR: "1", CI: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.setEncoding("utf8").on("data", (d) => log.push(d));
+    child.stderr.setEncoding("utf8").on("data", (d) => log.push(d));
+    const code = await new Promise((resolve) => child.on("exit", (c, signal) => resolve(signal ?? c)));
+    assert.equal(code, 0, log.join(""));
+    assert.deepEqual(fs.readdirSync(output).sort(), ["1.png", "2.png"]);
+    for (const name of ["1.png", "2.png"]) {
+      const bytes = fs.readFileSync(path.join(output, name));
+      assert.deepEqual([...bytes.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], `${name} is a PNG`);
+    }
+  } finally {
+    fs.rmSync(entry, { force: true });
+    fs.rmSync(output, { recursive: true, force: true });
+  }
 });

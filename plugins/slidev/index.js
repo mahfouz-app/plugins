@@ -4,6 +4,7 @@
 // - "Present full screen" (Mod+Shift+P by default) shows the note over the
 //   whole app.
 // - "PowerPoint / Google Slides" in the Export dialog.
+// - Settings → Slides' "Render with Slidev": a template's sample deck as PNGs.
 // - An API for the PDF export plugin (`host.use("mahfouz/slidev")`).
 // - Presenting and both exports apply the note's slides template, when the
 //   vault defines one.
@@ -36,6 +37,7 @@ export function sidecarEngine(host) {
     start: (vaultPath, relPath, template = null) => call("start", { vaultPath, relPath, template }),
     exportDeck: (vaultPath, relPath, { orientation, content, format, template = null }) =>
       call("export", { vaultPath, relPath, orientation, content, format, template }),
+    previewDeck: (vaultPath, markdown, template = null) => call("preview", { vaultPath, markdown, template }),
     stop: () => call("stop"),
     log: () => call("log"),
   };
@@ -354,6 +356,14 @@ export function activate(host, engine = sidecarEngine(host)) {
     return { vaultPath: info.vaultPath, relPath: info.path, template };
   };
 
+  /** `err` with the server's recent output appended, for a failed render. */
+  const withLog = async (err) => {
+    let message = err instanceof Error ? err.message : String(err);
+    const log = String((await Promise.resolve(engine.log()).catch(() => "")) ?? "").trim();
+    if (log) message += `\n\n${log}`;
+    return new Error(message);
+  };
+
   /** Renders a note with `slidev export` into the temp dir; returns the file's path. */
   const exportDeck = async (note, options, progress) => {
     await engine.ready();
@@ -362,10 +372,7 @@ export function activate(host, engine = sidecarEngine(host)) {
     try {
       return await engine.exportDeck(vaultPath, relPath, { ...options, template });
     } catch (err) {
-      let message = err instanceof Error ? err.message : String(err);
-      const log = String((await Promise.resolve(engine.log()).catch(() => "")) ?? "").trim();
-      if (log) message += `\n\n${log}`;
-      throw new Error(message);
+      throw await withLog(err);
     }
   };
 
@@ -376,6 +383,18 @@ export function activate(host, engine = sidecarEngine(host)) {
 
   // Only here for PDF export, which runs its own one-shot render.
   if (!host.isEnabled()) return;
+
+  // Settings → Slides' "Render with Slidev": the app's sample deck with a
+  // template, as PNG data URLs. Absent in apps older than the preview.
+  host.slides?.registerPreviewRenderer?.(async ({ vaultPath, markdown, template }) => {
+    await engine.ready();
+    try {
+      const { slides } = await engine.previewDeck(vaultPath, markdown, template ?? null);
+      return { slides: slides.map(({ png }) => ({ png: `data:image/png;base64,${png}` })) };
+    } catch (err) {
+      throw await withLog(err);
+    }
+  });
 
   host.registerExportFormat({
     id: "pptx",
