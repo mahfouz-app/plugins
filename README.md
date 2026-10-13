@@ -39,6 +39,16 @@ decrypts. It needs **GPG** on the Mac ([GPG Suite](https://gpgtools.org), or
   since still counts for what it signed while valid; a revoked one never does. Recipients that
   are expired, revoked or can't encrypt are refused, and so is signing with an expired key.
 
+- **Groups** live in the vault's `.config/encryption.md`: a `## <group>` heading per group, each
+  with a `| login | fingerprint |` table of full (40- or 64-digit) fingerprints. The app reads the
+  same file (`groupSigners`): a group's fingerprints are the only signers its notes' decrypts
+  accept, and with your backup key they're the recipients of every encrypt. "Only me" is the
+  group `only-<login>`; a group you create lists your signing and backup keys.
+- **Your signing key, backup key and GitHub login** are per machine, in the app's `localStorage`
+  (`mahfouz.encryption.keys`), never in the vault.
+- **Decrypting is the app's:** the host refuses the sidecar's `decrypt` from plugin code. The body
+  codec calls `ctx.decryptNote()`, where the desktop reads the note's file itself.
+
 > **Trust:** Installed plugins share one JavaScript realm; any enabled plugin could ask for a
 > decrypt. Configure gpg-agent to ask for your passphrase or a YubiKey touch on every decrypt.
 
