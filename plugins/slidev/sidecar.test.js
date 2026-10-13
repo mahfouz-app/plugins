@@ -433,9 +433,22 @@ test("pngSlides refuses a PNG whose name isn't a slide number", () => {
     const dir = tempDir("pngs-bad");
     fs.writeFileSync(path.join(dir, "1.png"), pngBytes(1));
     fs.writeFileSync(path.join(dir, name), pngBytes(2));
-    assert.throws(() => sidecar.pngSlides(dir), undefined, name);
+    assert.throws(() => sidecar.pngSlides(dir), /slide number/, name);
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("pngSlides refuses two PNGs for one slide, and an export with no PNGs", () => {
+  const dir = tempDir("pngs-dup");
+  fs.writeFileSync(path.join(dir, "1.png"), pngBytes(1));
+  fs.writeFileSync(path.join(dir, "01.png"), pngBytes(2));
+  assert.throws(() => sidecar.pngSlides(dir), /twice/);
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  const empty = tempDir("pngs-empty");
+  fs.writeFileSync(path.join(empty, "notes.txt"), "not a slide");
+  assert.throws(() => sidecar.pngSlides(empty), /no slides/);
+  fs.rmSync(empty, { recursive: true, force: true });
 });
 
 // The preview's tests run the sidecar's real spawn path against a stand-in
@@ -630,26 +643,41 @@ test("a failed render removes the output dir and the entries, and reports slidev
 
 test("PNGs slidev didn't name by slide number fail the render and are removed with the output dir", async () => {
   const { mod, ws, vault, calls } = await previewSidecar({ pngs: { "1.png": b64(1), "1-1.png": b64(2) } });
-  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }));
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /slide number/);
   assert.equal(calls().length, 1);
   assert.equal(fs.existsSync(outputDir(calls()[0].args)), false);
   noLeftovers(ws);
 });
 
-test("a PNG over 3 MB (the app's 4 MB data URL) is refused, and the output dir removed", async () => {
-  const { mod, vault, calls } = await previewSidecar({ pngs: { "1.png": b64(1), "2.png": 3 * MB + 1 } });
-  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /3 MB/);
+// The app takes a slide's data URL of at most 4 MiB characters
+// (SLIDES_PREVIEW_MAX_PNG_BYTES in the app's slidesPreview.ts), prefix
+// included: so a PNG may have as many bytes as base64 fits in what's left.
+const APP_DATA_URL_MAX = 4 * MB;
+const DATA_URL_PREFIX = "data:image/png;base64,";
+const dataUrlLength = (bytes) => DATA_URL_PREFIX.length + 4 * Math.ceil(bytes / 3);
+const PNG_CAP = Math.floor((APP_DATA_URL_MAX - DATA_URL_PREFIX.length) / 4) * 3;
+
+test("the per-PNG cap is the largest PNG whose data URL the app takes", () => {
+  assert.equal(sidecar.PREVIEW_PNG_CAP, PNG_CAP);
+  assert.ok(dataUrlLength(PNG_CAP) <= APP_DATA_URL_MAX);
+  assert.ok(dataUrlLength(PNG_CAP + 1) > APP_DATA_URL_MAX);
+});
+
+test("a PNG whose data URL would be over the app's 4 MB is refused, and the output dir removed", async () => {
+  const { mod, vault, calls } = await previewSidecar({ pngs: { "1.png": b64(1), "2.png": PNG_CAP + 1 } });
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /4 MB/);
   assert.equal(fs.existsSync(outputDir(calls()[0].args)), false);
 });
 
-test("a PNG of exactly 3 MB is fine", async () => {
-  const { mod, vault } = await previewSidecar({ pngs: { "1.png": 3 * MB } });
+test("a PNG at the cap is fine, and its data URL fits the app's limit", async () => {
+  const { mod, vault } = await previewSidecar({ pngs: { "1.png": PNG_CAP } });
   const { slides } = await mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null });
-  assert.equal(Buffer.from(slides[0].png, "base64").length, 3 * MB);
+  assert.equal(Buffer.from(slides[0].png, "base64").length, PNG_CAP);
+  assert.ok(DATA_URL_PREFIX.length + slides[0].png.length <= APP_DATA_URL_MAX);
 });
 
 test("a render over 30 MB of PNGs in all is refused, and its output dir removed", async () => {
-  const pngs = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`${i + 1}.png`, 3 * MB]));
+  const pngs = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`${i + 1}.png`, PNG_CAP]));
   const { mod, vault, calls } = await previewSidecar({ pngs });
   await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /30 MB/);
   assert.equal(fs.existsSync(outputDir(calls()[0].args)), false);
@@ -694,4 +722,30 @@ test("a preview keeps its vault linked through another vault's export, and unlin
   setFixture({ fail: "boom" });
   await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /boom/);
   assert.equal(fs.existsSync(link(vault)), false, "unlinked after a failed preview");
+});
+
+test("null template fields are taken as absent", async () => {
+  const { mod, vault, calls } = await previewSidecar();
+  const template = { name: "T", logoPosition: "top-right", cover: {}, css: "", stylesheet: null, header: null, footer: null };
+  const { slides } = await mod.methods.preview({ vaultPath: vault, markdown: "# a", template });
+  assert.equal(slides.length, 1);
+  assert.equal(calls()[0].entry, mod.previewEntryContent(template));
+});
+
+test("a preview whose temp dir can't be made leaves no vault linked and no entries behind", async () => {
+  const { mod, ws, vault, calls } = await previewSidecar();
+  const saved = process.env.TMPDIR;
+  process.env.TMPDIR = path.join(ws, "no-such-tmp");
+  try {
+    await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), /ENOENT/);
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+  }
+  assert.deepEqual(calls(), []);
+  assert.equal(fs.existsSync(path.join(ws, "vaults", vaultLinkId(vault))), false, "the vault isn't left linked");
+  noLeftovers(ws);
+  // Nothing is left counted either: the next one renders, and unlinks after.
+  assert.equal((await mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null })).slides.length, 1);
+  assert.equal(fs.existsSync(path.join(ws, "vaults", vaultLinkId(vault))), false);
 });
