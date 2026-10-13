@@ -18,6 +18,11 @@
 // import resolves here instead, to a module exporting the URL itself, which
 // the browser then fetches through the middleware.
 //
+// Files are streamed, and a single `Range: bytes=…` gets a 206 (a 416 when
+// it lies past the end), so a deck's `<video src="/files/…">` can seek. A
+// malformed or multi-range request, or one with `If-Range` (nothing here
+// sends a validator to match it), gets the whole file.
+//
 // Loaded by Slidev from `setup/vite-plugins.ts`, with the run's options.
 
 import fs from "node:fs";
@@ -101,6 +106,21 @@ function requestedName(url) {
   }
 }
 
+/** The `[start, end]` (inclusive) a `Range` header asks of a `size`-byte
+ * file; "unsatisfiable" when it lies past the end; null to serve it whole. */
+export function byteRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header ?? "");
+  if (!m || (m[1] === "" && m[2] === "")) return null;
+  if (m[1] === "") {
+    const suffix = Number(m[2]);
+    return suffix === 0 || size === 0 ? "unsatisfiable" : [Math.max(0, size - suffix), size - 1];
+  }
+  const start = Number(m[1]);
+  if (m[2] !== "" && Number(m[2]) < start) return null;
+  if (start >= size) return "unsatisfiable";
+  return [start, m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1)];
+}
+
 /** The Vite plugin for one run, given Slidev's resolved options (`entry`,
  * absolute, and `userRoot`, its directory: this plugin's workspace). */
 export function vaultFilesPlugin({ entry, userRoot }) {
@@ -126,10 +146,44 @@ export function vaultFilesPlugin({ entry, userRoot }) {
             res.statusCode = 404;
             return res.end();
           }
+          let fd;
+          let size;
+          try {
+            fd = fs.openSync(file, "r");
+            const stat = fs.fstatSync(fd);
+            if (!stat.isFile()) throw new Error("not a file");
+            size = stat.size;
+          } catch {
+            if (fd !== undefined) fs.closeSync(fd);
+            res.statusCode = 404;
+            return res.end();
+          }
           res.setHeader("Content-Type", TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream");
           res.setHeader("X-Content-Type-Options", "nosniff");
           res.setHeader("Cache-Control", "no-cache");
-          res.end(req.method === "HEAD" ? undefined : fs.readFileSync(file));
+          res.setHeader("Accept-Ranges", "bytes");
+          const range = req.headers?.["if-range"] ? null : byteRange(req.headers?.range, size);
+          if (range === "unsatisfiable") {
+            fs.closeSync(fd);
+            res.statusCode = 416;
+            res.setHeader("Content-Range", `bytes */${size}`);
+            res.setHeader("Content-Length", "0");
+            return res.end();
+          }
+          const [start, end] = range ?? [0, size - 1];
+          if (range) {
+            res.statusCode = 206;
+            res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+          }
+          res.setHeader("Content-Length", String(end - start + 1));
+          if (req.method === "HEAD" || size === 0) {
+            fs.closeSync(fd);
+            return res.end();
+          }
+          const stream = fs.createReadStream(null, { fd, start, end });
+          stream.on("error", () => res.destroy());
+          res.on("close", () => stream.destroy());
+          stream.pipe(res);
         },
       });
     },

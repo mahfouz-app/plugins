@@ -171,7 +171,7 @@ test("a single byte range is a 206 with Content-Range; a full response says Acce
       ["bytes=4-", " of A", "bytes 4-8/9"],
       ["bytes=-2", " A", "bytes 7-8/9"],
       ["bytes=8-8", "A", "bytes 8-8/9"],
-      ["bytes=5-100", "f A", "bytes 5-8/9"],
+      ["bytes=5-100", "of A", "bytes 5-8/9"],
       ["bytes=-100", "logo of A", "bytes 0-8/9"],
     ]) {
       const got = await request(a, "/files/logo.png", "GET", { Range: range });
