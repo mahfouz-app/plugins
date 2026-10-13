@@ -14,7 +14,10 @@
 //! - `importPublic` `{armored}` → the same shape, for the keys imported
 //!   into the plugin keyring
 //! - `encrypt` `{plaintext, recipients: [fpr], signer: fpr}` → `{armored}`
-//! - `decrypt` `{armored, allowedSigners: [fpr]}` → `{plaintext, signer}`
+//! - `decrypt` `{armored, allowedSigners: [fpr]}` → `{plaintext, signer}`,
+//!   plus `signerExpired: true` when the signer's key has expired since it
+//!   signed (a signature made after the expiry, or by a revoked key, is
+//!   refused)
 //!
 //! An error's message starts with a stable code: `gpgNotFound`,
 //! `invalidParams`, `tooLarge`, `timeout`, `cancelled`, `noSecretKey`,

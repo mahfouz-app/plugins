@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::error::{Error, Result};
 use crate::fpr::Fpr;
 use crate::gpg::{Gpg, Limits, Output, MIN_VERSION};
-use crate::keys::{parse_listing, KeyInfo};
+use crate::keys::{effective_expiry, parse_listing, KeyInfo};
 use crate::status;
 
 /// A note's body, before encryption.
@@ -52,6 +52,10 @@ pub struct Decrypted {
     pub plaintext: String,
     /// The signer's primary key fingerprint.
     pub signer: String,
+    /// The signer's key has expired since; the signature was made while it
+    /// was valid. Left out when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub signer_expired: bool,
 }
 
 /// `status`: which gpg, its version, and whether the user's agent runs.
@@ -466,15 +470,33 @@ impl Engine {
                 max_stdout: MAX_PLAINTEXT,
             },
         )?;
-        let signer = status::judge_verify(&status::parse(&out.status), &allowed)?;
-        if !out.success {
+        // The verify keyring's own view of each signing key's expiry, for a
+        // key that has expired since it signed.
+        let st = status::parse(&out.status);
+        let listing = if st.iter().any(|s| s.keyword == "EXPKEYSIG") {
+            let l = self.gpg.run(
+                vhome,
+                &args(&["--with-colons", "--fixed-list-mode", "--list-keys"]),
+                b"",
+                quick(MAX_LISTING),
+            )?;
+            String::from_utf8_lossy(&l.stdout).into_owned()
+        } else {
+            String::new()
+        };
+        let verified =
+            status::judge_verify(&st, &allowed, |f| effective_expiry(&listing, f.as_str()))?;
+        // gpg exits non-zero for a signature by a key that has expired
+        // since; the status lines above are what decide it.
+        if !out.success && !verified.signer_expired {
             return Err(failure("badSignature", "gpg couldn't verify it", &out));
         }
         let plaintext = String::from_utf8(out.stdout)
             .map_err(|_| Error::new("notText", "the decrypted note isn't UTF-8 text"))?;
         Ok(Decrypted {
             plaintext,
-            signer: signer.to_string(),
+            signer: verified.signer.to_string(),
+            signer_expired: verified.signer_expired,
         })
     }
 }

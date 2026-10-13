@@ -113,6 +113,41 @@ pub fn parse_listing(text: &str, now: u64) -> Vec<KeyInfo> {
     keys
 }
 
+/// When the key or subkey `fpr` expires (seconds since the epoch, 0 for
+/// never), counting its primary key's expiry too: the earlier of the two
+/// that are set. `None` when the listing doesn't hold it.
+pub fn effective_expiry(text: &str, fpr: &str) -> Option<u64> {
+    // (fingerprint, own expiry, its primary key's expiry)
+    let mut keys: Vec<(String, u64, u64)> = vec![];
+    let mut primary_expiry = 0;
+    let mut pending: Option<u64> = None;
+    for line in text.lines() {
+        let f: Vec<&str> = line.split(':').collect();
+        let field = |i: usize| f.get(i).copied().unwrap_or("");
+        match field(0) {
+            kind @ ("pub" | "sec" | "sub" | "ssb") => {
+                let expires: u64 = field(6).parse().unwrap_or(0);
+                if kind == "pub" || kind == "sec" {
+                    primary_expiry = expires;
+                }
+                pending = Some(expires);
+            }
+            "fpr" => {
+                if let Some(own) = pending.take() {
+                    keys.push((field(9).to_ascii_uppercase(), own, primary_expiry));
+                }
+            }
+            _ => {}
+        }
+    }
+    let (_, own, primary) = keys.into_iter().find(|(f, _, _)| f == fpr)?;
+    Some(match (own, primary) {
+        (0, p) => p,
+        (o, 0) => o,
+        (o, p) => o.min(p),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +190,26 @@ fpr:::::::::EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE:
 
         // Expiry gpg hasn't flagged yet (its trustdb is stale) still counts.
         assert!(keys[3].expired);
+    }
+
+    #[test]
+    fn effective_expiries() {
+        let l = "\
+pub:e:255:22:1:1600000000:1650000000::u:::sc:::::ed25519:::0:
+fpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:
+sub:e:255:18:2:1600000000:1640000000:::::s:::::ed25519::
+fpr:::::::::BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB:
+sub:u:255:18:3:1600000000::::::e:::::cv25519::
+fpr:::::::::CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC:
+pub:u:255:22:4:1600000000:::u:::sc:::::ed25519:::0:
+fpr:::::::::DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD:
+";
+        let e = |f: char| effective_expiry(l, &f.to_string().repeat(40));
+        assert_eq!(e('A'), Some(1_650_000_000));
+        assert_eq!(e('B'), Some(1_640_000_000), "the subkey's own, earlier");
+        assert_eq!(e('C'), Some(1_650_000_000), "the primary's");
+        assert_eq!(e('D'), Some(0));
+        assert_eq!(e('E'), None);
     }
 
     #[test]

@@ -35,8 +35,9 @@ decrypts. It needs **GPG** on the Mac ([GPG Suite](https://gpgtools.org), or
   is asked for by your own pinentry. Nothing is ever imported into your keyring.
 - Other people's public keys (fetched from `https://github.com/<login>.gpg`, the plugin's only
   network host) go into a **plugin-owned keyring** in the plugin's data directory.
-- A note decrypts only when it's signed by a key you allow; recipients that are expired,
-  revoked or can't encrypt are refused.
+- A note decrypts only when it's signed by a key you allow. A signer's key that has expired
+  since still counts for what it signed while valid; a revoked one never does. Recipients that
+  are expired, revoked or can't encrypt are refused, and so is signing with an expired key.
 
 > **Trust:** Installed plugins share one JavaScript realm; any enabled plugin could ask for a
 > decrypt. Configure gpg-agent to ask for your passphrase or a YubiKey touch on every decrypt.

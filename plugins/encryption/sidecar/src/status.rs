@@ -95,11 +95,30 @@ pub fn judge_decrypt(status: &[Status]) -> Result<()> {
     Ok(())
 }
 
+/// What a verification found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    /// The (first) signer's primary key fingerprint.
+    pub signer: Fpr,
+    /// A signing key has expired since: every such signature was made
+    /// before it expired.
+    pub signer_expired: bool,
+}
+
 /// The second step (verifying the unwrapped message in a keyring holding
 /// only `allowed`'s public keys). Every signature must be good, from an
-/// allowed key, and there must be at least one. Returns the signer's
-/// primary fingerprint.
-pub fn judge_verify(status: &[Status], allowed: &[Fpr]) -> Result<Fpr> {
+/// allowed key, and there must be at least one.
+///
+/// A key that has expired since (`EXPKEYSIG`) is accepted when the
+/// signature was made before it expired: `key_expiry` gives a signing key's
+/// expiry (seconds since the epoch, the earlier of its own and its primary
+/// key's; 0 for never), and the signature's creation time in `VALIDSIG`
+/// must be before it. A revoked key never is.
+pub fn judge_verify(
+    status: &[Status],
+    allowed: &[Fpr],
+    key_expiry: impl Fn(&Fpr) -> Option<u64>,
+) -> Result<Verified> {
     if has(status, "BADSIG") {
         return Err(Error::new("badSignature", "the signature doesn't match"));
     }
@@ -117,9 +136,6 @@ pub fn judge_verify(status: &[Status], allowed: &[Fpr]) -> Result<Fpr> {
             "the signature couldn't be checked",
         ));
     }
-    if has(status, "EXPKEYSIG") {
-        return Err(Error::new("signerExpired", "it's signed by an expired key"));
-    }
     if has(status, "REVKEYSIG") {
         return Err(Error::new("signerRevoked", "it's signed by a revoked key"));
     }
@@ -136,19 +152,20 @@ pub fn judge_verify(status: &[Status], allowed: &[Fpr]) -> Result<Fpr> {
     }
     let valid: Vec<&Status> = status.iter().filter(|s| s.keyword == "VALIDSIG").collect();
     let good = count(status, "GOODSIG");
-    if valid.is_empty() || good == 0 {
+    let expired = count(status, "EXPKEYSIG");
+    if valid.is_empty() || good + expired == 0 {
         return Err(Error::new("notSigned", "it isn't signed"));
     }
-    if good != valid.len() {
+    if good + expired != valid.len() {
         return Err(Error::new(
             "badSignature",
             "not every signature on it is good",
         ));
     }
     let mut signer = None;
-    for v in valid {
-        // VALIDSIG <signing key fpr> <date> <ts> <expires> <ver> <reserved>
-        //          <pk algo> <hash algo> <class> [<primary key fpr>]
+    for v in &valid {
+        // VALIDSIG <signing key fpr> <date> <sig created> <sig expires> <ver>
+        //          <reserved> <pk algo> <hash algo> <class> [<primary fpr>]
         let signing = v.args.first().and_then(|s| Fpr::parse(s).ok());
         let primary = v
             .args
@@ -158,15 +175,54 @@ pub fn judge_verify(status: &[Status], allowed: &[Fpr]) -> Result<Fpr> {
         let ok = [&signing, &primary]
             .iter()
             .any(|f| f.as_ref().is_some_and(|f| allowed.contains(f)));
-        if !ok {
+        let (Some(signing), Some(primary), true) = (signing, primary, ok) else {
             return Err(Error::new(
                 "signerNotAllowed",
                 "it's signed by a key that isn't among the allowed signers",
             ));
+        };
+        if expired > 0 {
+            // gpg doesn't say which signature EXPKEYSIG is about, so every
+            // signature from a key that has an expiry is held to it.
+            let created: Option<u64> = v.args.get(2).and_then(|t| t.parse().ok());
+            match (created, key_expiry(&signing)) {
+                (Some(c), Some(e)) if e == 0 || c < e => {}
+                (_, Some(e)) if e != 0 => {
+                    return Err(Error::new(
+                        "signerExpired",
+                        "it was signed after the signer's key expired",
+                    ))
+                }
+                _ => {
+                    return Err(Error::new(
+                        "signerExpired",
+                        "it's signed by an expired key whose expiry can't be read",
+                    ))
+                }
+            }
         }
-        signer.get_or_insert(primary.expect("ok above implies a fingerprint"));
+        signer.get_or_insert(primary);
     }
-    Ok(signer.expect("valid isn't empty"))
+    // EXPKEYSIG with no key that has an expiry: nothing showed the
+    // signature predates it.
+    if expired > 0
+        && !valid.iter().any(|v| {
+            v.args
+                .first()
+                .and_then(|s| Fpr::parse(s).ok())
+                .and_then(|f| key_expiry(&f))
+                .is_some_and(|e| e != 0)
+        })
+    {
+        return Err(Error::new(
+            "signerExpired",
+            "it's signed by an expired key whose expiry can't be read",
+        ));
+    }
+    Ok(Verified {
+        signer: signer.expect("valid isn't empty"),
+        signer_expired: expired > 0,
+    })
 }
 
 #[cfg(test)]
@@ -176,6 +232,11 @@ mod tests {
     const ALICE: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const ALICE_SUB: &str = "A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1";
     const MALLORY: &str = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+
+    /// Verifies with no key expiries known.
+    fn jv(status: &[Status], allowed: &[Fpr]) -> Result<Verified> {
+        judge_verify(status, allowed, |_| None)
+    }
 
     fn fpr(s: &str) -> Fpr {
         Fpr::parse(s).unwrap()
@@ -228,14 +289,15 @@ mod tests {
     #[test]
     fn good_decryption_and_signature() {
         judge_decrypt(&parse(DECRYPTED)).unwrap();
-        let signer = judge_verify(&parse(&verified(ALICE, ALICE)), &[fpr(ALICE)]).unwrap();
-        assert_eq!(signer, fpr(ALICE));
+        let v = jv(&parse(&verified(ALICE, ALICE)), &[fpr(ALICE)]).unwrap();
+        assert_eq!(v.signer, fpr(ALICE));
+        assert!(!v.signer_expired);
     }
 
     #[test]
     fn a_signing_subkey_reports_its_primary_key() {
         let s = parse(&verified(ALICE_SUB, ALICE));
-        assert_eq!(judge_verify(&s, &[fpr(ALICE)]).unwrap(), fpr(ALICE));
+        assert_eq!(jv(&s, &[fpr(ALICE)]).unwrap().signer, fpr(ALICE));
     }
 
     #[test]
@@ -244,10 +306,7 @@ mod tests {
             "[GNUPG:] NEWSIG\n[GNUPG:] BADSIG {} Alice\n",
             &ALICE[24..]
         ));
-        assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "badSignature"
-        );
+        assert_eq!(jv(&s, &[fpr(ALICE)]).unwrap_err().code, "badSignature");
         // BADSIG anywhere also fails the decrypt step.
         let d = parse(&format!("{DECRYPTED}[GNUPG:] BADSIG 1 x\n"));
         assert_eq!(judge_decrypt(&d).unwrap_err().code, "badSignature");
@@ -256,16 +315,10 @@ mod tests {
     #[test]
     fn no_signature() {
         let s = parse("[GNUPG:] PLAINTEXT 62 0\n");
-        assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "notSigned"
-        );
+        assert_eq!(jv(&s, &[fpr(ALICE)]).unwrap_err().code, "notSigned");
         // GOODSIG without VALIDSIG isn't enough either.
         let s = parse("[GNUPG:] GOODSIG 1 Alice\n");
-        assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "notSigned"
-        );
+        assert_eq!(jv(&s, &[fpr(ALICE)]).unwrap_err().code, "notSigned");
     }
 
     #[test]
@@ -273,47 +326,67 @@ mod tests {
         // Signed by a key whose public key was in the verify keyring but
         // isn't allowed (a stale keyring, a subkey/primary mix-up).
         let s = parse(&verified(MALLORY, MALLORY));
-        assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "signerNotAllowed"
-        );
+        assert_eq!(jv(&s, &[fpr(ALICE)]).unwrap_err().code, "signerNotAllowed");
         // Signed by a key the verify keyring doesn't have at all.
         let s = parse(&format!(
             "[GNUPG:] NEWSIG\n[GNUPG:] ERRSIG {} 22 10 00 1700000000 9 {MALLORY}\n[GNUPG:] NO_PUBKEY {}\n",
             &MALLORY[24..],
             &MALLORY[24..]
         ));
-        assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "signerNotAllowed"
-        );
+        assert_eq!(jv(&s, &[fpr(ALICE)]).unwrap_err().code, "signerNotAllowed");
         // One good allowed signature next to a disallowed one still fails.
         let s = parse(&format!(
             "{}{}",
             verified(ALICE, ALICE),
             verified(MALLORY, MALLORY)
         ));
+        assert_eq!(jv(&s, &[fpr(ALICE)]).unwrap_err().code, "signerNotAllowed");
+    }
+
+    /// A signature by a key that has expired since: EXPKEYSIG instead of
+    /// GOODSIG, VALIDSIG with the signature's creation time (1700000000).
+    fn expired_since(signing: &str, primary: &str) -> String {
+        verified(signing, primary).replace("GOODSIG", "EXPKEYSIG")
+    }
+
+    #[test]
+    fn an_expired_key_counts_for_signatures_made_before_it_expired() {
+        let s = parse(&expired_since(ALICE, ALICE));
+        let before = |f: &Fpr| (f == &fpr(ALICE)).then_some(1_800_000_000);
+        let v = judge_verify(&s, &[fpr(ALICE)], before).unwrap();
+        assert_eq!(v.signer, fpr(ALICE));
+        assert!(v.signer_expired);
+
+        // Signed at or after the expiry.
+        for expiry in [1_700_000_000, 1_600_000_000] {
+            let err = judge_verify(&s, &[fpr(ALICE)], |_| Some(expiry)).unwrap_err();
+            assert_eq!(err.code, "signerExpired", "{expiry}");
+        }
+        // No expiry to compare with: refused.
+        for unknown in [None, Some(0)] {
+            let err = judge_verify(&s, &[fpr(ALICE)], |_| unknown).unwrap_err();
+            assert_eq!(err.code, "signerExpired");
+        }
+        // Still only allowed signers.
+        let err = judge_verify(&s, &[fpr(MALLORY)], before).unwrap_err();
+        assert_eq!(err.code, "signerNotAllowed");
+        // EXPKEYSIG without VALIDSIG is not a signature.
+        let s = parse(&format!("[GNUPG:] EXPKEYSIG {} Alice\n", &ALICE[24..]));
         assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "signerNotAllowed"
+            judge_verify(&s, &[fpr(ALICE)], before).unwrap_err().code,
+            "notSigned"
         );
     }
 
     #[test]
-    fn expired_or_revoked_signers() {
+    fn a_revoked_signer_is_refused_even_before_revocation() {
         let s = parse(&format!(
-            "[GNUPG:] EXPKEYSIG {} Alice\n[GNUPG:] VALIDSIG {ALICE}\n",
-            &ALICE[24..]
+            "[GNUPG:] REVKEYSIG {} Alice\n{}",
+            &ALICE[24..],
+            verified(ALICE, ALICE).replace("GOODSIG", "IGNORED")
         ));
-        assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "signerExpired"
-        );
-        let s = parse(&format!("[GNUPG:] REVKEYSIG {} Alice\n", &ALICE[24..]));
-        assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "signerRevoked"
-        );
+        let err = judge_verify(&s, &[fpr(ALICE)], |_| Some(u64::MAX)).unwrap_err();
+        assert_eq!(err.code, "signerRevoked");
     }
 
     #[test]
@@ -363,9 +436,6 @@ mod tests {
             "[GNUPG:] BEGIN_DECRYPTION\n{}",
             verified(ALICE, ALICE)
         ));
-        assert_eq!(
-            judge_verify(&s, &[fpr(ALICE)]).unwrap_err().code,
-            "malformed"
-        );
+        assert_eq!(jv(&s, &[fpr(ALICE)]).unwrap_err().code, "malformed");
     }
 }

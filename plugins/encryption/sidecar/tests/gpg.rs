@@ -416,3 +416,110 @@ fn filter_modes_are_refused_until_they_exist() {
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
 }
+
+/// Runs gpg in `p`'s keyring as of `when` (gpg's `--faked-system-time`),
+/// with the empty passphrase.
+fn run_at(p: &Person, when: Option<&str>, args: &[&str], input: &[u8]) -> gpg::Output {
+    let mut a = vec!["--pinentry-mode", "loopback", "--passphrase", ""];
+    if let Some(t) = when {
+        a.extend(["--faked-system-time", t]);
+    }
+    a.extend(args);
+    let out = p.run(&a, input);
+    assert!(out.success, "{}", out.stderr);
+    out
+}
+
+#[test]
+fn a_key_that_expired_after_signing_still_counts() {
+    let Some(g) = gpg_path() else { return };
+    // Valid through 2020.
+    let erin = person(&g, "Erin", "default default 1y", Some("20200101T000000"));
+    let fpr = format!("0x{}", erin.fpr);
+    // Signed (and encrypted to herself) in June 2020, while valid.
+    let out = run_at(
+        &erin,
+        Some("20200601T000000"),
+        &[
+            "--trust-model",
+            "always",
+            "--armor",
+            "--local-user",
+            &fpr,
+            "--sign",
+            "--encrypt",
+            "--recipient",
+            &fpr,
+        ],
+        b"from 2020",
+    );
+    let armored = String::from_utf8(out.stdout).unwrap();
+
+    let d = erin
+        .engine()
+        .decrypt(&armored, std::slice::from_ref(&erin.fpr))
+        .unwrap();
+    assert_eq!(d.plaintext, "from 2020");
+    assert_eq!(d.signer, erin.fpr);
+    assert!(d.signer_expired);
+    let json = serde_json::to_value(&d).unwrap();
+    assert_eq!(json["signerExpired"], true);
+
+    // Encrypting with it now is still refused.
+    let err = erin
+        .engine()
+        .encrypt("x", std::slice::from_ref(&erin.fpr), &erin.fpr)
+        .unwrap_err();
+    assert_eq!(err.code, "signerUnusable", "{err}");
+}
+
+#[test]
+fn a_signature_made_after_the_key_expired_is_rejected() {
+    let Some(g) = gpg_path() else { return };
+    let alice = person(&g, "Alice", "default default never", None);
+    // Frank's key expired at the end of 2020. Alice imports it as it was.
+    let frank = person(&g, "Frank", "default default 1y", Some("20200101T000000"));
+    alice
+        .engine()
+        .import_public(&frank.armored_public_key())
+        .unwrap();
+
+    // Frank extends his key (Alice never sees the new expiry) and signs now.
+    run_at(&frank, None, &["--quick-set-expire", &frank.fpr, "0"], b"");
+    run_at(
+        &frank,
+        None,
+        &["--quick-set-expire", &frank.fpr, "0", "*"],
+        b"",
+    );
+    run_at(
+        &frank,
+        None,
+        &["--import"],
+        alice.armored_public_key().as_bytes(),
+    );
+    let out = run_at(
+        &frank,
+        None,
+        &[
+            "--trust-model",
+            "always",
+            "--armor",
+            "--local-user",
+            &format!("0x{}", frank.fpr),
+            "--sign",
+            "--encrypt",
+            "--recipient",
+            &format!("0x{}", alice.fpr),
+        ],
+        b"from now",
+    );
+    let armored = String::from_utf8(out.stdout).unwrap();
+
+    let err = alice
+        .engine()
+        .decrypt(&armored, std::slice::from_ref(&frank.fpr))
+        .unwrap_err();
+    assert_eq!(err.code, "signerExpired", "{err}");
+    assert!(err.message.contains("after"), "{err}");
+}
