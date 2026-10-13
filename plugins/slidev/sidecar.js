@@ -686,6 +686,21 @@ function runPreview(vault, markdown, template) {
   });
 }
 
+const CAUSE_MAX = 200;
+
+/** One line naming why a run failed, for the first line of its error (the
+ * app shows only that): the last line of `text` that isn't blank or a
+ * stack frame, trimmed to CAUSE_MAX characters. "" when there's none. */
+export function logCause(text) {
+  const line = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !/^at\s/.test(l))
+    .pop();
+  if (!line) return "";
+  return line.length > CAUSE_MAX ? `${line.slice(0, CAUSE_MAX - 1)}…` : line;
+}
+
 /** Runs `slidev export <entry> <args>` to completion in the workspace,
  * collecting its output in `log`; throws on a failure or after
  * EXPORT_TIMEOUT_MS. Export and the preview both go through it, so they
@@ -709,7 +724,10 @@ export async function runSlidevExport(entry, args, log) {
     });
   });
   if (code === "timeout") throw new Error(`slidev export did not finish within ${EXPORT_TIMEOUT_MS / 1000}s:\n${log.text}`);
-  if (code !== 0) throw new Error(`slidev export failed (${code}):\n${log.text}`);
+  if (code !== 0) {
+    const cause = logCause(log.text);
+    throw new Error(`slidev export failed (${code})${cause ? `: ${cause}` : ""}\n${log.text}`);
+  }
 }
 
 /** `export`'s work, once its vault is linked and marked in use. */
