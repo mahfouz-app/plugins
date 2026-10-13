@@ -749,3 +749,36 @@ test("a preview whose temp dir can't be made leaves no vault linked and no entri
   assert.equal((await mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null })).slides.length, 1);
   assert.equal(fs.existsSync(path.join(ws, "vaults", vaultLinkId(vault))), false);
 });
+
+// The app shows a failed render's first line only, so it names the cause:
+// the last line of Slidev's output that isn't blank or a stack frame.
+test("logCause is the last non-empty, non-stack line of the output, trimmed to 200 characters", () => {
+  assert.equal(typeof sidecar.logCause, "function");
+  assert.equal(sidecar.logCause("vite ready\nError: chromium crashed\n    at launch (x.js:1:2)\n    at async main\n\n"), "Error: chromium crashed");
+  assert.equal(sidecar.logCause("  [slidev] Theme not found  \n"), "[slidev] Theme not found");
+  assert.equal(sidecar.logCause(""), "");
+  assert.equal(sidecar.logCause("\n    at a (b:1:1)\n"), "");
+  const long = sidecar.logCause(`E${"x".repeat(500)}`);
+  assert.ok(long.length <= 200, `${long.length} characters`);
+  assert.ok(long.startsWith("Exxx"));
+});
+
+test("a failed render's first line carries the cause, and the full output follows", async () => {
+  const fail = "warming up\nError: chromium crashed\n    at launch (/x/export.mjs:1:2)";
+  const { mod, vault } = await previewSidecar({ pngs: {}, fail });
+  const err = await mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }).then(
+    () => assert.fail("the preview should fail"),
+    (e) => e
+  );
+  const [first, ...rest] = err.message.split("\n");
+  assert.equal(first, "slidev export failed (1): Error: chromium crashed");
+  assert.ok(rest.join("\n").includes(fail), err.message);
+});
+
+test("a failed render with no output still has a first line", async () => {
+  const { mod, vault } = await previewSidecar({ pngs: {}, fail: " " });
+  await assert.rejects(mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null }), (e) => {
+    assert.equal(e.message.split("\n")[0], "slidev export failed (1)");
+    return true;
+  });
+});
