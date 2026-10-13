@@ -1,5 +1,7 @@
-// Slidev loads this from the project root (this plugin's directory). The
-// plugin itself is in ../harden.js, which the tests import.
+// Slidev loads this from the project root (this plugin's directory) with
+// the run's resolved options. The plugins themselves are in ../harden.js
+// and ../vault-files.js, which the tests import.
 import { hardenPlugin } from "../harden.js";
+import { vaultFilesPlugin } from "../vault-files.js";
 
-export default () => [hardenPlugin()];
+export default (options: { entry: string; userRoot: string }) => [hardenPlugin(), vaultFilesPlugin(options)];
