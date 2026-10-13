@@ -2,10 +2,14 @@
 //
 // The work happens in the sidecar (`sidecar/`, built into the `git-crypt`
 // binary the install step downloads): `status`, `secretFingerprints`,
-// `importPublic` and `encrypt` over the app's sidecar JSON-RPC. `decrypt` is
-// the app's alone: the host refuses it from this module, and a note is only
-// ever decrypted by the app, through `ctx.decryptNote()` in the body codec
-// (and `host.notes.decrypt` for a re-encryption), reading the file itself.
+// `importPublic` and `encrypt` over the app's sidecar JSON-RPC, and for
+// whole-vault encryption `vaultStatus`, `initVault`, `unlockVault`,
+// `lockVault`, `addVaultMember` and `removeVaultMember`. `decrypt` is the
+// app's alone: the host refuses it from this module, and a note is only ever
+// decrypted by the app, through `ctx.decryptNote()` in the body codec (and
+// `host.notes.decrypt` for a re-encryption), reading the file itself. The
+// same binary is git-crypt's filter (`clean`, `smudge`, `diff`); `gitPath`
+// puts it on git's PATH.
 //
 // Where things live:
 //

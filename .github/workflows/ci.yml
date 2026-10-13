@@ -67,8 +67,10 @@ jobs:
             node scripts/check.mjs --artifacts
           fi
 
-  # The mahfouz/encryption plugin's Rust sidecar. gpg comes from apt so the
-  # integration tests (real gpg, throwaway keyrings) run instead of skipping.
+  # The mahfouz/encryption plugin's Rust sidecar. gpg and git-crypt come from
+  # apt so the integration tests (real gpg in throwaway keyrings, and
+  # byte-for-byte compatibility with the real git-crypt CLI) run instead of
+  # skipping.
   encryption-sidecar:
     runs-on: ubuntu-latest
     defaults:
@@ -80,8 +82,9 @@ jobs:
       - name: gpg
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnupg gpg-agent
+          sudo apt-get install -y gnupg gpg-agent git-crypt
           gpg --version | head -1
+          git-crypt --version
 
       - name: Toolchain
         run: rustup component add clippy rustfmt

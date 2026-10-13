@@ -52,18 +52,49 @@ decrypts. It needs **GPG** on the Mac ([GPG Suite](https://gpgtools.org), or
 > **Trust:** Installed plugins share one JavaScript realm; any enabled plugin could ask for a
 > decrypt. Configure gpg-agent to ask for your passphrase or a YubiKey touch on every decrypt.
 
+### Vault encryption
+
+The plugin can also encrypt a whole vault's git repository, so the remote (GitHub) only ever
+holds ciphertext. It uses [git-crypt](https://github.com/AGWA/git-crypt)'s scheme and layout,
+byte for byte, so the real `git-crypt` reads a vault the plugin encrypted and the plugin reads
+a repository `git-crypt` encrypted. CI checks both directions against the real CLI.
+
+- **Enable** (`initVault`): generates the vault key, stores it in `.git/git-crypt/keys/default`
+  (this clone only, 0600), encrypts it to each member's GPG key as
+  `.git-crypt/keys/default/0/<fingerprint>.gpg` (committed), and points git's
+  `filter.git-crypt` and `diff.git-crypt` at the plugin's binary. Mahfouz then adds
+  `* filter=git-crypt diff=git-crypt` (with `.gitattributes` and `.git-crypt/**` left out) to
+  the root `.gitattributes`, renormalizes and commits. One of the members must be one of your
+  own keys; add a second one (a backup key) so a lost key doesn't lose the vault.
+- **Unlock** (`unlockVault`), on another Mac or a fresh clone: decrypts your member file with
+  your gpg (pinentry asks), installs the key and the filter, and Mahfouz checks the files out
+  again as plaintext. **Lock** (`lockVault`) removes both; the files are checked out again as
+  ciphertext.
+- **Members** (`addVaultMember`, `removeVaultMember`): adding one encrypts the vault key to
+  their public key (imported from `https://github.com/<login>.gpg`). **Removing a member doesn't
+  rotate the key**: whoever had it can still decrypt everything committed with it, past and
+  future, until the key changes.
+- **What stays visible:** file and folder names, file sizes (to the byte), which files changed
+  in each commit, commit messages, authors and dates, and branch names. Two identical files
+  give identical ciphertext. Encrypt the content, not the shape.
+- **In a terminal:** git runs the filter by the path Mahfouz configured, so `git` works in an
+  unlocked vault. Commands like `git-crypt unlock`, `lock` and `status` need the real
+  `git-crypt` installed (`brew install git-crypt`); the plugin's binary only runs git's filters.
+
 The sidecar is a Rust crate in `plugins/encryption/sidecar/`, built into one binary named
-`git-crypt` (a later version adds git-crypt's filter modes to it). It isn't built by the app:
+`git-crypt`: run with no arguments it's the sidecar, and run as `git-crypt clean`, `smudge` or
+`diff` it's git-crypt's filter (the manifest's `gitPath` puts it on the PATH of every git
+command Mahfouz runs). It isn't built by the app:
 `.github/workflows/encryption-release.yml` builds it for both Macs when a tag
 `encryption-v<version>` is pushed and attaches `git-crypt-darwin-<arch>.tar.gz` to that
 release, and `plugin.json` downloads it pinned by sha256. A new sidecar version is released in
 that order: raise `version` (plugin.json and `Cargo.toml`) and the artifact URLs, push the tag,
 then copy the two checksums from the workflow's summary into `plugin.json`. CI's artifact check
 fails until they match. CI also runs the crate's `cargo fmt --check`, clippy and tests, with gpg
-installed, so the tests against the real gpg run there.
+and git-crypt installed, so the tests against the real gpg and git-crypt run there.
 
 **TODO before the first merge:** `plugin.json`'s `sha256` values are placeholders (all zeros)
-until `encryption-v0.1.0` is cut.
+until `encryption-v0.2.0` is cut.
 
 ## Releasing
 
