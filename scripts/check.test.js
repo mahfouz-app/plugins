@@ -358,3 +358,14 @@ test("network and secrets: checked as manifest.rs does, from Mahfouz 0.12.0", ()
   assert.match(old({ network: ok.network }), /"network" needs Mahfouz 0\.12\.0/);
   assert.match(old(ok), /"secrets" needs Mahfouz 0\.12\.0/);
 });
+
+test("configFile: a .md file name under the vault's .config/, from Mahfouz 0.12.0", () => {
+  const errs = (over, mahfouz = ">=0.12.0") => validate({ ...minimal("p", { mahfouz }), ...over }).join("\n");
+  assert.equal(errs({ configFile: "encryption.md" }), "");
+  assert.equal(errs({ configFile: "key-groups2.md" }), "");
+  for (const bad of ["../settings.md", "sub/encryption.md", "Encryption.md", "encryption.txt", ".md", "", 3]) {
+    assert.match(errs({ configFile: bad }), /configFile must be a file name/, String(bad));
+  }
+  // Older apps reject the unknown field: the range must start at 0.12.0.
+  assert.match(errs({ configFile: "encryption.md" }, ">=0.11.0"), /"configFile" needs Mahfouz 0\.12\.0/);
+});

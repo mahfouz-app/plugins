@@ -41,7 +41,20 @@ const RUST_WS = "\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2
 // Top-level fields newer than the app's first plugin release, and the first
 // app version that understands each. An older app rejects an unknown field, so
 // the plugin's `mahfouz` range must start at that version or later.
-export const FIELD_SINCE = { node: "0.9.0", icon: "0.8.0", logo: "0.8.0", network: "0.12.0", secrets: "0.12.0" };
+export const FIELD_SINCE = {
+  node: "0.9.0",
+  icon: "0.8.0",
+  logo: "0.8.0",
+  network: "0.12.0",
+  secrets: "0.12.0",
+  // The app's plugin host APIs (`config.read/write`, limited to the
+  // plugin's own `.config/<configFile>`) arrive in 0.12.0 with it; an app
+  // that doesn't parse it rejects the field like any unknown one.
+  configFile: "0.12.0",
+};
+// A file directly under the vault's `.config/`: a lowercase name ending in
+// `.md`, no directory part, so a plugin can only name its own file there.
+const CONFIG_FILE = /^[a-z0-9][a-z0-9-]{0,63}\.md$/;
 // The same for fields of a download step's artifact.
 export const ARTIFACT_FIELD_SINCE = { extract: "0.9.0" };
 const EXTRACTS = ["none", "tar.gz", "zip"];
@@ -140,7 +153,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
 
   onlyKeys(
     m,
-    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets"],
+    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets", "configFile"],
     where,
     errors
   );
@@ -321,6 +334,10 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
         }
       }
     }
+  }
+
+  if ("configFile" in m && (typeof m.configFile !== "string" || !CONFIG_FILE.test(m.configFile))) {
+    errors.push(`${where}: configFile must be a file name under the vault's .config/ (lowercase letters, digits and dashes, ending in .md)`);
   }
 
   // `network` and `secrets`, as `validate_network` in manifest.rs reads them.
