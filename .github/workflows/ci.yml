@@ -66,3 +66,31 @@ jobs:
           else
             node scripts/check.mjs --artifacts
           fi
+
+  # The mahfouz/encryption plugin's Rust sidecar. gpg comes from apt so the
+  # integration tests (real gpg, throwaway keyrings) run instead of skipping.
+  encryption-sidecar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/encryption/sidecar
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: gpg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg gpg-agent
+          gpg --version | head -1
+
+      - name: Toolchain
+        run: rustup component add clippy rustfmt
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked

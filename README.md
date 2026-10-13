@@ -18,9 +18,41 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 | `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.12.0 |
+| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.12.0 |
 
 `npm test` runs the plugins' tests and the registry checker's with `node --test` (no
 dependencies).
+
+## Encryption plugin
+
+`mahfouz/encryption` encrypts a note's body as one signed and encrypted, ASCII-armored OpenPGP
+message, readable only by the keys it was encrypted to. It's **desktop only**: the web app never
+decrypts. It needs **GPG** on the Mac ([GPG Suite](https://gpgtools.org), or
+`brew install gnupg pinentry-mac`); the sidecar looks for `gpg` on `PATH`, then in
+`/opt/homebrew/bin`, `/usr/local/bin` and `/usr/local/MacGPG2/bin`, and reports the path it uses.
+
+- Signing and decrypting use **your** keyring and gpg-agent, so your passphrase or security key
+  is asked for by your own pinentry. Nothing is ever imported into your keyring.
+- Other people's public keys (fetched from `https://github.com/<login>.gpg`, the plugin's only
+  network host) go into a **plugin-owned keyring** in the plugin's data directory.
+- A note decrypts only when it's signed by a key you allow; recipients that are expired,
+  revoked or can't encrypt are refused.
+
+> **Trust:** Installed plugins share one JavaScript realm; any enabled plugin could ask for a
+> decrypt. Configure gpg-agent to ask for your passphrase or a YubiKey touch on every decrypt.
+
+The sidecar is a Rust crate in `plugins/encryption/sidecar/`, built into one binary named
+`git-crypt` (a later version adds git-crypt's filter modes to it). It isn't built by the app:
+`.github/workflows/encryption-release.yml` builds it for both Macs when a tag
+`encryption-v<version>` is pushed and attaches `git-crypt-darwin-<arch>.tar.gz` to that
+release, and `plugin.json` downloads it pinned by sha256. A new sidecar version is released in
+that order: raise `version` (plugin.json and `Cargo.toml`) and the artifact URLs, push the tag,
+then copy the two checksums from the workflow's summary into `plugin.json`. CI's artifact check
+fails until they match. CI also runs the crate's `cargo fmt --check`, clippy and tests, with gpg
+installed, so the tests against the real gpg run there.
+
+**TODO before the first merge:** `plugin.json`'s `sha256` values are placeholders (all zeros)
+until `encryption-v0.1.0` is cut.
 
 ## Releasing
 
@@ -100,7 +132,8 @@ approve the update.
   "frontend": "index.js",
   "sidecar": { "runtime": "node", "entry": "sidecar.js" },
   "network": { "hosts": ["api.example.com", "*.files.example.com"] },
-  "secrets": { "token": { "hosts": ["api.example.com"] } }
+  "secrets": { "token": { "hosts": ["api.example.com"] } },
+  "configFile": "example.md"
 }
 ```
 
@@ -125,6 +158,7 @@ relative and stay inside the plugin's directory.
 | `network` | `{ "hosts": [...] }`: the only hosts `host.http.request` (and the app's downloads for an importer's attachments) may reach, over https. Each is an exact lowercase DNS name with at least two labels (`api.notion.com`), or `*.` followed by one (`*.notion.so`: any subdomain, never `notion.so` itself). No scheme, port, path, IP address, bare `*` or `*.<tld>`. Without it the plugin has no network access through the host. Needs `"mahfouz": ">=0.12.0"`. |
 | `secrets` | `{ "<name>": { "hosts": [...] } }`: session secrets the user pastes into the app (an importer's `credential.secretName`), each bound to the hosts it may be sent to. Every host must also be in `network.hosts`; names follow the id rules. The app attaches the secret as a bearer token only to those hosts and never hands it to the plugin. Needs `"mahfouz": ">=0.12.0"`. |
 | `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the plugin's `node` for the user's platform, or the user's Node when there isn't one. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
+| `configFile` | The one file under the vault's `.config/` the plugin may read and write through the host (`encryption.md` → `.config/encryption.md`): a lowercase name of letters, digits and dashes ending in `.md`. Needs `"mahfouz": ">=0.12.0"`. |
 
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
 installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).

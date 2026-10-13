@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "encryption",
+  "version": "0.1.0",
+  "label": "Encryption",
+  "description": "Encrypt notes end to end with GPG, readable only by you and the people you choose",
+  "mahfouz": ">=0.12.0",
+  "apiVersion": 1,
+  "install": [
+    {
+      "type": "download",
+      "extract": "tar.gz",
+      "to": "gitbin",
+      "artifacts": {
+        "darwin-arm64": {
+          "url": "https://github.com/mahfouz-app/plugins/releases/download/encryption-v0.1.0/git-crypt-darwin-arm64.tar.gz",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "darwin-x64": {
+          "url": "https://github.com/mahfouz-app/plugins/releases/download/encryption-v0.1.0/git-crypt-darwin-x64.tar.gz",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    }
+  ],
+  "frontend": "index.js",
+  "sidecar": {
+    "runtime": "native",
+    "entry": {
+      "darwin-arm64": "gitbin/git-crypt",
+      "darwin-x64": "gitbin/git-crypt"
+    }
+  },
+  "network": { "hosts": ["github.com"] },
+  "configFile": "encryption.md"
+}
