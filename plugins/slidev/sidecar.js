@@ -47,6 +47,10 @@
 // - A presented note's HTML and Vue run as script on the dev server's
 //   origin. `setup/vite-plugins.ts` (harden.js) leaves that server only
 //   able to read, and only the vaults in use stay linked under `vaults/`.
+// - `slidev export --format png --output <dir>` (no `--with-clicks`, which
+//   PNG doesn't default to, and no `--per-slide`) empties `<dir>` and
+//   writes one `<n>.png` per slide, `n` its unpadded number from 1; the
+//   template preview reads them back by that name.
 // - The dev server listens on `localhost`, which on modern Node resolves to
 //   `::1` first; readiness polling goes through `localhost` too.
 
@@ -64,6 +68,14 @@ const WORKSPACE = process.env.MAHFOUZ_PLUGIN_DIR ?? path.dirname(fileURLToPath(i
 const START_TIMEOUT_MS = 90_000;
 const EXPORT_TIMEOUT_MS = 180_000;
 const OUTPUT_CAP = 64 * 1024;
+const MB = 1024 * 1024;
+/** The template preview's limits: the sample deck the app sends, a
+ * template's stylesheet, and the PNGs it returns. One PNG at most 3 MB is a
+ * base64 data URL of at most 4 MB, the app's limit per slide. */
+export const PREVIEW_MARKDOWN_CAP = 64 * 1024;
+export const PREVIEW_STYLESHEET_CAP = 256 * 1024;
+export const PREVIEW_PNG_CAP = 3 * MB;
+export const PREVIEW_TOTAL_CAP = 30 * MB;
 /** Vite (^20.19 || >=22.12) and some of its plugins (^22) set the floor. */
 export const MIN_NODE = [22, 12];
 
@@ -264,6 +276,65 @@ export function stubContent(src, template = null, renderInline = escapeHtml) {
  * orientation flag of its own, so portrait means a taller ratio. */
 export function exportEntryContent(src, portrait, template = null, renderInline = escapeHtml) {
   return `---\nsrc: ${quote(src)}\n${portrait ? 'aspectRatio: "3/4"\n' : ""}${templateHeadmatter(template, renderInline)}---\n`;
+}
+
+/** The template preview's entry: the sample deck (`preview-src.md`, the
+ * Markdown the app sends) with the template's headmatter, written the way
+ * an export's is. */
+export function previewEntryContent(template = null, renderInline = escapeHtml) {
+  return exportEntryContent("./preview-src.md", false, template, renderInline);
+}
+
+/** The slides `slidev export --format png` wrote to `dir`, as base64 in
+ * slide order. Refuses a PNG not named `<n>.png` (the naming fact in the
+ * header), one over PREVIEW_PNG_CAP, and more than PREVIEW_TOTAL_CAP in all. */
+export function pngSlides(dir) {
+  const slides = [];
+  const seen = new Set();
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith(".png")) continue;
+    const stem = name.slice(0, -".png".length);
+    if (!/^[0-9]+$/.test(stem)) throw new Error(`slidev export wrote ${name}, which isn't named by slide number`);
+    const n = parseInt(stem, 10);
+    if (seen.has(n)) throw new Error(`slidev export wrote slide ${n} twice`);
+    seen.add(n);
+    slides.push({ n, file: path.join(dir, name) });
+  }
+  if (slides.length === 0) throw new Error("slidev export produced no slides");
+  slides.sort((a, b) => a.n - b.n);
+  let total = 0;
+  for (const slide of slides) {
+    const size = fs.statSync(slide.file).size;
+    if (size > PREVIEW_PNG_CAP) throw new Error(`slide ${slide.n} is over ${PREVIEW_PNG_CAP / MB} MB as a PNG`);
+    total += size;
+    if (total > PREVIEW_TOTAL_CAP) throw new Error(`the slides are over ${PREVIEW_TOTAL_CAP / MB} MB of PNGs in all`);
+  }
+  return slides.map(({ file }) => fs.readFileSync(file).toString("base64"));
+}
+
+/** The preview's `vaultPath`: absolute, an existing directory, never the
+ * file system's root (which would link every file into the workspace).
+ * Returned resolved, so its link id is the same however it was spelled. */
+function previewVault(vaultPath) {
+  if (typeof vaultPath !== "string" || !path.isAbsolute(vaultPath)) throw new Error("vaultPath must be an absolute path");
+  const vault = path.resolve(vaultPath);
+  if (vault === path.parse(vault).root) throw new Error("vaultPath can't be the file system's root");
+  if (!fs.statSync(vault, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`vault not found: ${vault}`);
+  return vault;
+}
+
+/** The preview's `template`: null, or an object whose text fields the
+ * entry uses are strings (or absent), the stylesheet within its cap. */
+function checkPreviewTemplate(template) {
+  if (template === null || template === undefined) return;
+  if (typeof template !== "object" || Array.isArray(template)) throw new Error("template must be an object or null");
+  for (const key of ["stylesheet", "header", "footer"]) {
+    const value = template[key];
+    if (value !== undefined && value !== null && typeof value !== "string") throw new Error(`template.${key} must be a string`);
+  }
+  if (typeof template.stylesheet === "string" && Buffer.byteLength(template.stylesheet) > PREVIEW_STYLESHEET_CAP) {
+    throw new Error(`template.stylesheet is over ${PREVIEW_STYLESHEET_CAP / 1024} KB`);
+  }
 }
 
 /** The Export dialog's formats → `slidev export --format` values (and the
@@ -530,6 +601,32 @@ export const methods = {
     }
   },
 
+  /**
+   * Renders the app's sample deck (`markdown`) with a slides template to
+   * PNGs (Settings → Slides' "Render with Slidev") and returns them as
+   * base64, in slide order: `{ slides: [{ png }] }`. A one-shot `slidev
+   * export --format png` like `export`'s, from its own entry
+   * (`preview.md`, importing `preview-src.md`), into a fresh temp dir; the
+   * vault is linked for the template's `/files/` images. One at a time: a
+   * preview asked for while one runs is refused as busy, so a request the
+   * app has given up on can't queue behind it. The temp dir and both entry
+   * files are removed afterwards, whatever happened.
+   */
+  async preview({ vaultPath, markdown, template = null } = {}) {
+    if (typeof markdown !== "string") throw new Error("markdown must be a string");
+    if (Buffer.byteLength(markdown) > PREVIEW_MARKDOWN_CAP) throw new Error(`markdown is over ${PREVIEW_MARKDOWN_CAP / 1024} KB`);
+    const vault = previewVault(vaultPath);
+    checkPreviewTemplate(template);
+    if (previewing) throw new Error("busy: a preview is already rendering");
+    previewing = true;
+    try {
+      assertInstalled();
+      return await runPreview(vault, markdown, template ?? null);
+    } finally {
+      previewing = false;
+    }
+  },
+
   stop() {
     stopServer();
     linked.present = null;
@@ -542,25 +639,41 @@ export const methods = {
   },
 };
 
-/** `export`'s work, once its vault is linked and marked in use. */
-async function runExport(id, relPath, orientation, content, template, format, slidevFormat) {
-  let src = `./vaults/${id}/${relPath}`;
-  if (typeof content === "string") {
-    fs.writeFileSync(path.join(WORKSPACE, "export-src.md"), content);
-    src = "./export-src.md";
+/** Whether a preview is rendering (they run one at a time). */
+let previewing = false;
+
+/** `preview`'s work, once its params are checked. */
+async function runPreview(vault, markdown, template) {
+  const id = linkVault(WORKSPACE, vault);
+  linked.exports.set(id, (linked.exports.get(id) ?? 0) + 1);
+  const src = path.join(WORKSPACE, "preview-src.md");
+  const entry = path.join(WORKSPACE, "preview.md");
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-preview-"));
+  try {
+    pruneVaultLinks(WORKSPACE, linkedIds());
+    fs.writeFileSync(src, markdown);
+    fs.writeFileSync(entry, previewEntryContent(template, template ? await markdownInline() : undefined));
+    await runSlidevExport(entry, ["--output", output, "--format", "png"], tail());
+    return { slides: pngSlides(output).map((png) => ({ png })) };
+  } finally {
+    for (const file of [output, src, entry]) fs.rmSync(file, { recursive: true, force: true });
+    const n = linked.exports.get(id) - 1;
+    if (n > 0) linked.exports.set(id, n);
+    else linked.exports.delete(id);
+    pruneVaultLinks(WORKSPACE, linkedIds());
   }
-  const entry = path.join(WORKSPACE, "export.md");
-  fs.writeFileSync(
-    entry,
-    exportEntryContent(src, orientation === "portrait", template ?? null, template ? await markdownInline() : undefined)
-  );
-  const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.${format}`);
-  const log = tail();
-  const child = spawn(
-    process.execPath,
-    [cliEntry(WORKSPACE), "export", entry, "--output", output, "--format", slidevFormat],
-    { cwd: WORKSPACE, env: { ...process.env, NO_COLOR: "1", CI: "1" }, stdio: ["ignore", "pipe", "pipe"] }
-  );
+}
+
+/** Runs `slidev export <entry> <args>` to completion in the workspace,
+ * collecting its output in `log`; throws on a failure or after
+ * EXPORT_TIMEOUT_MS. Export and the preview both go through it, so they
+ * run Slidev the same way (cwd, project root, env). */
+export async function runSlidevExport(entry, args, log) {
+  const child = spawn(process.execPath, [cliEntry(WORKSPACE), "export", entry, ...args], {
+    cwd: WORKSPACE,
+    env: { ...process.env, NO_COLOR: "1", CI: "1" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   child.stdout.setEncoding("utf8").on("data", (d) => log.add(d));
   child.stderr.setEncoding("utf8").on("data", (d) => log.add(d));
   const code = await new Promise((resolve) => {
@@ -575,6 +688,22 @@ async function runExport(id, relPath, orientation, content, template, format, sl
   });
   if (code === "timeout") throw new Error(`slidev export did not finish within ${EXPORT_TIMEOUT_MS / 1000}s:\n${log.text}`);
   if (code !== 0) throw new Error(`slidev export failed (${code}):\n${log.text}`);
+}
+
+/** `export`'s work, once its vault is linked and marked in use. */
+async function runExport(id, relPath, orientation, content, template, format, slidevFormat) {
+  let src = `./vaults/${id}/${relPath}`;
+  if (typeof content === "string") {
+    fs.writeFileSync(path.join(WORKSPACE, "export-src.md"), content);
+    src = "./export-src.md";
+  }
+  const entry = path.join(WORKSPACE, "export.md");
+  fs.writeFileSync(
+    entry,
+    exportEntryContent(src, orientation === "portrait", template ?? null, template ? await markdownInline() : undefined)
+  );
+  const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.${format}`);
+  await runSlidevExport(entry, ["--output", output, "--format", slidevFormat], tail());
   if (!fs.existsSync(output)) throw new Error("slidev export exited successfully but produced no file");
   return output;
 }
