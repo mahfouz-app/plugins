@@ -267,9 +267,9 @@ export interface MahfouzPluginHost {
     /** Renders Settings → Slides' sample deck exactly, for "Render with
      * Slidev": `render` gets the sample Markdown and a resolved template and
      * returns the slides as PNG data URLs (at most 30, each at most 4 MB,
-     * which the app checks). The app keeps the latest renderer an enabled
-     * plugin registered, for the active vault only. Desktop only. Absent in
-     * apps older than the template preview. */
+     * within 200 seconds; the app refuses anything else). The app keeps the latest renderer an enabled
+     * plugin registered, for the active vault only. Desktop only.
+     * Optional: absent in apps older than Render with Slidev. */
     registerPreviewRenderer?(render: (req: SlidesPreviewRequest) => Promise<SlidesPreviewResult>): Disposable;
   };
   /** Makes `api` available to plugins that declare this one as a dependency. */

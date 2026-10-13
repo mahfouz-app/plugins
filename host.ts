@@ -131,8 +131,9 @@ export interface SlidesPreviewRequest {
   vaultPath: string;
   /** The sample deck: Slidev Markdown, at most 64 KB. */
   markdown: string;
-  /** The template to render it with, as `resolveTemplate` returns one. */
-  template: ResolvedSlidesTemplate | null;
+  /** The template being edited, resolved as `resolveTemplate` resolves
+   * one, with the sample deck's header and footer applied. */
+  template: ResolvedSlidesTemplate;
 }
 
 /** The rendered slides, in order: at most 30, each a

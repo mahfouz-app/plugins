@@ -70,11 +70,15 @@ const EXPORT_TIMEOUT_MS = 180_000;
 const OUTPUT_CAP = 64 * 1024;
 const MB = 1024 * 1024;
 /** The template preview's limits: the sample deck the app sends, a
- * template's stylesheet, and the PNGs it returns. One PNG at most 3 MB is a
- * base64 data URL of at most 4 MB, the app's limit per slide. */
+ * template's stylesheet, and the PNGs it returns. The app takes a slide's
+ * data URL of at most 4 MiB characters, `data:image/png;base64,` included
+ * (SLIDES_PREVIEW_MAX_PNG_BYTES); PREVIEW_PNG_CAP is the largest PNG whose
+ * base64 fits in the rest. */
 export const PREVIEW_MARKDOWN_CAP = 64 * 1024;
 export const PREVIEW_STYLESHEET_CAP = 256 * 1024;
-export const PREVIEW_PNG_CAP = 3 * MB;
+const APP_DATA_URL_MAX = 4 * MB;
+const PNG_DATA_URL_PREFIX = "data:image/png;base64,";
+export const PREVIEW_PNG_CAP = Math.floor((APP_DATA_URL_MAX - PNG_DATA_URL_PREFIX.length) / 4) * 3;
 export const PREVIEW_TOTAL_CAP = 30 * MB;
 /** Vite (^20.19 || >=22.12) and some of its plugins (^22) set the floor. */
 export const MIN_NODE = [22, 12];
@@ -305,7 +309,7 @@ export function pngSlides(dir) {
   let total = 0;
   for (const slide of slides) {
     const size = fs.statSync(slide.file).size;
-    if (size > PREVIEW_PNG_CAP) throw new Error(`slide ${slide.n} is over ${PREVIEW_PNG_CAP / MB} MB as a PNG`);
+    if (size > PREVIEW_PNG_CAP) throw new Error(`slide ${slide.n} is too large: over ${APP_DATA_URL_MAX / MB} MB as a data URL`);
     total += size;
     if (total > PREVIEW_TOTAL_CAP) throw new Error(`the slides are over ${PREVIEW_TOTAL_CAP / MB} MB of PNGs in all`);
   }
@@ -589,16 +593,7 @@ export const methods = {
     const slidevFormat = slidevExportFormat(format);
     assertInstalled();
     checkNote(vaultPath, relPath, "exported");
-    const id = linkVault(WORKSPACE, vaultPath);
-    linked.exports.set(id, (linked.exports.get(id) ?? 0) + 1);
-    try {
-      pruneVaultLinks(WORKSPACE, linkedIds());
-      return await runExport(id, relPath, orientation, content, template, format, slidevFormat);
-    } finally {
-      const n = linked.exports.get(id) - 1;
-      if (n > 0) linked.exports.set(id, n);
-      else linked.exports.delete(id);
-    }
+    return withLinkedVault(vaultPath, (id) => runExport(id, relPath, orientation, content, template, format, slidevFormat));
   },
 
   /**
@@ -642,26 +637,53 @@ export const methods = {
 /** Whether a preview is rendering (they run one at a time). */
 let previewing = false;
 
-/** `preview`'s work, once its params are checked. */
-async function runPreview(vault, markdown, template) {
-  const id = linkVault(WORKSPACE, vault);
+/**
+ * Runs `fn(id)` with `vaultPath` linked as `vaults/<id>` and counted in
+ * use, so a concurrent Present or export doesn't prune it; afterwards the
+ * count drops and the links no longer in use are pruned. Cleanup failures
+ * are logged, never put in place of `fn`'s result or error.
+ */
+async function withLinkedVault(vaultPath, fn) {
+  const id = linkVault(WORKSPACE, vaultPath);
   linked.exports.set(id, (linked.exports.get(id) ?? 0) + 1);
-  const src = path.join(WORKSPACE, "preview-src.md");
-  const entry = path.join(WORKSPACE, "preview.md");
-  const output = fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-preview-"));
   try {
     pruneVaultLinks(WORKSPACE, linkedIds());
-    fs.writeFileSync(src, markdown);
-    fs.writeFileSync(entry, previewEntryContent(template, template ? await markdownInline() : undefined));
-    await runSlidevExport(entry, ["--output", output, "--format", "png"], tail());
-    return { slides: pngSlides(output).map((png) => ({ png })) };
+    return await fn(id);
   } finally {
-    for (const file of [output, src, entry]) fs.rmSync(file, { recursive: true, force: true });
     const n = linked.exports.get(id) - 1;
     if (n > 0) linked.exports.set(id, n);
     else linked.exports.delete(id);
-    pruneVaultLinks(WORKSPACE, linkedIds());
+    try {
+      pruneVaultLinks(WORKSPACE, linkedIds());
+    } catch (err) {
+      console.error("pruning the vault links failed", err);
+    }
   }
+}
+
+/** `preview`'s work, once its params are checked. */
+function runPreview(vault, markdown, template) {
+  return withLinkedVault(vault, async () => {
+    const src = path.join(WORKSPACE, "preview-src.md");
+    const entry = path.join(WORKSPACE, "preview.md");
+    let output = null;
+    try {
+      output = fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-preview-"));
+      fs.writeFileSync(src, markdown);
+      fs.writeFileSync(entry, previewEntryContent(template, template ? await markdownInline() : undefined));
+      await runSlidevExport(entry, ["--output", output, "--format", "png"], tail());
+      return { slides: pngSlides(output).map((png) => ({ png })) };
+    } finally {
+      for (const file of [output, src, entry]) {
+        if (file === null) continue;
+        try {
+          fs.rmSync(file, { recursive: true, force: true });
+        } catch (err) {
+          console.error(`removing ${file} failed`, err);
+        }
+      }
+    }
+  });
 }
 
 /** Runs `slidev export <entry> <args>` to completion in the workspace,
