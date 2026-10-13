@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import zlib from "node:zlib";
 import { cliEntry, slidevExportFormat } from "./sidecar.js";
 
 const require = createRequire(import.meta.url);
@@ -165,5 +166,123 @@ test("a PNG export of a two-slide deck writes 1.png and 2.png", withChromium, as
   } finally {
     fs.rmSync(entry, { force: true });
     fs.rmSync(output, { recursive: true, force: true });
+  }
+});
+
+// ---- each run serves its own vault's /files/ (vault-files.js) ----------------
+//
+// The bug this guards: one `public/files` link, repointed by every run, so
+// Present for vault A and a preview of vault B served each other's files.
+// Both vaults hold `files/probe.png`, red in A and blue in B; Present's dev
+// server must answer A's, and B's preview must render blue, at the same time.
+// The preview's slide shows the file as a Markdown image, which the Vue
+// compiler turns into an import: blue also means that import resolved.
+
+/** A 1×1 RGB PNG of one colour. */
+function solidPng([r, g, b]) {
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(zlib.crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0);
+  ihdr.writeUInt32BE(1, 4);
+  ihdr.set([8, 2, 0, 0, 0], 8);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", zlib.deflateSync(Buffer.from([0, r, g, b]))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** The RGB of the pixel at the centre of an 8-bit, non-interlaced RGB or
+ * RGBA PNG (what Chromium's screenshots are). */
+function centrePixel(png) {
+  let pos = 8;
+  let width = 0;
+  let height = 0;
+  let channels = 0;
+  const idat = [];
+  while (pos < png.length) {
+    const len = png.readUInt32BE(pos);
+    const type = png.toString("latin1", pos + 4, pos + 8);
+    const data = png.subarray(pos + 8, pos + 8 + len);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      assert.equal(data[8], 8, "8-bit");
+      assert.equal(data[12], 0, "not interlaced");
+      channels = { 2: 3, 6: 4 }[data[9]];
+      assert.ok(channels, `colour type ${data[9]}`);
+    } else if (type === "IDAT") idat.push(data);
+    pos += 12 + len;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  let prev = Buffer.alloc(stride);
+  const row = Math.floor(height / 2);
+  for (let y = 0; y <= row; y++) {
+    const filter = raw[y * (stride + 1)];
+    const line = Buffer.from(raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1)));
+    for (let i = 0; i < stride; i++) {
+      const a = i >= channels ? line[i - channels] : 0;
+      const b = prev[i];
+      const c = i >= channels ? prev[i - channels] : 0;
+      const p = a + b - c;
+      const paeth = Math.abs(p - a) <= Math.abs(p - b) && Math.abs(p - a) <= Math.abs(p - c) ? a : Math.abs(p - b) <= Math.abs(p - c) ? b : c;
+      line[i] = (line[i] + [0, a, b, (a + b) >> 1, paeth][filter]) & 0xff;
+    }
+    prev = line;
+  }
+  const x = Math.floor(width / 2) * channels;
+  return [prev[x], prev[x + 1], prev[x + 2]];
+}
+
+const RED = [255, 0, 0];
+const BLUE = [0, 0, 255];
+const FULL_SLIDE_IMAGE = `![probe](/files/probe.png)
+
+<style>
+img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+</style>
+`;
+
+test("Present for one vault and a preview of another each resolve their own /files/", withChromium, async () => {
+  const vaults = {};
+  for (const [name, colour] of [
+    ["a", RED],
+    ["b", BLUE],
+  ]) {
+    const vault = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `mahfouz-slidev-files-${name}-`)));
+    fs.mkdirSync(path.join(vault, "files"));
+    fs.writeFileSync(path.join(vault, "files", "probe.png"), solidPng(colour));
+    fs.writeFileSync(path.join(vault, "talk.md"), `# Talk\n\n${FULL_SLIDE_IMAGE}`);
+    vaults[name] = vault;
+  }
+  const { methods } = await import("./sidecar.js");
+  const probe = async (url) => Buffer.from(await (await fetch(`${url}files/probe.png`)).arrayBuffer());
+  try {
+    const { url } = await methods.start({ vaultPath: vaults.a, relPath: "talk.md", template: null });
+    assert.deepEqual(await probe(url), solidPng(RED), "Present serves A's file");
+
+    const preview = methods.preview({ vaultPath: vaults.b, markdown: FULL_SLIDE_IMAGE, template: null });
+    // Present keeps serving A's while B's preview runs.
+    const during = await probe(url);
+    const { slides } = await preview;
+    assert.deepEqual(during, solidPng(RED), "Present still serves A's file while B's preview runs");
+    assert.deepEqual(centrePixel(Buffer.from(slides[0].png, "base64")), BLUE, "the preview rendered B's file");
+    assert.deepEqual(await probe(url), solidPng(RED), "and after it");
+    assert.equal(fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "public", "files")), false);
+  } finally {
+    methods.stop();
+    const ws = path.dirname(fileURLToPath(import.meta.url));
+    fs.rmSync(path.join(ws, "deck.md"), { force: true });
+    fs.rmSync(path.join(ws, "vaults"), { recursive: true, force: true });
+    for (const vault of Object.values(vaults)) fs.rmSync(vault, { recursive: true, force: true });
   }
 });

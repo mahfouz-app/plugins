@@ -21,6 +21,12 @@
 //   the check runs on the unresolved path, so the stub reaches the vault
 //   through a `vaults/<id>` symlink here. Relative image paths in the note
 //   resolve through the same link; absolute `src:` paths don't work.
+// - Root-absolute `/files/<name>` links aren't served from `public/` (one
+//   directory every run shares) but by `setup/vite-plugins.ts`
+//   (vault-files.js), from the vault the run's own entry names in its
+//   headmatter. Setups get the run's options, `entry` among them; the Vue
+//   compiler turns a slide's `<img src="/files/…">` into an import, which
+//   that plugin resolves too.
 // - Edits to the imported note and rewrites of the stub both hot-reload.
 // - A theme that isn't installed makes the CLI `process.exit(1)` when
 //   stdin isn't a TTY, so the default theme is installed up front.
@@ -47,6 +53,9 @@
 // - A presented note's HTML and Vue run as script on the dev server's
 //   origin. `setup/vite-plugins.ts` (harden.js) leaves that server only
 //   able to read, and only the vaults in use stay linked under `vaults/`.
+// - `slidev export` reads its entry while it runs (and watches it), so
+//   each export writes an entry of its own: concurrent exports never
+//   rewrite each other's.
 // - `slidev export --format png --output <dir>` (no `--with-clicks`, which
 //   PNG doesn't default to, and no `--per-slide`) empties `<dir>` and
 //   writes one `<n>.png` per slide, `n` its unpadded number from 1; the
@@ -63,6 +72,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { escapeHtml } from "./header-footer.js";
+import { VAULT_KEY } from "./vault-files.js";
 
 const WORKSPACE = process.env.MAHFOUZ_PLUGIN_DIR ?? path.dirname(fileURLToPath(import.meta.url));
 const START_TIMEOUT_MS = 90_000;
@@ -267,26 +277,33 @@ async function markdownInline() {
   return markdown;
 }
 
+/** The headmatter line naming the vault whose `files/` the run serves at
+ * `/files/` (vault-files.js), or "" for none. */
+function vaultLine(vaultId) {
+  return vaultId ? `${VAULT_KEY}: ${quote(vaultId)}\n` : "";
+}
+
 /** The stub entry deck: imports `src` (relative to the workspace, through
- * the vault symlink), or without one, the placeholder an idle server shows. */
-export function stubContent(src, template = null, renderInline = escapeHtml) {
+ * the vault symlink), or without one, the placeholder an idle server shows.
+ * `vaultId` is the vault's link id, for its `/files/`. */
+export function stubContent(src, template = null, renderInline = escapeHtml, vaultId = null) {
   return src
-    ? `---\nsrc: ${quote(src)}\n${templateHeadmatter(template, renderInline)}---\n`
+    ? `---\nsrc: ${quote(src)}\n${vaultLine(vaultId)}${templateHeadmatter(template, renderInline)}---\n`
     : "---\ntitle: Mahfouz\n---\n\n# Mahfouz\n\nOpen a note and choose Present.\n";
 }
 
 /** Headmatter for the one-shot export entry. The deck's `aspectRatio`
  * (default 16/9) sets the PDF's page shape, and `slidev export` has no
  * orientation flag of its own, so portrait means a taller ratio. */
-export function exportEntryContent(src, portrait, template = null, renderInline = escapeHtml) {
-  return `---\nsrc: ${quote(src)}\n${portrait ? 'aspectRatio: "3/4"\n' : ""}${templateHeadmatter(template, renderInline)}---\n`;
+export function exportEntryContent(src, portrait, template = null, renderInline = escapeHtml, vaultId = null) {
+  return `---\nsrc: ${quote(src)}\n${vaultLine(vaultId)}${portrait ? 'aspectRatio: "3/4"\n' : ""}${templateHeadmatter(template, renderInline)}---\n`;
 }
 
 /** The template preview's entry: the sample deck (`preview-src.md`, the
  * Markdown the app sends) with the template's headmatter, written the way
  * an export's is. */
-export function previewEntryContent(template = null, renderInline = escapeHtml) {
-  return exportEntryContent("./preview-src.md", false, template, renderInline);
+export function previewEntryContent(template = null, renderInline = escapeHtml, vaultId = null) {
+  return exportEntryContent("./preview-src.md", false, template, renderInline, vaultId);
 }
 
 /** The slides `slidev export --format png` wrote to `dir`, as base64 in
@@ -388,14 +405,16 @@ export function ensureLink(link, target) {
   fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
 }
 
-/** `vaults/<id>` → the vault (for `src:`), and `public/files` → its `files/`
- * directory: Slidev serves `public/` at the site root, so a note's
- * root-absolute attachment links (`/files/<name>`) resolve in the deck as
- * they do in the editor. One vault at a time, like the single server. */
+/** `vaults/<id>` → the vault, for `src:` and, through vault-files.js, the
+ * deck's `/files/<name>` links. Each vault has a link of its own, so runs
+ * for different vaults never repoint each other's. A `public/files` link an
+ * older version kept (one for all runs, repointed by each) is removed:
+ * Vite would serve it to every run. */
 export function linkVault(workspace, vaultPath) {
   const id = vaultLinkId(vaultPath);
   ensureLink(path.join(workspace, "vaults", id), vaultPath);
-  ensureLink(path.join(workspace, "public", "files"), path.join(vaultPath, "files"));
+  const legacy = path.join(workspace, "public", "files");
+  if (fs.lstatSync(legacy, { throwIfNoEntry: false })?.isSymbolicLink()) fs.unlinkSync(legacy);
   return id;
 }
 
@@ -572,7 +591,7 @@ export const methods = {
     pruneVaultLinks(WORKSPACE, linkedIds());
     fs.writeFileSync(
       path.join(WORKSPACE, "deck.md"),
-      stubContent(`./vaults/${id}/${relPath}`, template ?? null, template ? await markdownInline() : undefined)
+      stubContent(`./vaults/${id}/${relPath}`, template ?? null, template ? await markdownInline() : undefined, id)
     );
     const port = await ensureServer();
     const fresh = server.cold;
@@ -583,8 +602,9 @@ export const methods = {
   /**
    * Renders a note to a PDF or, with `format: "pptx"`, a PowerPoint file in
    * the OS temp dir with `slidev export`, and returns the file's path. Independent of the Present server: its own
-   * entry (`export.md`, so a concurrent Present rewriting `deck.md` can't
-   * race it), run to completion as a one-shot process. `content`, when
+   * entry (`export-<uuid>.md`, so neither a concurrent Present rewriting
+   * `deck.md` nor another export can race it), run to completion as a
+   * one-shot process. `content`, when
    * given, is rendered instead of the note file (the Export dialog's
    * children/attachment options). `template` is the note's slides
    * template, or null.
@@ -663,14 +683,14 @@ async function withLinkedVault(vaultPath, fn) {
 
 /** `preview`'s work, once its params are checked. */
 function runPreview(vault, markdown, template) {
-  return withLinkedVault(vault, async () => {
+  return withLinkedVault(vault, async (id) => {
     const src = path.join(WORKSPACE, "preview-src.md");
     const entry = path.join(WORKSPACE, "preview.md");
     let output = null;
     try {
       output = fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-preview-"));
       fs.writeFileSync(src, markdown);
-      fs.writeFileSync(entry, previewEntryContent(template, template ? await markdownInline() : undefined));
+      fs.writeFileSync(entry, previewEntryContent(template, template ? await markdownInline() : undefined, id));
       await runSlidevExport(entry, ["--output", output, "--format", "png"], tail());
       return { slides: pngSlides(output).map((png) => ({ png })) };
     } finally {
@@ -732,20 +752,32 @@ export async function runSlidevExport(entry, args, log) {
 
 /** `export`'s work, once its vault is linked and marked in use. */
 async function runExport(id, relPath, orientation, content, template, format, slidevFormat) {
-  let src = `./vaults/${id}/${relPath}`;
-  if (typeof content === "string") {
-    fs.writeFileSync(path.join(WORKSPACE, "export-src.md"), content);
-    src = "./export-src.md";
+  const run = randomUUID();
+  const entry = path.join(WORKSPACE, `export-${run}.md`);
+  const contentSrc = path.join(WORKSPACE, `export-src-${run}.md`);
+  try {
+    let src = `./vaults/${id}/${relPath}`;
+    if (typeof content === "string") {
+      fs.writeFileSync(contentSrc, content);
+      src = `./${path.basename(contentSrc)}`;
+    }
+    fs.writeFileSync(
+      entry,
+      exportEntryContent(src, orientation === "portrait", template ?? null, template ? await markdownInline() : undefined, id)
+    );
+    const output = path.join(os.tmpdir(), `mahfouz-export-${run}.${format}`);
+    await runSlidevExport(entry, ["--output", output, "--format", slidevFormat], tail());
+    if (!fs.existsSync(output)) throw new Error("slidev export exited successfully but produced no file");
+    return output;
+  } finally {
+    for (const file of [entry, contentSrc]) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch (err) {
+        console.error(`removing ${file} failed`, err);
+      }
+    }
   }
-  const entry = path.join(WORKSPACE, "export.md");
-  fs.writeFileSync(
-    entry,
-    exportEntryContent(src, orientation === "portrait", template ?? null, template ? await markdownInline() : undefined)
-  );
-  const output = path.join(os.tmpdir(), `mahfouz-export-${randomUUID()}.${format}`);
-  await runSlidevExport(entry, ["--output", output, "--format", slidevFormat], tail());
-  if (!fs.existsSync(output)) throw new Error("slidev export exited successfully but produced no file");
-  return output;
 }
 
 // ---- JSON-RPC over stdio -----------------------------------------------------

@@ -26,6 +26,7 @@ import {
   vaultLinkId,
 } from "./sidecar.js";
 import * as sidecar from "./sidecar.js";
+import { entryVaultId, VAULT_KEY } from "./vault-files.js";
 
 function tempDir(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `mahfouz-slidev-${name}-`));
@@ -55,19 +56,25 @@ test("the vault link id is stable and filename-safe", () => {
   assert.match(vaultLinkId("/a b/ç"), /^[0-9a-f]{16}$/);
 });
 
-test("vault and files links are created, kept, and repointed", () => {
+test("vault links are created, kept, and repointed; no shared files link", () => {
   const base = tempDir("links");
   const ws = path.join(base, "ws");
   const v1 = path.join(base, "v1");
   const v2 = path.join(base, "v2");
   for (const d of [ws, path.join(v1, "files"), path.join(v2, "files")]) fs.mkdirSync(d, { recursive: true });
 
+  // A shared `public/files` link from an older version is removed: each
+  // run serves its own vault's files (vault-files.js).
+  fs.mkdirSync(path.join(ws, "public"));
+  fs.symlinkSync(path.join(v2, "files"), path.join(ws, "public", "files"), "dir");
   const id = linkVault(ws, v1);
   assert.equal(fs.readlinkSync(path.join(ws, "vaults", id)), v1);
-  assert.equal(fs.readlinkSync(path.join(ws, "public", "files")), path.join(v1, "files"));
+  assert.equal(fs.existsSync(path.join(ws, "public", "files")), false);
   assert.equal(linkVault(ws, v1), id);
-  linkVault(ws, v2);
-  assert.equal(fs.readlinkSync(path.join(ws, "public", "files")), path.join(v2, "files"));
+  const id2 = linkVault(ws, v2);
+  assert.equal(fs.readlinkSync(path.join(ws, "vaults", id)), v1, "linking another vault leaves this one alone");
+  assert.equal(fs.readlinkSync(path.join(ws, "vaults", id2)), v2);
+  assert.equal(fs.existsSync(path.join(ws, "public", "files")), false);
 
   const stale = path.join(ws, "vaults", id);
   fs.unlinkSync(stale);
@@ -234,6 +241,18 @@ test("the mahfouz: line has no character a YAML parser could break a line on", (
   assert.equal(lines.split("\n").filter((l) => l.startsWith("mahfouz: ")).length, 1);
   const stub = stubContent("./a.md", V2);
   assert.equal(stub.split("\n").filter((l) => l === "---").length, 2, "a `---` inside the CSS can't end the headmatter");
+});
+
+test("each entry names the vault its /files/ come from, right after src", () => {
+  const id = "0123456789abcdef";
+  const key = `\n${VAULT_KEY}: "${id}"\n`;
+  assert.equal(stubContent("./vaults/x/a.md", null, undefined, id), `---\nsrc: "./vaults/x/a.md"${key}---\n`);
+  assert.equal(exportEntryContent("./export-src-1.md", true, null, undefined, id), `---\nsrc: "./export-src-1.md"${key}aspectRatio: "3/4"\n---\n`);
+  assert.equal(sidecar.previewEntryContent(null, undefined, id), `---\nsrc: "./preview-src.md"${key}---\n`);
+  for (const entry of [stubContent("./a.md", V2, undefined, id), exportEntryContent("./a.md", false, V2, undefined, id), sidecar.previewEntryContent(V2, undefined, id)]) {
+    assert.equal(entryVaultId(entry), id);
+  }
+  assert.equal(entryVaultId(stubContent(null)), null);
 });
 
 test("Present's stub and the export entry carry the same mahfouz: line", () => {
@@ -456,14 +475,20 @@ test("pngSlides refuses two PNGs for one slide, and an export with no PNGs", () 
 // export` would: writes the PNGs (or, for a PDF, the file) named by
 // `fixture.json` into `--output`. Each run records what it saw (its
 // arguments, cwd, env, the entry and sample deck, the vault links) in
-// `calls.jsonl`; with `block`, a PNG run waits for a `release` file.
+// `calls.jsonl`; with `block`, a PNG run waits for a `release` file, and
+// with `blockExport`, so does a PDF run. Without `export` it stands in for
+// Present's dev server: it answers on `--port` until it's stopped.
 const STAND_IN_CLI = `
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 const ws = process.cwd();
 const cfg = JSON.parse(fs.readFileSync(path.join(ws, "fixture.json"), "utf8"));
 const args = process.argv.slice(2);
 const at = (flag) => args[args.indexOf(flag) + 1];
+if (args[0] !== "export") {
+  http.createServer((_, res) => res.end("<html></html>")).listen(Number(at("--port")), "localhost");
+} else {
 const out = at("--output");
 const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : null);
 const linksDir = path.join(ws, "vaults");
@@ -481,6 +506,7 @@ fs.appendFileSync(
   }) + "\\n"
 );
 if (at("--format") !== "png") {
+  if (cfg.blockExport) while (!fs.existsSync(path.join(ws, "release"))) await new Promise((r) => setTimeout(r, 10));
   fs.writeFileSync(out, "%PDF-");
   process.exit(0);
 }
@@ -493,6 +519,7 @@ for (const [name, spec] of Object.entries(cfg.pngs ?? {})) {
 if (cfg.fail) {
   console.error(cfg.fail);
   process.exit(1);
+}
 }
 `;
 
@@ -561,7 +588,7 @@ test("preview renders the markdown with the template through slidev's PNG export
   assert.equal(run.cwd, ws);
   assert.deepEqual(run.env, { NO_COLOR: "1", CI: "1" });
   // While it ran: the entry, the sample deck, and the vault linked for `/files/` images.
-  assert.equal(run.entry, mod.previewEntryContent(template));
+  assert.equal(run.entry, mod.previewEntryContent(template, undefined, vaultLinkId(vault)));
   assert.equal(run.src, markdown);
   assert.equal(run.links[vaultLinkId(vault)], vault);
 
@@ -576,7 +603,7 @@ test("preview renders a template's header and footer as Markdown, like export", 
   const template = { ...V2, header: "**H** {page}", footer: "*F*" };
   await mod.methods.preview({ vaultPath: vault, markdown: "# a", template });
   const run = calls()[0];
-  assert.equal(run.entry, mod.previewEntryContent(template, inlineRenderer(MarkdownIt)));
+  assert.equal(run.entry, mod.previewEntryContent(template, inlineRenderer(MarkdownIt), vaultLinkId(vault)));
   const data = mahfouzLine(run.entry);
   assert.equal(data.header, "<strong>H</strong> {page}");
   assert.equal(data.footer, "<em>F</em>");
@@ -724,12 +751,65 @@ test("a preview keeps its vault linked through another vault's export, and unlin
   assert.equal(fs.existsSync(link(vault)), false, "unlinked after a failed preview");
 });
 
+// The bug these guard: one `public/files` link, repointed by every run, so
+// Present for one vault and an export or preview for another served each
+// other's /files/. Each run's entry now names its own vault, and the
+// middleware (vault-files.js) serves /files/ from that one.
+test("Present for one vault and a preview for another each name their own vault for /files/", async () => {
+  const { mod, ws, vault, calls, release } = await previewSidecar({ pngs: { "1.png": b64(1) }, block: true });
+  const other = fs.realpathSync(tempDir("present-vault"));
+  fs.writeFileSync(path.join(other, "talk.md"), "# talk\n");
+  try {
+    await mod.methods.start({ vaultPath: other, relPath: "talk.md", template: null });
+    const deck = () => fs.readFileSync(path.join(ws, "deck.md"), "utf8");
+    assert.equal(entryVaultId(deck()), vaultLinkId(other));
+
+    const preview = mod.methods.preview({ vaultPath: vault, markdown: "# a", template: null });
+    await until(() => calls().length === 1, "the preview started");
+    assert.equal(entryVaultId(calls()[0].entry), vaultLinkId(vault), "the preview's run serves the preview's vault");
+    assert.equal(entryVaultId(deck()), vaultLinkId(other), "Present still serves its own vault");
+    assert.deepEqual(calls()[0].links, { [vaultLinkId(other)]: other, [vaultLinkId(vault)]: vault });
+    assert.equal(fs.existsSync(path.join(ws, "public", "files")), false, "no shared files link");
+    release();
+    await preview;
+    assert.equal(entryVaultId(deck()), vaultLinkId(other));
+  } finally {
+    mod.methods.stop();
+  }
+});
+
+test("two exports of different vaults run at once from entries of their own, removed afterwards", async () => {
+  const { mod, ws, vault, calls, release } = await previewSidecar({ blockExport: true });
+  const other = fs.realpathSync(tempDir("export-other"));
+  fs.writeFileSync(path.join(other, "b.md"), "# b\n");
+  fs.writeFileSync(path.join(vault, "a.md"), "# a\n");
+  const a = mod.methods.export({ vaultPath: vault, relPath: "a.md", orientation: "landscape", template: null, format: "pdf" });
+  const b = mod.methods.export({ vaultPath: other, relPath: "b.md", orientation: "landscape", template: null, format: "pdf", content: "# b, with children\n" });
+  await until(() => calls().length === 2, "both exports started");
+  const [runA, runB] = [...calls()].sort((x, y) => (x.entry.includes(vaultLinkId(vault)) ? -1 : 1));
+  assert.notEqual(runA.args[1], runB.args[1], "each export has its own entry");
+  assert.equal(entryVaultId(runA.entry), vaultLinkId(vault));
+  assert.equal(entryVaultId(runB.entry), vaultLinkId(other));
+  assert.match(runA.entry, new RegExp(`src: "./vaults/${vaultLinkId(vault)}/a.md"`));
+  // The content export reads its own source file, not a shared one.
+  const srcB = /src: "\.\/([^"]+)"/.exec(runB.entry)[1];
+  assert.match(srcB, /^export-src-[0-9a-f-]+\.md$/);
+  assert.equal(fs.readFileSync(path.join(ws, srcB), "utf8"), "# b, with children\n");
+  release();
+  for (const pdf of await Promise.all([a, b])) fs.rmSync(pdf, { force: true });
+  assert.deepEqual(
+    fs.readdirSync(ws).filter((n) => n.startsWith("export")),
+    [],
+    "the export entries and sources are removed"
+  );
+});
+
 test("null template fields are taken as absent", async () => {
   const { mod, vault, calls } = await previewSidecar();
   const template = { name: "T", logoPosition: "top-right", cover: {}, css: "", stylesheet: null, header: null, footer: null };
   const { slides } = await mod.methods.preview({ vaultPath: vault, markdown: "# a", template });
   assert.equal(slides.length, 1);
-  assert.equal(calls()[0].entry, mod.previewEntryContent(template));
+  assert.equal(calls()[0].entry, mod.previewEntryContent(template, undefined, vaultLinkId(vault)));
 });
 
 test("a preview whose temp dir can't be made leaves no vault linked and no entries behind", async () => {
