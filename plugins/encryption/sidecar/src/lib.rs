@@ -18,11 +18,19 @@
 //!
 //! How the two meet is described on [`ops::Engine::encrypt`] and
 //! [`ops::Engine::decrypt`].
+//!
+//! The same binary encrypts whole vaults the way git-crypt does, byte for
+//! byte ([`gitcrypt`]): run as `git-crypt clean|smudge|diff`, it is git's
+//! filter ([`filter`]), and the `*Vault*` methods set a vault up, unlock and
+//! lock it, and manage who can unlock it ([`vault`]).
 
 pub mod error;
+pub mod filter;
 pub mod fpr;
+pub mod gitcrypt;
 pub mod gpg;
 pub mod keys;
 pub mod ops;
 pub mod rpc;
 pub mod status;
+pub mod vault;

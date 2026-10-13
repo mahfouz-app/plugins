@@ -176,7 +176,7 @@ impl Engine {
 
     /// One public key from `home` (`None`: the user's keyring), if it's
     /// there under that primary fingerprint.
-    fn public_key(&self, home: Option<&Path>, fpr: &Fpr) -> Result<Option<KeyInfo>> {
+    pub(crate) fn public_key(&self, home: Option<&Path>, fpr: &Fpr) -> Result<Option<KeyInfo>> {
         let mut a = args(&["--with-colons", "--fixed-list-mode", "--list-keys", "--"]);
         a.push(fpr.arg().into());
         let out = self.gpg.run(home, &a, b"", quick(MAX_LISTING))?;
@@ -189,7 +189,7 @@ impl Engine {
     }
 
     /// `fpr`'s public key, minimal, from `home`. Empty when it isn't there.
-    fn export(&self, home: Option<&Path>, fpr: &Fpr) -> Result<Vec<u8>> {
+    pub(crate) fn export(&self, home: Option<&Path>, fpr: &Fpr) -> Result<Vec<u8>> {
         let mut a = args(&["--export-options", "export-minimal", "--export", "--"]);
         a.push(fpr.arg().into());
         Ok(self.gpg.run(home, &a, b"", quick(MAX_LISTING))?.stdout)

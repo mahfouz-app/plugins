@@ -406,10 +406,12 @@ fn the_binary_speaks_json_rpc() {
     );
 }
 
+/// Only git's filter commands are this binary's; git-crypt's others
+/// (`unlock`, `lock`, …) are refused rather than half-done.
 #[test]
-fn filter_modes_are_refused_until_they_exist() {
+fn other_git_crypt_commands_are_refused() {
     let out = Command::new(env!("CARGO_BIN_EXE_git-crypt"))
-        .arg("smudge")
+        .arg("unlock")
         .stdin(Stdio::null())
         .output()
         .unwrap();

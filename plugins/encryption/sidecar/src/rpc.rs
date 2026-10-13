@@ -19,17 +19,29 @@
 //!   signed (a signature made after the expiry, or by a revoked key, is
 //!   refused)
 //!
+//! Whole-vault encryption (git-crypt's scheme, see [`crate::vault`]); `vault`
+//! is the vault's absolute path, a directory with a `.git`:
+//!
+//! - `vaultStatus` `{vault}` → `{encrypted, unlocked, keyNames, members: [fpr]}`
+//! - `unlockVault` `{vault}` → `{member, alreadyUnlocked}`
+//! - `lockVault` `{vault}` → `{wasUnlocked}`
+//! - `initVault` `{vault, members: [fpr]}` → `{paths, gitattributes}`
+//! - `addVaultMember` `{vault, fpr}` → `{paths}`
+//! - `removeVaultMember` `{vault, fpr}` → `{paths}`
+//!
 //! An error's message starts with a stable code: `gpgNotFound`,
 //! `invalidParams`, `tooLarge`, `timeout`, `cancelled`, `noSecretKey`,
 //! `decryptionFailed`, `notEncrypted`, `noIntegrity`, `notSigned`,
 //! `badSignature`, `signerNotAllowed`, `signerExpired`, `signerRevoked`,
 //! `signatureExpired`, `unknownSigner`, `unknownRecipient`,
 //! `recipientUnusable`, `signerUnusable`, `noKeys`, `notText`, `malformed`,
-//! `gpgFailed`, `io`.
+//! `gpgFailed`, `io`, and for the vault methods `notAVault`, `unsupported`,
+//! `gitFailed`, `notInitialised`, `alreadyInitialised`, `locked`,
+//! `noMemberKey`, `notAMember`, `lastMember`, `malformedKey`.
 
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::de::DeserializeOwned;
@@ -39,6 +51,7 @@ use serde_json::{json, Value};
 use crate::error::{Error, Result};
 use crate::gpg::{self, Gpg};
 use crate::ops::{self, Engine};
+use crate::vault::{self, Vault};
 
 /// A request line: an 8 MiB note can grow up to six times as JSON.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -48,6 +61,8 @@ pub struct Context {
     pub gpg: Option<PathBuf>,
     pub searched: Vec<PathBuf>,
     pub data_dir: Option<PathBuf>,
+    /// This binary, which the vault's git filters are configured to run.
+    pub exe: Option<PathBuf>,
 }
 
 impl Context {
@@ -57,7 +72,14 @@ impl Context {
             gpg: gpg::resolve(path.as_deref()),
             searched: gpg::search_dirs(path.as_deref()),
             data_dir: std::env::var_os("MAHFOUZ_PLUGIN_DATA_DIR").map(PathBuf::from),
+            exe: std::env::current_exe().ok(),
         }
+    }
+
+    fn exe(&self) -> Result<&Path> {
+        self.exe
+            .as_deref()
+            .ok_or_else(|| Error::new("io", "couldn't find this binary's own path"))
     }
 
     fn engine(&self) -> Result<Engine> {
@@ -106,6 +128,26 @@ struct DecryptParams {
     allowed_signers: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VaultParams {
+    vault: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitVaultParams {
+    vault: String,
+    members: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemberParams {
+    vault: String,
+    fpr: String,
+}
+
 fn params<T: DeserializeOwned>(v: Value) -> Result<T> {
     let v = if v.is_null() { json!({}) } else { v };
     serde_json::from_value(v).map_err(|e| Error::invalid(e.to_string()))
@@ -143,6 +185,25 @@ pub fn dispatch(
         }),
         "decrypt" => params::<DecryptParams>(p)
             .and_then(|p| to_value(ctx.engine()?.decrypt(&p.armored, &p.allowed_signers)?)),
+        "vaultStatus" => params::<VaultParams>(p)
+            .and_then(|p| to_value(vault::status(&Vault::open(&p.vault)?)?)),
+        "unlockVault" => params::<VaultParams>(p).and_then(|p| {
+            let v = Vault::open(&p.vault)?;
+            to_value(vault::unlock(&ctx.engine()?, &v, ctx.exe()?)?)
+        }),
+        "lockVault" => {
+            params::<VaultParams>(p).and_then(|p| to_value(vault::lock(&Vault::open(&p.vault)?)?))
+        }
+        "initVault" => params::<InitVaultParams>(p).and_then(|p| {
+            let v = Vault::open(&p.vault)?;
+            to_value(vault::init(&ctx.engine()?, &v, &p.members, ctx.exe()?)?)
+        }),
+        "addVaultMember" => params::<MemberParams>(p).and_then(|p| {
+            let v = Vault::open(&p.vault)?;
+            to_value(vault::add_member(&ctx.engine()?, &v, &p.fpr)?)
+        }),
+        "removeVaultMember" => params::<MemberParams>(p)
+            .and_then(|p| to_value(vault::remove_member(&Vault::open(&p.vault)?, &p.fpr)?)),
         _ => return Err(None),
     };
     result.map_err(Some)
@@ -299,6 +360,7 @@ mod tests {
             gpg: None,
             searched: vec![PathBuf::from("/opt/homebrew/bin")],
             data_dir: None,
+            exe: None,
         }
     }
 
@@ -349,6 +411,29 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("invalidParams"));
+    }
+
+    #[test]
+    fn vault_methods_check_their_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().display().to_string();
+        let r = responses(
+            &[
+                json!({"jsonrpc":"2.0","id":1,"method":"vaultStatus","params":{"vault":"relative"}}),
+                json!({"jsonrpc":"2.0","id":2,"method":"lockVault","params":{"vault": plain}}),
+                json!({"jsonrpc":"2.0","id":3,"method":"removeVaultMember","params":{"vault": plain}}),
+                json!({"jsonrpc":"2.0","id":4,"method":"unlockVault","params":{"vault": plain, "x": 1}}),
+            ]
+            .iter()
+            .map(|v| format!("{v}\n"))
+            .collect::<String>(),
+            no_gpg(),
+        );
+        let code = |i: usize| r[i]["error"]["data"]["code"].as_str().unwrap().to_string();
+        assert_eq!(code(0), "invalidParams");
+        assert_eq!(code(1), "notAVault");
+        assert_eq!(code(2), "invalidParams");
+        assert_eq!(code(3), "invalidParams");
     }
 
     #[test]
