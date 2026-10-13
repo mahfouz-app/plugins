@@ -13,7 +13,11 @@
 // Vendored from mahfouz-app/app src/core/src/plugins/api.ts — keep in sync.
 import type { EmbedContext, EmbedRenderer } from "./embed";
 import type {
+  BodyCodec,
+  BodyCodecContext,
   CommandNote,
+  CreatedRepo,
+  EncryptionSwitch,
   ExportFormat,
   ExportRequest,
   ExportResult,
@@ -36,6 +40,7 @@ import type {
   ResolvedSlidesTemplate,
   SlidesPreviewRequest,
   SlidesPreviewResult,
+  VaultInfo,
 } from "./host";
 import type { NoteRef, PluginTabContext, PluginTabType, ToolbarButton } from "./tabs";
 import type { ToolbarItem } from "./toolbar";
@@ -47,7 +52,11 @@ type PluginId = `${string}/${string}`;
 type PublishRenderer = (lang: string, source: string) => Promise<string | null>;
 
 export type {
+  BodyCodec,
+  BodyCodecContext,
   CommandNote,
+  CreatedRepo,
+  EncryptionSwitch,
   EmbedContext,
   EmbedRenderer,
   ExportFormat,
@@ -76,6 +85,7 @@ export type {
   PublishRenderer,
   ResolvedSlidesTemplate,
   ToolbarButton,
+  VaultInfo,
 };
 export type { ToolbarItem, ToolbarDropdownOption } from "./toolbar";
 
@@ -208,18 +218,41 @@ export interface MahfouzPluginHost {
    * sanitizes it with an allowlist and drops one that breaks a rule. Absent
    * in apps older than published diagrams. */
   registerPublishRenderer?(languages: string[], publishRender: PublishRenderer): Disposable;
+  /** Turns an encrypted note's body (a note whose frontmatter says
+   * `encrypted: <group>` and whose body is one ASCII-armored OpenPGP
+   * message) into plaintext for the main editor, and back. `matches` picks
+   * the notes this codec handles by their frontmatter. The app calls
+   * `decode` only when the user acts on that note (Unlock, a reload after
+   * the file changed, a Sync now merge of a note already unlocked), never at
+   * boot or in the background; it calls `encode` once per save whose text
+   * changed, and the result must be one armored message. The plaintext is
+   * kept in memory only, never written anywhere, and every note this codec
+   * decoded is locked again (its editor closed) when the plugin unloads.
+   * Used only while the vault has this plugin on; the latest registration
+   * that matches wins. Desktop only: absent on the web, which never decrypts,
+   * and in apps older than encrypted notes.
+   *
+   * In `decode`, call `ctx.decryptNote()`: the desktop reads the note's
+   * file itself and has the `mahfouz/encryption` plugin's sidecar decrypt
+   * only its armored body, so no API decrypts ciphertext a caller hands in.
+   * Installed plugins share one JavaScript realm and are one trust domain:
+   * any enabled plugin could ask for a decrypt. The gate is gpg-agent:
+   * configure it to ask for the passphrase or a YubiKey touch on every
+   * decrypt (no cache) if other plugins are installed. */
+  registerBodyCodec?(codec: BodyCodec): Disposable;
   /** A source in the Import dialog. The app owns the dialog, the
    * credential field (the secret goes straight to the app's native side,
    * never to `prepare`), the people mapping, the attachment downloads and
    * every vault write; `prepare` only reads the source and returns an
-   * `ImportPlan`. */
+   * `ImportPlan`. Desktop only: absent where the app can't import (the
+   * web), as it is in apps older than importers. */
   registerImporter?(importer: Importer): Disposable;
   /** HTTP through the app's native side, limited to the hosts this
    * plugin's manifest lists under `network` (https only). `secret` names a
    * session secret (an importer's `credential.secretName`) the app attaches
    * as a bearer token, only to the hosts the manifest lists for it. Every
    * status resolves; the body is parsed when the response is JSON, else
-   * it's text. Desktop only. */
+   * it's text. Desktop only: absent on the web. */
   http?: { request(spec: HttpRequestSpec): Promise<HttpResponse> };
   editor: {
     /** Inserts one of this plugin's registered embeds at the cursor, as
@@ -228,11 +261,134 @@ export interface MahfouzPluginHost {
   };
   notes: {
     get(note: NoteRef): Promise<NoteInfo>;
-    /** Rewrites the note's attributes (frontmatter) and saves it. */
+    /**
+     * Rewrites the note's attributes (frontmatter) and saves it. A list
+     * attribute (one the note already holds as a list, such as a dash list
+     * `tags:`) is a compact flow list, `["a", "b"]`: JSON strings separated
+     * by a comma and one space. Return it in exactly that form to keep it a
+     * list (an untouched one keeps its lines as written); any other value,
+     * list-shaped text on a key that isn't a list included, is written as a
+     * string.
+     *
+     * A relation key of a database row (a column linking rows of another
+     * database, `authors!` with a visibility marker included) is set as the
+     * exact list of linked rows: a flow list of note ids or link text
+     * (`[[authors/herbert|Frank Herbert]]`), every added item a row of the
+     * related database; an item already there and returned as written is
+     * kept; a removed key removes every link. The other side follows: each
+     * row added or removed gets or loses its link back to this note, in one
+     * commit per relation key. Relation keys are written first and every
+     * other key after them, so a refused relation value (an item that isn't
+     * a row, a note that isn't a database row, a row whose value can't take
+     * the link back) rejects with nothing written.
+     */
     updateAttributes(
       note: NoteRef,
       update: (attributes: Record<string, string>) => Record<string, string>
     ): Promise<void>;
+    /**
+     * Writes `body` as the note's body, and saves it like an edit (the
+     * auto-commit commits it). A note of the open vault only, and never in
+     * a vault git-crypt has locked.
+     *
+     * An encrypted note (`encrypted: <group>` in its frontmatter) takes only
+     * one ASCII-armored OpenPGP message, and `expected` must be the armored
+     * body it was made from (`get(note).body`): a re-encryption, refused
+     * when the file holds anything else by then. The note is locked again
+     * (its editor closes): its unlocked plaintext came from the body this
+     * replaces. Any other note is changed in its editor when it's open;
+     * with `expected`, only while its body is still that.
+     *
+     * Desktop only, and only while the vault has this plugin on: absent on
+     * the web and in apps older than encrypted notes.
+     */
+    writeBody?(note: NoteRef, body: string, expected?: string): Promise<void>;
+    /**
+     * Encrypts or decrypts the note in one write of its file, saved like an
+     * edit (the auto-commit commits it):
+     *
+     * - `{group, armored, expected}`: a plaintext note becomes encrypted for
+     *   `group` (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`): `encrypted: <group>`
+     *   and `armored` (one armored message) are written together. Its file
+     *   keeps its path (its name stays visible) and its other attributes
+     *   (strip them with `updateAttributes` if they mustn't be readable).
+     * - `{plaintext, expected}`: an encrypted note becomes a plain one with
+     *   `plaintext` as its body. Ask the user before you do this.
+     *
+     * `expected` is the body the change was made from (`get(note).body`):
+     * refused, with nothing written, when the file holds anything else, or
+     * the note's editor has edits not saved yet. Also refused for a note of
+     * another vault, a note already in the asked state, and in a vault
+     * git-crypt has locked. The note's editor closes either way.
+     *
+     * Desktop only, and only while the vault has this plugin on.
+     */
+    setEncryption?(note: NoteRef, change: EncryptionSwitch): Promise<void>;
+  };
+  /**
+   * The open vault. Desktop only: absent on the web and in older apps.
+   * `commitFiles` only while the vault has this plugin on.
+   */
+  vault?: {
+    /** The open vault's id and absolute path, or null when none is open. */
+    current(): VaultInfo | null;
+    /** Called with each vault that becomes the open one; not for the one open now (read `current`). */
+    onOpen(fn: (vault: VaultInfo) => void): Disposable;
+    /** Called with each vault that stops being the open one. */
+    onClose(fn: (vault: VaultInfo) => void): Disposable;
+    /**
+     * Commits exactly `paths` (relative to the vault, `/`-separated) with
+     * `message`, and nothing else that's uncommitted; a note's rename
+     * origin goes with it. Only `.gitattributes`, files under `.git-crypt/`,
+     * this plugin's own `.config/<configFile>` and note files: anything
+     * else, an absolute path or a `..` refuses the whole call with nothing
+     * committed, as does a vault git-crypt has locked. Resolves whether
+     * anything was committed.
+     */
+    commitFiles(paths: string[], message: string): Promise<boolean>;
+  };
+  /**
+   * This plugin's own config file in the open vault: `.config/<configFile>`,
+   * where `configFile` is its manifest's (`^[a-z0-9-]+\.md$`, never one of
+   * the app's own: settings, bookmarks, fields, attributes, slides). Every
+   * collaborator reads it; keep it readable Markdown. Refused for a plugin
+   * that declares none, or when another installed plugin declares the
+   * same file. Desktop only, and only while the vault has this plugin on.
+   */
+  config?: {
+    /** The file's text, or null when it doesn't exist (or the vault is locked). */
+    read(): Promise<string | null>;
+    /** Replaces the file's text (at most 1 MB), committed by the auto-commit; refused while the vault is git-crypt locked. */
+    write(text: string): Promise<void>;
+  };
+  /**
+   * git-crypt for the open vault. Desktop only, and only while the vault
+   * has this plugin on.
+   */
+  git?: {
+    /**
+     * Stages `.gitattributes`, `.git-crypt/` and every tracked file cleaned
+     * afresh (`git add --renormalize .`), then commits them with `message`
+     * (the vault's own pending edits are committed first, apart). Refused
+     * while the vault is locked or a git operation is stopped, and when a
+     * file git-crypt should encrypt would be committed in plaintext.
+     * Resolves whether it committed.
+     */
+    renormalize(message: string): Promise<boolean>;
+    /**
+     * Checks out again every file a git-crypt filter covers, so git-crypt's
+     * smudge runs (after an unlock: plaintext) or doesn't (with its config
+     * removed, a lock: ciphertext), then rebuilds the vault's index. Runs
+     * with the vault's auto-commit paused and file watching off. Refused
+     * while anything in the vault is uncommitted. Resolves with the paths
+     * written.
+     */
+    forceCheckout(): Promise<string[]>;
+  };
+  /** GitHub. Desktop only, and only while the vault has this plugin on. */
+  repo?: {
+    /** Creates a private repository named `name` for the signed-in user; resolves with its clone (SSH) URL. */
+    createPrivate(name: string): Promise<CreatedRepo>;
   };
   /** Fenced code blocks in a note body, found as the editor finds them. */
   markdown?: {
@@ -262,13 +418,25 @@ export interface MahfouzPluginHost {
      * slide 1. Null when there's no template and the note sets no header or
      * footer of its own; with no template but its own header/footer, a bare
      * template (name "") carrying just those. Image paths are root-absolute
-     * `/files/<name>`. */
+     * `/files/<name>`. `stylesheet` is the whole look as one CSS string (the
+     * fields, the `###` layout and slide-1 sections, the raw css, and the
+     * fonts as `@import` / `@font-face`); `colorSchema` is Slidev's, from the
+     * background; `fontFamilies` are the families it loads, to wait for
+     * before export. `css` is the raw template css, already inside
+     * `stylesheet`; the older keys (`background` … `cover`) stay filled for
+     * a plugin that predates `stylesheet` (empty `stylesheet` on a bare
+     * template). */
     resolveTemplate(note: NoteRef): Promise<ResolvedSlidesTemplate | null>;
-    /** Renders Settings → Slides' sample deck exactly, for "Render with
-     * Slidev": `render` gets the sample Markdown and a resolved template and
-     * returns the slides as PNG data URLs (at most 30, each at most 4 MB,
-     * within 200 seconds; the app refuses anything else). The app keeps the latest renderer an enabled
-     * plugin registered, for the active vault only. Desktop only.
+    /** Draws Settings → Slides' sample deck with Slidev, for its "Render
+     * with Slidev" button (desktop only). `req.markdown` is the sample deck
+     * as Slidev Markdown (headmatter for slide 1, then `---` blocks with
+     * `layout:` and `class:`); `req.template` is the template being edited,
+     * resolved as `resolveTemplate` resolves one, with the sample deck's
+     * header and footer applied; `req.vaultPath` is the vault's absolute
+     * path, for its `/files/`. Resolve with one PNG per slide, in order, as
+     * `data:image/png;base64,…` data URLs: at most 30 slides of at most
+     * 4 MB each, within 200 seconds; anything else is refused. Used only
+     * while the vault has this plugin on; the latest registration wins.
      * Optional: absent in apps older than Render with Slidev. */
     registerPreviewRenderer?(render: (req: SlidesPreviewRequest) => Promise<SlidesPreviewResult>): Disposable;
   };

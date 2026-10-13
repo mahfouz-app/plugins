@@ -1,4 +1,4 @@
-// Vendored from mahfouz-app/app src/core/src/plugins/{commands,exportFormats,fencedBlocks,notes,overlay}.ts,
+// Vendored from mahfouz-app/app src/core/src/plugins/{bodyCodec,commands,exportFormats,fencedBlocks,hostVault,notes,overlay}.ts,
 // src/core/src/db/slidesTemplates.ts, src/core/src/plugins/slidesPreview.ts and src/core/src/import/types.ts — keep in sync.
 import type { NoteRef } from "./tabs";
 
@@ -332,4 +332,57 @@ export interface ImportResult {
   files: string[];
   /** The plan's warnings followed by the writer's own. */
   warnings: string[];
+}
+
+/** What a body codec is told about the note it decodes or encodes (the app's `src/core/src/plugins/bodyCodec.ts`). */
+export interface BodyCodecContext {
+  vaultId: string;
+  noteId: string;
+  /** Vault-relative path of the note's file. */
+  path: string;
+  /** The group the note is encrypted for (its `encrypted:` value). */
+  group: string;
+  /** The armored body: the one to decode, or (encode) the one being replaced, "" for a new note. */
+  armored: string;
+  /**
+   * In `decode` for a user's Unlock (or the changed-on-disk banner): the
+   * plaintext of this note, which the desktop reads from its file and has
+   * the `mahfouz/encryption` plugin's sidecar decrypt (`decrypt`, given only
+   * the armored body and the fingerprints `.config/encryption.md` lists for
+   * the group, the only signers it accepts). A codec should call it rather than decrypt
+   * `armored` itself: no API decrypts ciphertext a caller hands in. Rejects
+   * when the file no longer holds `armored`. Absent in a merge's decode (a
+   * base or theirs from history, not the file) and in apps older than it.
+   */
+  decryptNote?(): Promise<string>;
+}
+
+export interface BodyCodec {
+  /** Unique within the plugin. */
+  id: string;
+  /** Whether this codec handles a note with this frontmatter (`encrypted` included). */
+  matches(frontmatter: Readonly<Record<string, string>>): boolean;
+  /** The plaintext of `ctx.armored`. Called only from a user action. */
+  decode(ctx: BodyCodecContext): Promise<string>;
+  /** `plaintext` as one ASCII-armored OpenPGP message for `ctx.group`. */
+  encode(ctx: BodyCodecContext, plaintext: string): Promise<string>;
+}
+
+/** The open vault, as a plugin sees it (the app's `src/core/src/plugins/hostVault.ts`). */
+export interface VaultInfo {
+  vaultId: string;
+  /** Absolute path of the vault's root directory. */
+  path: string;
+}
+
+/** What `host.notes.setEncryption` takes. */
+export type EncryptionSwitch = { group: string; armored: string; expected: string } | { plaintext: string; expected: string };
+
+/** What `host.repo.createPrivate` resolves with. */
+export interface CreatedRepo {
+  /** `owner/name`. */
+  fullName: string;
+  /** The SSH URL to set as the vault's remote. */
+  cloneUrl: string;
+  htmlUrl: string;
 }
