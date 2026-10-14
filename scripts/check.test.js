@@ -394,15 +394,15 @@ test("network and secrets: checked as manifest.rs does, from Mahfouz 0.12.0", ()
   assert.match(old(ok), /"secrets" needs Mahfouz 0\.12\.0/);
 });
 
-test("terms: a .md file inside the plugin, from Mahfouz 0.13.0", () => {
-  const errs = (over, files = { "terms.md": "## Terms\n" }, mahfouz = ">=0.13.0") => validate({ ...minimal("p", { mahfouz }), ...over }, files).join("\n");
+test("terms: a .md file inside the plugin, from Mahfouz 0.12.0", () => {
+  const errs = (over, files = { "terms.md": "## Terms\n" }, mahfouz = ">=0.12.0") => validate({ ...minimal("p", { mahfouz }), ...over }, files).join("\n");
   assert.equal(errs({ terms: "terms.md" }), "");
   assert.match(errs({ terms: "terms.txt" }), /terms must be a \.md file/);
   assert.match(errs({ terms: 3 }), /terms must be a \.md file/);
   assert.match(errs({ terms: "missing.md" }), /terms missing\.md doesn't exist/);
   assert.match(errs({ terms: "../terms.md" }), /must be relative and stay inside the plugin/);
-  // Older apps reject the unknown field: the range must start at 0.13.0.
-  assert.match(errs({ terms: "terms.md" }, undefined, ">=0.12.1"), /"terms" needs Mahfouz 0\.13\.0/);
+  // Older apps reject the unknown field: the range must start at 0.12.0.
+  assert.match(errs({ terms: "terms.md" }, undefined, ">=0.11.0"), /"terms" needs Mahfouz 0\.12\.0/);
 });
 
 test("configFile: a .md file name under the vault's .config/, from Mahfouz 0.12.0", () => {

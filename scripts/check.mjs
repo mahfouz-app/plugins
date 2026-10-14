@@ -58,7 +58,7 @@ export const FIELD_SINCE = {
   configFile: "0.12.0",
   // A Markdown file in the plugin the user accepts before installing or
   // enabling it (the app's install and enable dialogs show it).
-  terms: "0.13.0",
+  terms: "0.12.0",
 };
 // A file directly under the vault's `.config/`: a lowercase name ending in
 // `.md`, no directory part, so a plugin can only name its own file there.

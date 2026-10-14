@@ -620,7 +620,8 @@ export function createController(host, storage) {
    * changes; the sidecar writes the key, `.git-crypt/` and the root
    * `.gitattributes` block; a renormalize commits them with every file
    * encrypted; then the naming settings and the history option, whose
-   * confirm and push are the app's.
+   * confirm and push are the app's (Cancel there leaves the vault encrypted
+   * from now on).
    */
   async function encryptVault({ history = "now", renameExisting = false } = {}) {
     const keys = loadKeys(storage);
@@ -642,8 +643,13 @@ export function createController(host, storage) {
       await host.settings.setCommitMessageNaming("none");
     }
     if (renameExisting) await host.notes.renameAllById();
-    if (history === "move") await host.repo.moveToNewPrivate(`${vaultName(vault)}-encrypted`);
-    else if (history === "rewrite") await host.git.rewriteHistory(VAULT_MESSAGE);
+    try {
+      if (history === "move") await host.repo.moveToNewPrivate(`${vaultName(vault)}-encrypted`);
+      else if (history === "rewrite") await host.git.rewriteHistory(VAULT_MESSAGE);
+    } catch (err) {
+      // Cancel in the app's own question changes nothing there: the vault stays encrypted from now on.
+      if (err?.code !== "cancelled") throw err;
+    }
     return init;
   }
 
@@ -1430,7 +1436,7 @@ export function activate(host) {
   host.registerBodyCodec(c.codec);
   host.vault?.onClose(() => c.forgetAll());
 
-  // Without the app's dialogs and Settings tabs (an app older than 0.12.1), the codec alone: encrypted notes still unlock and save.
+  // Without the app's dialogs and Settings tabs (an app older than 0.12.0), the codec alone: encrypted notes still unlock and save.
   if (typeof host.ui.openDialog !== "function" || typeof host.ui.confirm !== "function" || typeof host.registerSettingsTab !== "function") return;
 
   const fail = (err) => host.toast(messageOf(err), "error");
