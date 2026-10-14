@@ -18,7 +18,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 | `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.12.0 |
-| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.12.0 |
+| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.12.1 (the first release with the host APIs it uses) |
 
 `npm test` runs the plugins' tests and the registry checker's with `node --test` (no
 dependencies).
@@ -62,14 +62,17 @@ a repository `git-crypt` encrypted. CI checks both directions against the real C
 - **Enable** (`initVault`): generates the vault key, stores it in `.git/git-crypt/keys/default`
   (this clone only, 0600), encrypts it to each member's GPG key as
   `.git-crypt/keys/default/0/<fingerprint>.gpg` (committed), and points git's
-  `filter.git-crypt` and `diff.git-crypt` at the plugin's binary. Mahfouz then adds
+  `filter.git-crypt` and `diff.git-crypt` at the plugin's binary. It also appends
   `* filter=git-crypt diff=git-crypt` (with `.gitattributes` and `.git-crypt/**` left out) to
-  the root `.gitattributes`, renormalizes and commits. One of the members must be one of your
-  own keys; add a second one (a backup key) so a lost key doesn't lose the vault.
+  the root `.gitattributes`, since the app has no plugin API that writes that file; Mahfouz then
+  renormalizes and commits. One of the members must be one of your own keys; add a second one
+  (a backup key) so a lost key doesn't lose the vault. A vault that stores files with Git LFS is
+  refused: git-crypt would encrypt the LFS pointer files.
 - **Unlock** (`unlockVault`), on another Mac or a fresh clone: decrypts your member file with
   your gpg (pinentry asks), installs the key and the filter, and Mahfouz checks the files out
-  again as plaintext. **Lock** (`lockVault`) removes both; the files are checked out again as
-  ciphertext.
+  again as plaintext. **Lock** (`lockVault`) removes both, and is refused while anything is
+  uncommitted (once the key is gone nothing can be encrypted); the files are checked out again
+  as ciphertext.
 - **Members** (`addVaultMember`, `removeVaultMember`): adding one encrypts the vault key to
   their public key (imported from `https://github.com/<login>.gpg`). **Removing a member doesn't
   rotate the key**: whoever had it can still decrypt everything committed with it, past and

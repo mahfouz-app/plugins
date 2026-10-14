@@ -302,6 +302,8 @@ fn init_commit_clone_unlock_lock() {
     let va = vault(&a);
     let st = vault::status(&va).unwrap();
     assert!(!st.encrypted && !st.unlocked && st.members.is_empty() && st.key_names.is_empty());
+    assert!(!st.uses_lfs && !st.has_remote);
+    std::fs::write(a.join(".gitattributes"), "*.md text eol=lf\n").unwrap();
 
     let init = vault::init(
         &alice.engine(),
@@ -313,9 +315,19 @@ fn init_commit_clone_unlock_lock() {
     let member_rel = format!(".git-crypt/keys/default/0/{}.gpg", alice.fpr);
     assert_eq!(
         init.paths,
-        vec![".git-crypt/.gitattributes".to_string(), member_rel.clone()]
+        vec![
+            ".git-crypt/.gitattributes".to_string(),
+            member_rel.clone(),
+            ".gitattributes".to_string()
+        ]
     );
     assert_eq!(init.gitattributes, ROOT_GITATTRIBUTES);
+    // The block goes after what the root attributes already held.
+    let root_attrs = format!("*.md text eol=lf\n{ROOT_GITATTRIBUTES}");
+    assert_eq!(
+        std::fs::read_to_string(a.join(".gitattributes")).unwrap(),
+        root_attrs
+    );
     assert_eq!(
         std::fs::read_to_string(a.join(".git-crypt/.gitattributes")).unwrap(),
         STATE_GITATTRIBUTES
@@ -352,14 +364,13 @@ fn init_commit_clone_unlock_lock() {
         "alreadyInitialised"
     );
 
-    std::fs::write(a.join(".gitattributes"), &init.gitattributes).unwrap();
     std::fs::write(a.join("note.md"), NOTE).unwrap();
     commit_all(&a, "encrypted");
 
     let stored = blob(&a, "note.md");
     assert!(stored.starts_with(FILE_HEADER), "the blob is ciphertext");
     assert_eq!(gitcrypt::decrypt_bytes(&key, &stored).unwrap(), NOTE);
-    assert_eq!(blob(&a, ".gitattributes"), ROOT_GITATTRIBUTES.as_bytes());
+    assert_eq!(blob(&a, ".gitattributes"), root_attrs.as_bytes());
     let member = blob(&a, &member_rel);
     assert!(
         !member.starts_with(FILE_HEADER),
@@ -380,7 +391,7 @@ fn init_commit_clone_unlock_lock() {
     assert_eq!(std::fs::read(b.join("note.md")).unwrap(), stored);
     let vb = vault(&b);
     let st = vault::status(&vb).unwrap();
-    assert!(st.encrypted && !st.unlocked);
+    assert!(st.encrypted && !st.unlocked && st.has_remote && !st.uses_lfs);
     assert_eq!(st.key_names, vec!["default"]);
     assert_eq!(st.members, vec![alice.fpr.clone()]);
 
@@ -400,6 +411,12 @@ fn init_commit_clone_unlock_lock() {
             .unwrap()
             .already_unlocked
     );
+
+    // Locking waits for everything to be committed, untracked files too.
+    std::fs::write(b.join("draft.md"), b"draft\n").unwrap();
+    assert_eq!(vault::lock(&vb).unwrap_err().code, "uncommitted");
+    assert!(vault::status(&vb).unwrap().unlocked);
+    std::fs::remove_file(b.join("draft.md")).unwrap();
 
     let l = vault::lock(&vb).unwrap();
     assert!(l.was_unlocked);
@@ -447,6 +464,7 @@ fn members_are_added_and_removed() {
     .unwrap_err();
     assert_eq!(stranger.code, "unknownRecipient");
     assert!(!a.join(".git-crypt").exists());
+    assert!(!a.join(".gitattributes").exists());
     assert!(!a.join(".git/git-crypt").exists());
     assert_eq!(
         git_raw(&a, &["config", "--get", "filter.git-crypt.clean"])
@@ -516,6 +534,8 @@ fn members_are_added_and_removed() {
         "lastMember"
     );
 
+    assert_eq!(vault::lock(&va).unwrap_err().code, "uncommitted");
+    commit_all(&a, "remove bob");
     vault::lock(&va).unwrap();
     assert_eq!(
         vault::add_member(&alice.engine(), &va, &bob.fpr)
@@ -818,4 +838,31 @@ fn we_unlock_a_vault_git_crypt_made() {
     assert!(!c.join(".git/git-crypt/keys/default").exists());
     assert_eq!(std::fs::read(c.join("note.md")).unwrap(), stored);
     assert!(!vault::status(&vc).unwrap().unlocked);
+}
+
+#[test]
+fn a_vault_using_git_lfs_is_refused() {
+    let Some(g) = gpg_path() else { return };
+    let alice = person(&g, "Alice");
+    let root = tempfile::tempdir().unwrap();
+    let a = root.path().join("a");
+    new_repo(&a);
+    let attrs = "*.png filter=lfs diff=lfs merge=lfs -text\n";
+    std::fs::write(a.join(".gitattributes"), attrs).unwrap();
+    let va = vault(&a);
+    assert!(vault::status(&va).unwrap().uses_lfs);
+    let err = vault::init(
+        &alice.engine(),
+        &va,
+        std::slice::from_ref(&alice.fpr),
+        exe(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "usesLfs");
+    assert!(!a.join(".git-crypt").exists());
+    assert!(!a.join(".git/git-crypt").exists());
+    assert_eq!(
+        std::fs::read_to_string(a.join(".gitattributes")).unwrap(),
+        attrs
+    );
 }

@@ -19,10 +19,12 @@
 //!   `escape_shell_arg` (`configure_git_filters`, lines 156-175), present
 //!   only while the clone is unlocked.
 //!
-//! What this module doesn't do, by design: commit, check files out, or edit
-//! the root `.gitattributes`. The app does those (`vault.commitFiles`,
-//! `git.forceCheckout`), under its own locks, from the paths and the
-//! attributes block each method returns. git-crypt's `unlock` and `lock`
+//! What this module doesn't do, by design: commit or check files out. The
+//! app does those (`vault.commitFiles`, `git.renormalize`,
+//! `git.forceCheckout`), under its own locks, from the paths each method
+//! returns. `initVault` appends [`ROOT_GITATTRIBUTES`] to the root
+//! `.gitattributes` itself, since the app has no plugin API that writes it;
+//! the app's renormalize stages and commits it. git-crypt's `unlock` and `lock`
 //! check the encrypted files out themselves (lines 1094-1103, 1189-1198),
 //! touching them first so git rewrites them; the app's forced checkout must
 //! do the same.
@@ -272,26 +274,68 @@ impl Vault {
                 .is_some_and(|v| !v.trim().is_empty()))
     }
 
-    /// Whether the root `.gitattributes` or `info/attributes` routes paths
-    /// through a git-crypt filter (nested attributes files aren't read).
-    fn attributes_route(&self) -> bool {
+    /// Whether the root `.gitattributes` or `info/attributes` sets a filter
+    /// `is` accepts on some pattern (nested attributes files aren't read).
+    fn attributes_filter(&self, is: impl Fn(&str) -> bool) -> bool {
         [
             self.root.join(".gitattributes"),
             self.git_dir.join("info").join("attributes"),
         ]
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
-        .any(|text| {
-            text.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .any(|l| {
-                    l.split([' ', '\t']).skip(1).any(|t| {
-                        t.strip_prefix("filter=")
-                            .is_some_and(|n| n == "git-crypt" || n.starts_with("git-crypt-"))
-                    })
-                })
-        })
+        .any(|text| sets_filter(&text, &is))
+    }
+
+    /// Whether the attributes route paths through a git-crypt filter.
+    fn attributes_route(&self) -> bool {
+        self.attributes_filter(|n| n == "git-crypt" || n.starts_with("git-crypt-"))
+    }
+
+    /// Whether the attributes route paths through Git LFS, whose pointer
+    /// files git-crypt's filter would encrypt (and so break).
+    fn uses_lfs(&self) -> bool {
+        self.attributes_filter(|n| n == "lfs")
+    }
+
+    /// Whether the repository has a remote.
+    fn has_remote(&self) -> Result<bool> {
+        let out = git(&self.root, &["remote"])?;
+        if !out.status.success() {
+            return Err(git_failure("remote", &out));
+        }
+        Ok(!out.stdout.iter().all(u8::is_ascii_whitespace))
+    }
+
+    /// Every path `git status` reports, untracked files included.
+    fn uncommitted(&self) -> Result<Vec<String>> {
+        let out = git(
+            &self.root,
+            &["status", "--porcelain", "-z", "--untracked-files=all"],
+        )?;
+        if !out.status.success() {
+            return Err(git_failure("status", &out));
+        }
+        let mut paths = vec![];
+        let mut entries = out.stdout.split(|b| *b == 0).filter(|e| !e.is_empty());
+        while let Some(e) = entries.next() {
+            if e.len() > 3 {
+                paths.push(String::from_utf8_lossy(&e[3..]).into_owned());
+            }
+            // A rename or copy is followed by its origin.
+            if matches!(e.first(), Some(b'R' | b'C')) {
+                entries.next();
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Writes `data` over `rel` (created when missing), keeping its mode.
+    fn replace_file(&self, rel: &str, data: &[u8]) -> Result<()> {
+        let path = self.root.join(rel);
+        let mode = std::fs::metadata(&path)
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0o644);
+        write_atomic(&path, data, mode)
     }
 
     /// Writes the unlocked key file: 0600, in 0700 directories, replaced
@@ -320,6 +364,34 @@ impl Vault {
         }
         write_atomic(&path, data, 0o644)
     }
+}
+
+/// Whether an attributes file sets a filter `is` accepts on some pattern.
+fn sets_filter(text: &str, is: &impl Fn(&str) -> bool) -> bool {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .any(|l| {
+            l.split([' ', '\t'])
+                .skip(1)
+                .any(|t| t.strip_prefix("filter=").is_some_and(is))
+        })
+}
+
+/// The root `.gitattributes` with [`ROOT_GITATTRIBUTES`] appended, or
+/// `None` when it already ends with that block. Earlier lines stay as they
+/// are; the block comes last so its `* filter=git-crypt` wins.
+pub fn with_root_block(existing: Option<&str>) -> Option<String> {
+    let text = existing.unwrap_or("");
+    if text.ends_with(ROOT_GITATTRIBUTES) {
+        return None;
+    }
+    let mut out = text.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(ROOT_GITATTRIBUTES);
+    Some(out)
 }
 
 /// Writes `data` to a temporary file beside `path`, then renames it over
@@ -374,6 +446,10 @@ pub struct VaultStatus {
     pub key_names: Vec<String>,
     /// The fingerprints that can unlock the default key.
     pub members: Vec<String>,
+    /// The attributes route files through Git LFS: `initVault` refuses.
+    pub uses_lfs: bool,
+    /// The repository has a remote (its history may already be on it).
+    pub has_remote: bool,
 }
 
 /// `vaultStatus`. Needs no gpg.
@@ -386,6 +462,8 @@ pub fn status(v: &Vault) -> Result<VaultStatus> {
         unlocked: key_ok && v.filters_configured()?,
         key_names,
         members,
+        uses_lfs: v.uses_lfs(),
+        has_remote: v.has_remote()?,
     })
 }
 
@@ -506,8 +584,24 @@ pub struct Locked {
 /// `lockVault`: removes the key file and the filter config. Re-checking
 /// out the files (to ciphertext) is the app's job, and it must commit
 /// anything pending first: once the key is gone, nothing can be cleaned.
+/// Refused (`uncommitted`) while the clone has its key and `git status`
+/// shows anything, untracked files included.
 pub fn lock(v: &Vault) -> Result<Locked> {
     let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let pending = if v.key_path().exists() {
+        v.uncommitted()?
+    } else {
+        vec![]
+    };
+    if !pending.is_empty() {
+        return Err(Error::new(
+            "uncommitted",
+            format!(
+                "{} file(s) aren't committed; once the vault is locked they can't be encrypted",
+                pending.len()
+            ),
+        ));
+    }
     let path = v.key_path();
     let was_unlocked = match std::fs::remove_file(&path) {
         Ok(()) => true,
@@ -521,9 +615,11 @@ pub fn lock(v: &Vault) -> Result<Locked> {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Initialised {
-    /// Vault-relative files created, for the app to commit.
+    /// Vault-relative files created or changed (`.gitattributes` among
+    /// them when the block was added), for the app to commit.
     pub paths: Vec<String>,
-    /// The block for the vault's root `.gitattributes` ([`ROOT_GITATTRIBUTES`]).
+    /// The block appended to the vault's root `.gitattributes`
+    /// ([`ROOT_GITATTRIBUTES`]).
     pub gitattributes: String,
 }
 
@@ -621,9 +717,10 @@ fn temp_dir() -> Result<tempfile::TempDir> {
 }
 
 /// `initVault`: a new key for the vault, encrypted to each member. Writes
-/// the key file, the member files and `.git-crypt/.gitattributes`, and
-/// configures the filters; the app writes the root `.gitattributes` block,
-/// renormalizes and commits. Every gpg step runs before anything is
+/// the key file, the member files and `.git-crypt/.gitattributes`, appends
+/// [`ROOT_GITATTRIBUTES`] to the root `.gitattributes`, and configures the
+/// filters; the app renormalizes and commits. Refused (`usesLfs`) for a
+/// vault whose attributes route files through Git LFS. Every gpg step runs before anything is
 /// written, and a failure while writing removes what was written.
 ///
 /// At least one member must be one of the user's own secret keys, so the
@@ -640,6 +737,12 @@ pub fn init(engine: &Engine, v: &Vault, members: &[String], exe: &Path) -> Resul
         return Err(Error::new(
             "alreadyInitialised",
             "this vault already has git-crypt keys (.git-crypt/keys): unlock it instead",
+        ));
+    }
+    if v.uses_lfs() {
+        return Err(Error::new(
+            "usesLfs",
+            "this vault stores files with Git LFS, which git-crypt can't encrypt",
         ));
     }
     let members = Fpr::parse_list(members, "members", MAX_MEMBERS)?;
@@ -669,6 +772,18 @@ pub fn init(engine: &Engine, v: &Vault, members: &[String], exe: &Path) -> Resul
 
     let state_created = !v.root.join(STATE_DIR).exists();
     let attrs_rel = format!("{STATE_DIR}/.gitattributes");
+    let root_attrs = v.root.join(".gitattributes");
+    let root_before = match std::fs::read(&root_attrs) {
+        Ok(b) => Some(String::from_utf8(b).map_err(|_| {
+            Error::new(
+                "io",
+                ".gitattributes isn't UTF-8, so the block can't be added",
+            )
+        })?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io_err(root_attrs.display(), e)),
+    };
+    let root_after = with_root_block(root_before.as_deref());
     let write = || -> Result<Vec<String>> {
         v.write_key(&key)?;
         let mut paths = vec![];
@@ -679,6 +794,10 @@ pub fn init(engine: &Engine, v: &Vault, members: &[String], exe: &Path) -> Resul
         for (rel, bytes) in &files {
             v.create_file(rel, bytes)?;
             paths.push(rel.clone());
+        }
+        if let Some(text) = &root_after {
+            v.replace_file(".gitattributes", text.as_bytes())?;
+            paths.push(".gitattributes".to_string());
         }
         v.configure_filters(exe)?;
         Ok(paths)
@@ -694,6 +813,13 @@ pub fn init(engine: &Engine, v: &Vault, members: &[String], exe: &Path) -> Resul
             let _ = std::fs::remove_dir_all(v.keys_dir());
             if state_created {
                 let _ = std::fs::remove_dir_all(v.root.join(STATE_DIR));
+            }
+            if root_after.is_some() {
+                let _ = match &root_before {
+                    Some(text) => v.replace_file(".gitattributes", text.as_bytes()),
+                    None => std::fs::remove_file(&root_attrs)
+                        .map_err(|e| io_err(root_attrs.display(), e)),
+                };
             }
             Err(e)
         }
@@ -789,6 +915,43 @@ mod tests {
             ]
         );
         assert!(STATE_GITATTRIBUTES.ends_with('\n'));
+    }
+
+    #[test]
+    fn the_root_block_is_appended_once() {
+        assert_eq!(with_root_block(None).as_deref(), Some(ROOT_GITATTRIBUTES));
+        assert_eq!(
+            with_root_block(Some("")).as_deref(),
+            Some(ROOT_GITATTRIBUTES)
+        );
+        assert_eq!(
+            with_root_block(Some("*.md text eol=lf")).unwrap(),
+            format!("*.md text eol=lf\n{ROOT_GITATTRIBUTES}")
+        );
+        assert_eq!(
+            with_root_block(Some("*.md text\n")).unwrap(),
+            format!("*.md text\n{ROOT_GITATTRIBUTES}")
+        );
+        assert_eq!(with_root_block(Some(ROOT_GITATTRIBUTES)), None);
+        let twice = with_root_block(Some("x y\n")).unwrap();
+        assert_eq!(with_root_block(Some(&twice)), None);
+    }
+
+    #[test]
+    fn filters_are_read_from_attribute_lines() {
+        let lfs = |n: &str| n == "lfs";
+        assert!(sets_filter(
+            "*.png filter=lfs diff=lfs merge=lfs -text\n",
+            &lfs
+        ));
+        assert!(sets_filter("files/** \tfilter=lfs\n", &lfs));
+        assert!(!sets_filter("# *.png filter=lfs\n", &lfs));
+        assert!(
+            !sets_filter("filter=lfs\n", &lfs),
+            "a pattern, not an attribute"
+        );
+        assert!(!sets_filter("*.png filter=lfs-other\n", &lfs));
+        assert!(!sets_filter(ROOT_GITATTRIBUTES, &lfs));
     }
 
     #[test]

@@ -22,10 +22,14 @@
 //! Whole-vault encryption (git-crypt's scheme, see [`crate::vault`]); `vault`
 //! is the vault's absolute path, a directory with a `.git`:
 //!
-//! - `vaultStatus` `{vault}` → `{encrypted, unlocked, keyNames, members: [fpr]}`
+//! - `vaultStatus` `{vault}` → `{encrypted, unlocked, keyNames, members: [fpr],
+//!   usesLfs, hasRemote}`
 //! - `unlockVault` `{vault}` → `{member, alreadyUnlocked}`
-//! - `lockVault` `{vault}` → `{wasUnlocked}`
-//! - `initVault` `{vault, members: [fpr]}` → `{paths, gitattributes}`
+//! - `lockVault` `{vault}` → `{wasUnlocked}`; refused while anything is
+//!   uncommitted
+//! - `initVault` `{vault, members: [fpr]}` → `{paths, gitattributes}`; it
+//!   appends `gitattributes` to the root `.gitattributes` itself (listed in
+//!   `paths`), since the app has no plugin API that writes that file
 //! - `addVaultMember` `{vault, fpr}` → `{paths}`
 //! - `removeVaultMember` `{vault, fpr}` → `{paths}`
 //!
@@ -37,7 +41,8 @@
 //! `recipientUnusable`, `signerUnusable`, `noKeys`, `notText`, `malformed`,
 //! `gpgFailed`, `io`, and for the vault methods `notAVault`, `unsupported`,
 //! `gitFailed`, `notInitialised`, `alreadyInitialised`, `locked`,
-//! `noMemberKey`, `notAMember`, `lastMember`, `malformedKey`.
+//! `noMemberKey`, `notAMember`, `lastMember`, `malformedKey`, `usesLfs`,
+//! `uncommitted`.
 
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
