@@ -168,7 +168,17 @@ A plugin can open tabs with `host.registerTabType({ id, icon, render(container, 
 deleted. `render` fills the area below; the function it returns runs when the tab unmounts,
 including on a tab switch, so flush unsaved work there. `ctx` has `note`, your `arg`,
 `readBody()`, `writeBody(body)` (the app's normal save path) and `close()`. `openTab` saves
-the note's pending edits first, so `readBody()` sees them. `ctx.theme` is the app's current
+the note's pending edits first, so `readBody()` sees them.
+
+`writeBody` merges with changes made to the note outside the tab since the tab's base (its last
+`readBody` or its last write, whichever came later), and resolves with the body actually
+written, which holds those outside changes too. It rejects, writing nothing, when the note
+changed in the same place outside the tab (`err.name === "NoteChangedError"`), when the note
+has edits waiting for the user's choice (`"NoteKeptError"`), when it's an encrypted note
+(`"EncryptedNoteReadOnlyError"`), or when the note or its file no longer exists. Match on
+`err.name`, not `instanceof` (a plugin's copy of the classes isn't the app's), show the error's
+message, which says what to do, and keep the user's edit so they can save again. Apps before
+this contract resolve with `undefined` after overwriting the note. `ctx.theme` is the app's current
 `"light"` or `"dark"`, and `ctx.onThemeChange(fn)` calls `fn` when it changes and returns an
 unsubscribe. A toolbar button with `menu: [{ label, onSelect }]` is a dropdown and needs no
 `onClick`.

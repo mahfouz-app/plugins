@@ -24,10 +24,30 @@ export interface PluginTabContext {
   note: NoteRef & { title: string };
   /** The plugin-defined argument the tab was opened with. */
   arg: string;
-  /** The note's saved body. */
+  /** The note's saved body. It becomes `writeBody`'s merge base. */
   readBody(): Promise<string>;
-  /** Saves a new body through the app's normal save path (commit, reindex). */
-  writeBody(body: string): Promise<void>;
+  /**
+   * Saves a new body through the app's normal save path (commit, reindex),
+   * merged with any change made to the note outside this tab since the
+   * tab's base: the body of its last `readBody` or its last write,
+   * whichever came later (the note's body when the tab opened, before
+   * either). Resolves with the body written, which holds those outside
+   * changes too. Rejects, with nothing written, and with a message that
+   * says what to do; match on `err.name`, since a plugin's own copy of the
+   * classes isn't the app's (`instanceof` fails across bundles):
+   * - `NoteChangedError`: an outside change overlaps this one;
+   * - `NoteKeptError`: the note has edits kept for the user's choice
+   *   (open it and choose first);
+   * - `EncryptedNoteReadOnlyError`: the note is encrypted, so read-only;
+   * - a plain `Error` when the note no longer exists, or its file is
+   *   missing; any other failure of the save passes through as it is.
+   * On a rejection, keep the user's edit (don't discard it) so they can
+   * save again once the note is settled.
+   *
+   * Apps before this contract resolved with `undefined` and overwrote the
+   * note; treat a non-string result as "written as sent".
+   */
+  writeBody(body: string): Promise<string | void>;
   /** Closes this tab. */
   close(): void;
   /** Buttons shown in the app's toolbar, before Close. Call again to update
