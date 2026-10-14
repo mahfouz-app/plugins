@@ -327,6 +327,12 @@ note editor is open.
   `shortcut` is only the default: users rebind or disable it in `.config/settings.md` under
   `## Shortcuts`, row `<registry>/<plugin>:<command id>`. `when` and `palette` need Mahfouz 0.12.1;
   older apps show every command for every note.
+- `host.registerCommand({ id, label, scope: "vault", when?(vault), palette?, shortcut?, run(vault) })`
+  adds a vault command: it gets the open vault (`{ vaultId, name, path, locked }`) instead of a
+  note, and the palette lists it (and its shortcut runs) whenever a vault is open, with no note
+  too, such as a vault git-crypt keeps locked (`locked`), which shows none. `when(vault)` hides it
+  for a vault it doesn't apply to; it's never in note menus. Needs the Mahfouz release that ships
+  vault commands; older apps treat one as a note command.
 - `host.ui.openOverlay({ title, render(container, { close }) })` covers the whole window (native
   full screen). The app handles Esc, View → Stop Presenting and the close button.
 - `host.registerExportFormat({ id, label, export(request, progress) })` adds a format to the Export

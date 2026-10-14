@@ -16,6 +16,7 @@ import type {
   BodyCodec,
   BodyCodecContext,
   CommandNote,
+  CommandVault,
   CommitFilesResult,
   CreatedRepo,
   DialogSpec,
@@ -36,6 +37,7 @@ import type {
   ImportPage,
   ImportPerson,
   ImportPlan,
+  NoteCommand,
   NoteInfo,
   OverlaySpec,
   PluginCommand,
@@ -44,6 +46,7 @@ import type {
   SettingsTab,
   SlidesPreviewRequest,
   SlidesPreviewResult,
+  VaultCommand,
   VaultInfo,
   VaultUnlocker,
 } from "./host";
@@ -60,6 +63,7 @@ export type {
   BodyCodec,
   BodyCodecContext,
   CommandNote,
+  CommandVault,
   CommitFilesResult,
   CreatedRepo,
   DialogSpec,
@@ -82,6 +86,7 @@ export type {
   ImportPage,
   ImportPerson,
   ImportPlan,
+  NoteCommand,
   NoteInfo,
   NoteRef,
   OverlaySpec,
@@ -96,6 +101,7 @@ export type {
   SettingsTab,
   SlidesPreviewResult,
   ToolbarButton,
+  VaultCommand,
   VaultInfo,
   VaultUnlocker,
 };
@@ -215,13 +221,24 @@ export interface MahfouzPluginHost {
    * handed back as `ctx.arg` (e.g. which block to edit). Pending note saves
    * are flushed first. */
   openTab(type: string, note: NoteRef, arg: string): Promise<void>;
-  /** A command on notes: in note context menus (`noteMenu`), the command
-   * palette (unless `palette: false`) and/or on a shortcut (`shortcut` is
-   * the default; users rebind it in `.config/settings.md` under
-   * `<plugin>:<command id>`). `when(note)` hides it from the note menu and
+  /** A command, in the command palette (unless `palette: false`) and
+   * optionally on a shortcut (`shortcut` is the default; users rebind it in
+   * `.config/settings.md` under `<plugin>:<command id>`).
+   *
+   * A note command (the default `scope`) gets the note it acts on and is
+   * offered only while the active tab shows one; with `noteMenu` it's in
+   * note context menus too. `when(note)` hides it from the note menu and
    * the palette, and keeps its shortcut from running it, for a note it
    * doesn't apply to (absent in apps older than 0.12.1, where every command
-   * shows for every note). */
+   * shows for every note).
+   *
+   * A vault command (`scope: "vault"`) gets the open vault (`CommandVault`)
+   * and is offered whenever a vault is open, with no note too, e.g. a
+   * git-crypt locked vault (`vault.locked`), which shows none; `when(vault)`
+   * hides it the same way. Vault commands are never in note menus. Apps
+   * before vault commands treat one as a note command, passing it a
+   * `CommandNote` while a note is open; check `"locked" in target` if that
+   * matters. */
   registerCommand(command: PluginCommand): Disposable;
   /** A page in Settings, listed under `label` after the app's own, only
    * while the vault has this plugin on (a plugin loaded only as a
