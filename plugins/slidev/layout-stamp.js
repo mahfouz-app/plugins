@@ -6,8 +6,19 @@
 // The layout's own class names can't serve: two-cols renders `two-columns`
 // and image has none.
 
+/** The `defaults` the server's layout rule reads: slide 1's frontmatter
+ * `defaults`, from the deck's slide list (`$nav.slides`). Not
+ * `configs.defaults`, which is the entry stub's headmatter and never set:
+ * the note's own headmatter comes in by `src:` and lands in slide 1's
+ * frontmatter. A hidden slide isn't in the list, so this is the first shown
+ * slide's, as on the server. */
+export function deckDefaults(nav) {
+  return nav?.slides?.[0]?.meta?.slide?.frontmatter?.defaults;
+}
+
 /** The layout Slidev renders slide `page` (1-based) with, by the server's
- * rule (sidecar.js, "Facts this relies on"). A name that isn't a layout is
+ * rule (sidecar.js, "Facts this relies on"), given `defaults` from
+ * deckDefaults. A name that isn't a layout is
  * kept as written, where the server renders `default`: the client has no
  * list of layouts to check it against (`#slidev/layouts` doesn't compile). */
 export function slideLayout(frontmatter, defaults, page) {
