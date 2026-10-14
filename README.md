@@ -18,7 +18,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 | `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.12.0 |
-| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.12.1 (the first release with the host APIs it uses) |
+| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.12.0 (the first release with the host APIs it uses) |
 
 `npm test` runs the plugins' tests and the registry checker's with `node --test` (no
 dependencies).
@@ -60,7 +60,7 @@ decrypts. It needs **GPG** on the Mac ([GPG Suite](https://gpgtools.org), or
   plain note and Decrypt… only on an encrypted note unlocked this session, from what the app says
   of the note (`CommandNote.encryptedGroup`, `unlocked`), in the note menu, the palette and the
   toolbar. The settings page warns when other enabled plugins can reach the network
-  (`host.plugins.list()`). In an app without these (older than 0.12.1) the plugin registers its
+  (`host.plugins.list()`). In an app without these (older than 0.12.0) the plugin registers its
   body codec alone, so encrypted notes still unlock and save.
 
 > **Trust:** Installed plugins share one JavaScript realm; any enabled plugin could ask for a
@@ -316,7 +316,7 @@ note editor is open.
   from running, for a note it doesn't apply to; it gets the same `CommandNote` as `run`, which for
   an encrypted note also carries `encryptedGroup` and `unlocked`. Keep it cheap and synchronous.
   `shortcut` is only the default: users rebind or disable it in `.config/settings.md` under
-  `## Shortcuts`, row `<registry>/<plugin>:<command id>`. `when` and `palette` need Mahfouz 0.12.1;
+  `## Shortcuts`, row `<registry>/<plugin>:<command id>`. `when` and `palette` need Mahfouz 0.12.0;
   older apps show every command for every note.
 - `host.ui.openOverlay({ title, render(container, { close }) })` covers the whole window (native
   full screen). The app handles Esc, View → Stop Presenting and the close button.
@@ -343,7 +343,7 @@ note editor is open.
     the path written, or null if cancelled. On the web it downloads the file instead and resolves to
     its name.
   - `ctx.theme`, `ctx.onThemeChange` and a toolbar button's `menu` (see Tabs).
-  - From Mahfouz 0.12.1: `host.registerSettingsTab({ id, label, render(container) })` adds a page
+  - From Mahfouz 0.12.0: `host.registerSettingsTab({ id, label, render(container) })` adds a page
     to Settings while the vault has the plugin on, and `host.openSettingsTab(id)` opens it;
     `host.ui.openDialog({ title, render(container) })` opens a dialog with the app's look (Escape
     and a click outside close it; returns `{ close }`), and `host.ui.confirm({ title, body,

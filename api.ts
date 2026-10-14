@@ -24,6 +24,7 @@ import type {
   ExportRequest,
   ExportResult,
   FencedBlock,
+  MovedRepo,
   HttpRequestSpec,
   HttpResponse,
   ImportAttachment,
@@ -82,6 +83,7 @@ export type {
   ImportPage,
   ImportPerson,
   ImportPlan,
+  MovedRepo,
   NoteInfo,
   NoteRef,
   OverlaySpec,
@@ -465,11 +467,53 @@ export interface MahfouzPluginHost {
      * paths written.
      */
     forceCheckout(): Promise<string[]>;
+    /**
+     * Rewrites every commit of the open vault's branch with its files
+     * encrypted (each file a git-crypt filter covers stored through the
+     * clean filter; authors, dates, messages and merges kept), then
+     * force-pushes the branch with a lease to the vault's own remote: the
+     * only branch and remote it touches. The app asks the user first, in
+     * its own dialog naming the branch, the repository and this plugin;
+     * Cancel rejects with an error whose `code` is `"cancelled"`, with
+     * nothing changed. Refused, with nothing changed, unless the vault is
+     * git-crypt encrypted and unlocked, its last commit already stores its
+     * files encrypted (`renormalize` first), and it has a branch and a
+     * remote, nothing uncommitted (pending edits are committed first) and no
+     * Git LFS. When the push fails the branch is put back as it was.
+     * `message` is the branch's reflog entry. Absent in apps older than
+     * 0.12.1.
+     */
+    rewriteHistory?(message: string): Promise<void>;
   };
   /** GitHub. Desktop only, and only while the vault has this plugin on. */
   repo?: {
     /** Creates a private repository named `name` for the signed-in user; resolves with its clone (SSH) URL. */
     createPrivate(name: string): Promise<CreatedRepo>;
+    /**
+     * Moves the open vault to a new private repository named `name` for the
+     * signed-in user: the app asks the user first, in its own dialog naming
+     * both repositories and this plugin (Cancel rejects with an error whose
+     * `code` is `"cancelled"`, with nothing changed), then creates it
+     * (private only), makes it the vault's remote and pushes the branch
+     * there. The old repository isn't changed. Refused, with nothing
+     * changed, unless the vault is git-crypt encrypted and unlocked, has a
+     * GitHub remote and nothing uncommitted (pending edits are committed
+     * first). When the push fails the old remote is put back (the new,
+     * empty repository stays). Absent in apps older than 0.12.1.
+     */
+    moveToNewPrivate?(name: string): Promise<MovedRepo>;
+  };
+  /**
+   * The open vault's naming preferences in `.config/settings.md`, written
+   * like an edit (the auto-commit commits them). Refused in a vault
+   * git-crypt has locked. Desktop only, only while the vault has this
+   * plugin on, and absent in apps older than 0.12.1.
+   */
+  settings?: {
+    /** `id`: new notes are named by their id alone (`<id>.md`, no title), and titles never rename files; existing notes keep their names. `title`: the prefix and the title (the default). Writes `new_note_naming`. */
+    setNewNoteNaming(mode: "title" | "id"): Promise<void>;
+    /** `none`: no commit message the app writes names a note's title or path: they count the notes instead (`Auto-save: 3 notes`, `Deleted: 1 note`, `Agent: 2 notes`); `titles`: name them (the default). Your own messages (`commitFiles`, `renormalize`) are yours to keep title-free. Writes `commit_message_naming`. */
+    setCommitMessageNaming(mode: "titles" | "none"): Promise<void>;
   };
   /** Fenced code blocks in a note body, found as the editor finds them. */
   markdown?: {

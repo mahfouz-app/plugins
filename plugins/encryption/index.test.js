@@ -561,7 +561,7 @@ test("the network warning lists the other enabled plugins that may reach it", as
   assert.deepEqual(await c.networkedPlugins(), ["Notion"]);
 });
 
-/** A 0.12.1 host recording what `activate` registers. */
+/** A 0.12.0 host recording what `activate` registers. */
 function activatedHost(extra = {}) {
   const registered = { commands: [], toolbar: [], codecs: [], settingsTabs: [], unlockers: [], opened: [] };
   const host = {
@@ -735,6 +735,20 @@ test("Encrypt vault: naming by id, then the history option through the app, whic
     assert.deepEqual(calls, expected, history);
     assert.equal(host.vaultRpc.state.encrypted, true);
   }
+});
+
+test("Encrypt vault: Cancel in the app's move or rewrite question leaves the vault encrypted from now on", async () => {
+  const cancelled = () => Object.assign(new Error("Cancelled"), { code: "cancelled" });
+  for (const history of ["move", "rewrite"]) {
+    const { host, c } = vaultSetup({ vault: { hasRemote: true } });
+    host.repo = { moveToNewPrivate: async () => Promise.reject(cancelled()) };
+    host.git.rewriteHistory = async () => Promise.reject(cancelled());
+    await c.encryptVault({ history });
+    assert.equal(host.vaultRpc.state.encrypted, true, history);
+  }
+  const { host, c } = vaultSetup({ vault: { hasRemote: true } });
+  host.repo = { moveToNewPrivate: async () => Promise.reject(new Error("push failed")) };
+  await assert.rejects(c.encryptVault({ history: "move" }), /push failed/);
 });
 
 test("Unlock calls unlockVault, then forceCheckout", async () => {

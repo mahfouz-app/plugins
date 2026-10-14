@@ -1,4 +1,4 @@
-// Vendored from mahfouz-app/app src/core/src/plugins/{bodyCodec,commands,dialogs,exportFormats,fencedBlocks,hostVault,notes,overlay,settingsTabs,vaultUnlockers}.ts,
+// Vendored from mahfouz-app/app src/core/src/plugins/{bodyCodec,commands,dialogs,exportFormats,fencedBlocks,hostRepo,hostVault,notes,overlay,settingsTabs,vaultUnlockers}.ts,
 // src/core/src/db/slidesTemplates.ts, src/core/src/plugins/slidesPreview.ts and src/core/src/import/types.ts — keep in sync.
 import type { NoteRef } from "./tabs";
 
@@ -459,4 +459,11 @@ export interface VaultUnlocker {
   label: string;
   /** Unlocks the open vault; rejects with what went wrong. */
   unlock(): Promise<unknown>;
+}
+
+/** What `host.repo.moveToNewPrivate` resolves with (the app's `src/core/src/plugins/hostRepo.ts`). */
+export interface MovedRepo {
+  /** `owner/name`. */
+  fullName: string;
+  htmlUrl: string;
 }
