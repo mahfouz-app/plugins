@@ -22,7 +22,10 @@ import {
   saveKeys,
   selfLogin,
   shortFpr,
+  skippedOf,
   STORAGE_KEY,
+  LFS_TEXT,
+  NEEDS_NEWER,
   uidName,
 } from "./index.js";
 
@@ -198,7 +201,7 @@ const KEYBLOCK = "-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC
  * refuses recipients it hasn't "imported", GitHub's `.gpg` endpoint, and
  * the APIs the app is asked to add (`notes.listEncrypted`, `notes.decrypt`).
  */
-function fakeHost({ config = "", notes = {}, keyring = [ME, BACKUP], github = {}, listApis = true } = {}) {
+function fakeHost({ config = "", notes = {}, keyring = [ME, BACKUP], github = {}, listApis = true, diskOnly = [], vault = {} } = {}) {
   const log = [];
   const imported = new Set(keyring);
   const host = {
@@ -236,6 +239,7 @@ function fakeHost({ config = "", notes = {}, keyring = [ME, BACKUP], github = {}
           for (const k of keys) imported.add(k.fpr);
           return keys;
         }
+        if (method in host.vaultRpc) return host.vaultRpc[method](params);
         if (method === "encrypt") {
           const missing = params.recipients.find((r) => !imported.has(r));
           if (missing) {
@@ -289,15 +293,58 @@ function fakeHost({ config = "", notes = {}, keyring = [ME, BACKUP], github = {}
         : {}),
     },
     vault: {
+      current: () => ({ vaultId: "v", path: "/vaults/Diary" }),
+      onOpen: () => ({ dispose() {} }),
+      onClose: () => ({ dispose() {} }),
       commitFiles: async (paths, message) => {
         log.push(["commit", paths, message]);
-        return true;
+        const skipped = paths.filter((p) => diskOnly.includes(p));
+        return { committed: skipped.length < paths.length, skipped };
       },
     },
+    vaultRpc: fakeVaultRpc(log, vault),
     progress: () => {},
     toast: (m) => log.push(["toast", m]),
   };
   return host;
+}
+
+/** The sidecar's vault methods over a fake vault: `{encrypted, unlocked, members, usesLfs, hasRemote, dirty, memberKey}`. */
+function fakeVaultRpc(log, v) {
+  const state = { encrypted: false, unlocked: false, members: [], usesLfs: false, hasRemote: false, dirty: false, memberKey: true, ...v };
+  const fail = (code, msg) => {
+    const err = new Error(`${code}: ${msg}`);
+    err.data = { code };
+    throw err;
+  };
+  return {
+    state,
+    vaultStatus: () => ({ encrypted: state.encrypted, unlocked: state.unlocked, keyNames: [], members: [...state.members], usesLfs: state.usesLfs, hasRemote: state.hasRemote }),
+    initVault: ({ members }) => {
+      if (state.usesLfs) fail("usesLfs", "lfs");
+      Object.assign(state, { encrypted: true, unlocked: true, members: [...members] });
+      const paths = [".git-crypt/.gitattributes", ...members.map((f) => `.git-crypt/keys/default/0/${f}.gpg`), ".gitattributes"];
+      return { paths, gitattributes: "* filter=git-crypt diff=git-crypt\n" };
+    },
+    unlockVault: () => {
+      if (!state.memberKey) fail("noMemberKey", "none of your secret keys");
+      state.unlocked = true;
+      return { member: state.members[0], alreadyUnlocked: false };
+    },
+    lockVault: () => {
+      if (state.dirty) fail("uncommitted", "1 file(s) aren't committed");
+      state.unlocked = false;
+      return { wasUnlocked: true };
+    },
+    addVaultMember: ({ fpr }) => {
+      state.members.push(fpr);
+      return { paths: [`.git-crypt/keys/default/0/${fpr}.gpg`] };
+    },
+    removeVaultMember: ({ fpr }) => {
+      state.members = state.members.filter((f) => f !== fpr);
+      return { paths: [`.git-crypt/keys/default/0/${fpr}.gpg`] };
+    },
+  };
 }
 
 const encNote = (title, group, plain, recipients = [ME, BACKUP]) => ({
@@ -510,7 +557,6 @@ test("activate registers the codec, the commands and the toolbar toggles, with n
     registerToolbarItem: (item) => registered.toolbar.push(item),
     ui: { openOverlay: () => () => {} },
   };
-  host.vault.onClose = () => ({ dispose() {} });
   activate(host);
   assert.equal(registered.codecs.length, 1);
   assert.deepEqual(
@@ -521,6 +567,7 @@ test("activate registers the codec, the commands and the toolbar toggles, with n
       ["encrypt-note", "Encrypt note", false],
       ["decrypt-note", "Decrypt note", false],
       ["settings", "Encryption settings", false],
+      ["unlock-vault", "Unlock vault", false],
     ]
   );
   assert.ok(registered.commands.every((c) => !c.shortcut));
@@ -537,4 +584,142 @@ test("activate does nothing where the app can't decrypt (the web)", () => {
   activate(host);
   assert.equal(touched, false);
   deactivate();
+});
+
+// ---- commitFiles' {committed, skipped} --------------------------------------------------
+
+test("skippedOf reads commitFiles' result, and an older app's boolean as nothing skipped", () => {
+  assert.deepEqual(skippedOf({ committed: true, skipped: ["a.md"] }), ["a.md"]);
+  assert.deepEqual(skippedOf({ committed: false, skipped: [] }), []);
+  assert.deepEqual(skippedOf(true), []);
+  assert.deepEqual(skippedOf(undefined), []);
+});
+
+test("Add member tells the user about the disk-only notes commitFiles left out", async () => {
+  const config = addGroup("", "family", [{ login: "o", fpr: ME }]);
+  const notes = { a: encNote("A", "family", "alpha"), b: encNote("B", "family", "beta") };
+  const { host, c } = setup({ config, notes, keyring: [ME, BACKUP, ADA], diskOnly: ["B.md"] });
+  assert.equal(await c.addMemberAndReencrypt("family", { login: "ada", fpr: ADA }), 2);
+  assert.deepEqual(host.log.find(([m]) => m === "commit"), ["commit", ["A.md", "B.md", CONFIG_PATH], "Add @ada to family"]);
+  assert.deepEqual(host.log.filter(([m]) => m === "toast"), [["toast", "1 note wasn't committed: it's disk-only on this Mac."]]);
+});
+
+test("a config-only commit with nothing skipped says nothing", async () => {
+  const { host, c } = setup();
+  await c.newGroup("team", "o");
+  assert.equal(host.log.some(([m]) => m === "toast"), false);
+});
+
+// ---- whole-vault encryption ---------------------------------------------------------------
+
+/** A host with `git.renormalize` and `git.forceCheckout`, logged. */
+function vaultSetup(opts = {}) {
+  const s = setup(opts);
+  s.host.git = {
+    renormalize: async (message) => {
+      s.host.log.push(["renormalize", message]);
+      if (opts.renormalizeFails) throw new Error("Some files have changes that aren't committed");
+      return true;
+    },
+    forceCheckout: async () => {
+      s.host.log.push(["forceCheckout"]);
+      return ["a.md"];
+    },
+  };
+  return s;
+}
+const vaultCalls = (host) =>
+  host.log.map(([m]) => m).filter((m) => ["vaultStatus", "renormalize", "initVault", "unlockVault", "lockVault", "forceCheckout", "commit", "addVaultMember", "removeVaultMember"].includes(m));
+
+test("Encrypt vault: a renormalize first, then initVault for your keys, then the renormalize that commits it", async () => {
+  const { host, c } = vaultSetup();
+  const init = await c.encryptVault({ history: "now" });
+  assert.deepEqual(vaultCalls(host), ["vaultStatus", "renormalize", "initVault", "renormalize", "vaultStatus"]);
+  assert.deepEqual(host.vaultRpc.state.members, [ME, BACKUP]);
+  assert.ok(init.paths.includes(".gitattributes"), "the sidecar wrote the root .gitattributes");
+  assert.deepEqual(host.log.filter(([m]) => m === "renormalize").map(([, msg]) => msg), ["Commit before encrypting the vault", "Encrypt vault"]);
+  // Nothing went through commitFiles: renormalize stages .gitattributes and .git-crypt/ itself.
+  assert.equal(host.log.some(([m]) => m === "commit"), false);
+  assert.equal(c.isVaultLocked(), false);
+  await assert.rejects(c.encryptVault(), /already encrypted/);
+});
+
+test("Encrypt vault: a dirty tree stops it before initVault", async () => {
+  const { host, c } = vaultSetup({ renormalizeFails: true });
+  await assert.rejects(c.encryptVault(), /aren't committed/);
+  assert.equal(host.log.some(([m]) => m === "initVault"), false);
+});
+
+test("Encrypt vault refuses a vault using Git LFS before anything changes", async () => {
+  const { host, c } = vaultSetup({ vault: { usesLfs: true } });
+  await assert.rejects(c.encryptVault(), (err) => err.message === LFS_TEXT);
+  assert.deepEqual(vaultCalls(host), ["vaultStatus"]);
+});
+
+test("the history options this app has no API for are disabled; Encrypt from now on always works", async () => {
+  const { host, c } = vaultSetup({ vault: { hasRemote: true } });
+  host.repo = { createPrivate: async () => ({ cloneUrl: "git@github.com:o/x.git" }) };
+  assert.deepEqual(c.vaultFeatures(), { move: false, rewrite: false, now: true, nameById: false, renameExisting: false });
+  for (const history of ["move", "rewrite"]) {
+    await assert.rejects(c.encryptVault({ history }), (err) => err.message === NEEDS_NEWER);
+  }
+  await assert.rejects(c.encryptVault({ renameExisting: true }), (err) => err.message === NEEDS_NEWER);
+  assert.equal(host.log.some(([m]) => m === "initVault"), false);
+  await c.encryptVault({ history: "now" });
+  assert.equal(host.vaultRpc.state.encrypted, true);
+});
+
+test("Encrypt vault needs the app's renormalize", async () => {
+  const { c } = setup();
+  await assert.rejects(c.encryptVault(), (err) => err.message === NEEDS_NEWER);
+});
+
+test("Unlock calls unlockVault, then forceCheckout", async () => {
+  const { host, c } = vaultSetup({ vault: { encrypted: true, members: [ME] } });
+  await c.vaultStatus();
+  assert.equal(c.isVaultLocked(), true);
+  assert.deepEqual(await c.unlockVault(), ["a.md"]);
+  assert.deepEqual(vaultCalls(host), ["vaultStatus", "unlockVault", "forceCheckout", "vaultStatus"]);
+  assert.equal(c.isVaultLocked(), false);
+});
+
+test("Unlock with no member key names your fingerprint, and checks nothing out", async () => {
+  const { host, c } = vaultSetup({ vault: { encrypted: true, members: [BOSS], memberKey: false } });
+  await assert.rejects(c.unlockVault(), (err) => err.code === "noMemberKey" && err.fpr === ME && err.message.includes(formatFpr(ME)));
+  assert.equal(host.log.some(([m]) => m === "forceCheckout"), false);
+});
+
+test("Lock commits what's pending, then locks and checks out; a dirty tree refuses before the key goes", async () => {
+  const dirty = vaultSetup({ vault: { encrypted: true, unlocked: true, members: [ME] }, renormalizeFails: true });
+  await assert.rejects(dirty.c.lockVault(), /aren't committed/);
+  assert.equal(dirty.host.vaultRpc.state.unlocked, true);
+  assert.equal(dirty.host.log.some(([m]) => m === "lockVault" || m === "forceCheckout"), false);
+
+  const untracked = vaultSetup({ vault: { encrypted: true, unlocked: true, members: [ME], dirty: true } });
+  await assert.rejects(untracked.c.lockVault(), /uncommitted/);
+  assert.equal(untracked.host.log.some(([m]) => m === "forceCheckout"), false);
+
+  const { host, c } = vaultSetup({ vault: { encrypted: true, unlocked: true, members: [ME] } });
+  await c.lockVault();
+  assert.deepEqual(vaultCalls(host), ["renormalize", "lockVault", "forceCheckout", "vaultStatus"]);
+  assert.equal(c.isVaultLocked(), true);
+});
+
+test("vault members add and remove commit the paths the sidecar returns", async () => {
+  const { host, c } = vaultSetup({ vault: { encrypted: true, unlocked: true, members: [ME, BACKUP] } });
+  await c.addVaultMember({ login: "ada", fpr: ADA });
+  assert.deepEqual(host.log.find(([m]) => m === "commit"), ["commit", [`.git-crypt/keys/default/0/${ADA}.gpg`], "Add @ada to the vault's keys"]);
+  await c.removeVaultMember(ADA, "ada");
+  assert.deepEqual(host.log.filter(([m]) => m === "commit").at(-1), ["commit", [`.git-crypt/keys/default/0/${ADA}.gpg`], "Remove @ada from the vault's keys"]);
+  assert.deepEqual(host.vaultRpc.state.members, [ME, BACKUP]);
+});
+
+test("vault members get their logins from the config's rows, else show the fingerprint only", () => {
+  const config = addGroup("", "family", [{ login: "o", fpr: ME }, { login: "ada", fpr: ADA }]);
+  const { c } = setup();
+  assert.deepEqual(c.vaultMembers(config, [ME, ADA, BOSS], [ME, BACKUP]), [
+    { fpr: ME, login: "o", you: true },
+    { fpr: ADA, login: "ada", you: false },
+    { fpr: BOSS, login: "", you: false },
+  ]);
 });

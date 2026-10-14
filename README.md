@@ -80,6 +80,21 @@ a repository `git-crypt` encrypted. CI checks both directions against the real C
 - **What stays visible:** file and folder names, file sizes (to the byte), which files changed
   in each commit, commit messages, authors and dates, and branch names. Two identical files
   give identical ciphertext. Encrypt the content, not the shape.
+- **In the app:** Settings → Encryption → *Encrypt this vault on GitHub* encrypts the open vault
+  for your signing and backup keys (a renormalize commits what's pending first and refuses an
+  edited file; then `initVault`; then a renormalize commits every file encrypted), and once it's
+  encrypted shows Lock/Unlock (and the palette's **Unlock vault**) and its members, by login where
+  `.config/encryption.md` lists the fingerprint. Only *Encrypt from now on* works today; the
+  other choices are shown disabled ("Needs a newer version of Mahfouz.") until the app has the
+  APIs below.
+- **Required app APIs** (feature-detected, absent in 0.12.1): `host.git.setRemote(url)` and
+  `host.git.push(opts?: {force?: boolean})` (move to a new private repository, with
+  `host.repo.createPrivate`); `host.git.rewriteHistory(message)` (rewrite history under the
+  vault's lock, never from the sidecar); `host.settings.setNewNoteNaming("title" | "id")` and
+  `host.settings.setCommitMessageNaming("titles" | "none")` (new notes named by id, commit
+  messages that don't name notes); `host.notes.countRenamableById()` and
+  `host.notes.renameAllById()` (rename existing notes); `host.registerVaultUnlocker({label,
+  unlock})` (an Unlock button in the app's locked-vault notice).
 - **In a terminal:** git runs the filter by the path Mahfouz configured, so `git` works in an
   unlocked vault. Commands like `git-crypt unlock`, `lock` and `status` need the real
   `git-crypt` installed (`brew install git-crypt`); the plugin's binary only runs git's filters.

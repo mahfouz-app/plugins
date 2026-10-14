@@ -24,6 +24,12 @@
 // - The plaintext of notes this module decoded or encoded this session, so
 //   Decrypt can write it: memory only, dropped when the plugin unloads or
 //   the vault closes.
+// - Whole-vault encryption: git-crypt's own files in the vault
+//   (`.git-crypt/`, the root `.gitattributes` block, both written by the
+//   sidecar and committed by the app) and this clone's key in `.git/`. Its
+//   members are the fingerprints of `.git-crypt/keys/default/0/`; their
+//   logins are read from `.config/encryption.md`'s group rows, never stored
+//   apart.
 //
 // Single file on purpose; see the README's note on frontend modules.
 
@@ -47,6 +53,34 @@ export const STOP_SHARING_TEXT =
   "New edits are re-encrypted without their key. They can still read anything they already decrypted or that's in history.";
 const NO_SIGNING_KEY = "Choose your signing key in Settings → Encryption.";
 const CANT_REENCRYPT = "This version of Mahfouz can't re-encrypt notes.";
+
+export const VAULT_SECTION = "Encrypt this vault on GitHub";
+export const VAULT_TEXT = "Notes stay readable on this Mac. On GitHub and in every clone without a key, they're encrypted with git-crypt.";
+export const VAULT_DIALOG_TEXT = "Encrypted for you and your backup key. Add members afterwards.";
+export const HISTORY_QUESTION = "Your history on GitHub is unencrypted. What happens to it?";
+/** The history options, in the dialog's order. */
+export const HISTORY_OPTIONS = [
+  {
+    id: "move",
+    label: "Move to a new private repository",
+    recommended: true,
+    text: "The old one keeps the unencrypted history. Mahfouz doesn't delete repositories.",
+  },
+  {
+    id: "rewrite",
+    label: "Rewrite history and force-push",
+    text: "Old copies stay reachable on GitHub by commit until GitHub support removes them. Collaborators must clone again.",
+  },
+  { id: "now", label: "Encrypt from now on", text: "Earlier commits stay unencrypted on GitHub." },
+];
+export const NAMES_TEXT = "File and folder names and commit messages stay readable on GitHub.";
+export const NAMES_BY_ID_TEXT = "New notes will be named by their ID, and commit messages won't name notes.";
+export const NEEDS_NEWER = "Needs a newer version of Mahfouz.";
+export const REMOVE_MEMBER_TEXT =
+  "Removing a member stops new access only if the key changes; git-crypt can't rotate it. To shut someone out, move the vault to a fresh repository.";
+export const NO_VAULT_KEY_TEXT = "None of your GPG keys can unlock it. Ask a member to add yours:";
+export const LFS_TEXT = "This vault stores files with Git LFS, which git-crypt can't encrypt, so it can't be encrypted.";
+const VAULT_MESSAGE = "Encrypt vault";
 
 const LOCK_OPEN = '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>';
 const LOCK_CLOSED = '<rect x="5" y="11" width="14" height="10" rx="2" fill="currentColor"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>';
@@ -224,6 +258,19 @@ export function errorCode(err) {
   return m ? m[1] : "";
 }
 
+/** The disk-only notes' paths `commitFiles` left out (`{committed, skipped}`; an older app resolved a boolean). */
+export function skippedOf(result) {
+  return Array.isArray(result?.skipped) ? result.skipped.filter((p) => typeof p === "string") : [];
+}
+
+/** What a commit that left disk-only notes out says. */
+export function skippedText(n) {
+  return n === 1 ? "1 note wasn't committed: it's disk-only on this Mac." : `${n} notes weren't committed: they're disk-only on this Mac.`;
+}
+
+/** The last component of a vault's path, as its name. */
+export const vaultName = (path) => String(path ?? "").replace(/\/+$/, "").split("/").pop() || "vault";
+
 const sameArmor = (a, b) => String(a).replace(/\r\n/g, "\n").trim() === String(b).replace(/\r\n/g, "\n").trim();
 export const usableForSigning = (k) => !!k.canSign && !k.expired && !k.revoked;
 export const usableForEncryption = (k) => !!k.canEncrypt && !k.expired && !k.revoked;
@@ -275,6 +322,13 @@ export function createController(host, storage) {
   };
 
   const readConfig = async () => (host.config ? ((await host.config.read()) ?? "") : "");
+
+  /** `host.vault.commitFiles`, telling the user about the disk-only notes it left out. Resolves with those paths. */
+  async function commit(paths, message) {
+    const skipped = skippedOf(await host.vault?.commitFiles(paths, message));
+    if (skipped.length > 0) host.toast(skippedText(skipped.length), "info");
+    return skipped;
+  }
 
   async function fetchGithubKeys(login) {
     if (!LOGIN_RE.test(login)) throw new Error(`“${login}” isn't a GitHub login.`);
@@ -498,7 +552,7 @@ export function createController(host, storage) {
       host.progress("");
     }
     if (next !== md) await host.config.write(next);
-    await host.vault?.commitFiles([...paths, CONFIG_PATH], `Add @${member.login} to ${group}`);
+    await commit([...paths, CONFIG_PATH], `Add @${member.login} to ${group}`);
     changed();
     return paths.length;
   }
@@ -509,7 +563,7 @@ export function createController(host, storage) {
     const next = removeMember(md, group, login);
     if (next === md) return false;
     await host.config.write(next);
-    await host.vault?.commitFiles([CONFIG_PATH], `Stop sharing ${group} with @${login}`);
+    await commit([CONFIG_PATH], `Stop sharing ${group} with @${login}`);
     changed();
     return true;
   }
@@ -522,7 +576,7 @@ export function createController(host, storage) {
     if (login !== keys.login) saveKeys(storage, { ...keys, login });
     const next = addGroup(await readConfig(), name, selfMembers(keys, login));
     await host.config.write(next);
-    await host.vault?.commitFiles([CONFIG_PATH], `Add encryption group ${name}`);
+    await commit([CONFIG_PATH], `Add encryption group ${name}`);
     changed();
   }
 
@@ -536,7 +590,159 @@ export function createController(host, storage) {
   function forgetAll() {
     unlocked.clear();
     statuses.clear();
+    vaultState = null;
     changed();
+  }
+
+  // ---- whole-vault encryption ----
+
+  let vaultState = null; // the open vault's last vaultStatus, for `when`
+
+  function vaultPath() {
+    const path = host.vault?.current()?.path;
+    if (!path) throw new Error("Open a vault first.");
+    return path;
+  }
+
+  /** The open vault's `vaultStatus` (`{encrypted, unlocked, members, usesLfs, hasRemote}`), remembered for `isVaultLocked`. */
+  async function vaultStatus() {
+    vaultState = await host.sidecar.call("vaultStatus", { vault: vaultPath() });
+    changed();
+    return vaultState;
+  }
+
+  /** The vault is encrypted and locked on this machine, as last read. */
+  const isVaultLocked = () => !!vaultState?.encrypted && !vaultState.unlocked;
+
+  /**
+   * What this app lets the Encrypt dialog do. Each needs an app API that
+   * doesn't exist yet (see the README's required app APIs): moving to a new
+   * repository needs `git.setRemote` and `git.push`, rewriting needs
+   * `git.rewriteHistory`, naming new notes by id and keeping notes out of
+   * commit messages need `settings.setNewNoteNaming` and
+   * `settings.setCommitMessageNaming`, and renaming the existing notes
+   * needs `notes.renameAllById` (with `notes.countRenamableById`).
+   */
+  function vaultFeatures() {
+    const fn = (f) => typeof f === "function";
+    return {
+      move: fn(host.repo?.createPrivate) && fn(host.git?.setRemote) && fn(host.git?.push),
+      rewrite: fn(host.git?.rewriteHistory) && fn(host.git?.push),
+      now: true,
+      nameById: fn(host.settings?.setNewNoteNaming) && fn(host.settings?.setCommitMessageNaming),
+      renameExisting: fn(host.notes?.renameAllById) && fn(host.notes?.countRenamableById),
+    };
+  }
+
+  /** The vault's members, `{fpr, login, you}`: logins from `.config/encryption.md` rows with that fingerprint, else "". */
+  function vaultMembers(md, members, own) {
+    const rows = parseConfig(md).groups.flatMap((g) => g.members);
+    const mine = new Set(own);
+    return (members ?? []).map((f) => {
+      const fpr = normalizeFpr(f) ?? String(f);
+      const login = rows.find((m) => m.fpr === fpr && LOGIN_RE.test(m.login))?.login ?? "";
+      return { fpr, login, you: mine.has(fpr) };
+    });
+  }
+
+  /**
+   * Encrypts the open vault with git-crypt for your signing and backup
+   * keys. `history` is `now`, `move` or `rewrite` (the last two only where
+   * the app has their APIs); `renameExisting` renames the existing notes
+   * by id first, where the app can. Order: a renormalize commits what's
+   * pending and refuses an edited file before anything changes; the
+   * sidecar writes the key, `.git-crypt/` and the root `.gitattributes`
+   * block; a renormalize commits them with every file encrypted; then the
+   * naming settings and the history option.
+   */
+  async function encryptVault({ history = "now", renameExisting = false } = {}) {
+    const keys = loadKeys(storage);
+    if (!keys.signing) throw new Error(NO_SIGNING_KEY);
+    const features = vaultFeatures();
+    if (!features[history]) throw new Error(NEEDS_NEWER);
+    if (renameExisting && !features.renameExisting) throw new Error(NEEDS_NEWER);
+    if (typeof host.git?.renormalize !== "function") throw new Error(NEEDS_NEWER);
+    const vault = vaultPath();
+    const st = await vaultStatus();
+    if (st.usesLfs) throw new Error(LFS_TEXT);
+    if (st.encrypted) throw new Error("This vault is already encrypted.");
+    // Commits what's pending, and refuses (with nothing changed yet) while a tracked file holds an edit.
+    await host.git.renormalize("Commit before encrypting the vault");
+    const members = [keys.signing, keys.backup].filter(Boolean);
+    const init = await host.sidecar.call("initVault", { vault, members: [...new Set(members)] });
+    // The app's renormalize stages `.gitattributes` and `.git-crypt/` itself, then every file cleaned afresh.
+    await host.git.renormalize(VAULT_MESSAGE);
+    await vaultStatus();
+    if (features.nameById) {
+      await host.settings.setNewNoteNaming("id");
+      await host.settings.setCommitMessageNaming("none");
+    }
+    if (renameExisting) await host.notes.renameAllById();
+    if (history === "move") {
+      const repo = await host.repo.createPrivate(`${vaultName(vault)}-encrypted`);
+      await host.git.setRemote(repo.cloneUrl);
+      await host.git.push();
+    } else if (history === "rewrite") {
+      await host.git.rewriteHistory(VAULT_MESSAGE);
+      await host.git.push({ force: true });
+    }
+    return init;
+  }
+
+  /** Unlocks the open vault with one of your keys, then checks its files out again as plaintext. */
+  async function unlockVault() {
+    if (typeof host.git?.forceCheckout !== "function") throw new Error(NEEDS_NEWER);
+    try {
+      await host.sidecar.call("unlockVault", { vault: vaultPath() });
+    } catch (err) {
+      if (errorCode(err) !== "noMemberKey") throw err;
+      const keys = loadKeys(storage);
+      const fpr = keys.signing ?? keys.backup ?? (await host.sidecar.call("secretFingerprints", {})).find(usableForEncryption)?.fpr ?? null;
+      const e = new Error(fpr ? `${NO_VAULT_KEY_TEXT} ${formatFpr(fpr)}` : NO_VAULT_KEY_TEXT.replace(/ Ask.*$/, ""));
+      e.code = "noMemberKey";
+      e.fpr = fpr;
+      throw e;
+    }
+    try {
+      return await host.git.forceCheckout();
+    } finally {
+      await vaultStatus().catch(() => {});
+    }
+  }
+
+  /**
+   * Locks the open vault: a renormalize commits what's pending and refuses
+   * while a tracked file holds an edit (the sidecar's lock refuses anything
+   * else uncommitted), then the key and filters go and the files are
+   * checked out again as ciphertext.
+   */
+  async function lockVault() {
+    if (typeof host.git?.forceCheckout !== "function" || typeof host.git?.renormalize !== "function") throw new Error(NEEDS_NEWER);
+    const vault = vaultPath();
+    await host.git.renormalize("Commit before locking the vault");
+    await host.sidecar.call("lockVault", { vault });
+    forgetAll();
+    try {
+      return await host.git.forceCheckout();
+    } finally {
+      await vaultStatus().catch(() => {});
+    }
+  }
+
+  /** Adds `member` (`{login, fpr}`) to the vault and commits the member file. */
+  async function addVaultMember(member) {
+    const { paths } = await host.sidecar.call("addVaultMember", { vault: vaultPath(), fpr: member.fpr });
+    if (paths.length > 0) await commit(paths, `Add @${member.login} to the vault's keys`);
+    await vaultStatus();
+    return paths;
+  }
+
+  /** Removes `fpr` from the vault and commits the deletion. The key isn't rotated. */
+  async function removeVaultMember(fpr, login) {
+    const { paths } = await host.sidecar.call("removeVaultMember", { vault: vaultPath(), fpr });
+    if (paths.length > 0) await commit(paths, `Remove ${login ? `@${login}` : shortFpr(fpr)} from the vault's keys`);
+    await vaultStatus();
+    return paths;
   }
 
   return {
@@ -557,6 +763,15 @@ export function createController(host, storage) {
     newGroup,
     networkedPlugins,
     forgetAll,
+    vaultStatus,
+    isVaultLocked,
+    vaultFeatures,
+    vaultMembers,
+    encryptVault,
+    unlockVault,
+    lockVault,
+    addVaultMember,
+    removeVaultMember,
     onChange(fn) {
       listeners.add(fn);
       return { dispose: () => void listeners.delete(fn) };
@@ -721,18 +936,43 @@ async function runDecrypt(c, note) {
 /** The Add member dialog for `group`; `done` runs after someone was added. */
 async function openAddMemberDialog(c, group, done) {
   const notes = await c.groupNotes(group);
-  const title = `Add member to “${group}”`;
+  const n = notes?.length ?? 0;
+  openKeyLookupDialog(c, {
+    title: `Add member to “${group}”`,
+    submitLabel: `Add and re-encrypt ${n} ${n === 1 ? "note" : "notes"}`,
+    blocked: notes == null ? CANT_REENCRYPT : null,
+    add: (member) => c.addMemberAndReencrypt(group, member),
+    done,
+  });
+}
+
+/** Add member for the vault: the same GitHub lookup and fingerprint check, then `addVaultMember`. */
+function openAddVaultMemberDialog(c, name, done) {
+  openKeyLookupDialog(c, {
+    title: `Add member to “${name}”`,
+    submitLabel: "Add member",
+    blocked: null,
+    add: (member) => c.addVaultMember(member),
+    done,
+  });
+}
+
+/**
+ * Looks a GitHub login's keys up, has the user pick one and confirm its
+ * fingerprint outside Mahfouz, then runs `add({login, fpr})`. `blocked`,
+ * when set, is shown and keeps the dialog from adding.
+ */
+function openKeyLookupDialog(c, { title, submitLabel, blocked, add, done }) {
   openModal(title, (card, close) => {
     const login = h("input", { className: "dialog-input", autocomplete: "off", spellcheck: "false", placeholder: "GitHub login", "aria-label": "GitHub login" });
     const find = h("button", { type: "button", className: "btn" }, "Find keys");
     const keysBox = h("div");
     const error = errorLine();
-    const n = notes?.length ?? 0;
-    const submit = h("button", { type: "submit", className: "dialog-submit", disabled: true }, `Add and re-encrypt ${n} ${n === 1 ? "note" : "notes"}`);
+    const submit = h("button", { type: "submit", className: "dialog-submit", disabled: true }, submitLabel);
     let found = null;
     let chosen = null;
     let confirmed = false;
-    const refresh = () => (submit.disabled = !(found && chosen && confirmed && notes != null));
+    const refresh = () => (submit.disabled = !(found && chosen && confirmed && !blocked));
     const lookUp = async () => {
       error.show(null);
       keysBox.replaceChildren();
@@ -791,7 +1031,7 @@ async function openAddMemberDialog(c, group, done) {
             submit.disabled = true;
             error.show(null);
             try {
-              await c.addMemberAndReencrypt(group, { login: found.login, fpr: chosen });
+              await add({ login: found.login, fpr: chosen });
               close();
               done?.();
             } catch (err) {
@@ -803,7 +1043,7 @@ async function openAddMemberDialog(c, group, done) {
         h("div", { className: "dialog-title" }, title),
         h("div", { className: "dialog-row" }, login, find),
         keysBox,
-        notes == null ? h("p", { className: "dialog-error" }, CANT_REENCRYPT) : null,
+        blocked ? h("p", { className: "dialog-error" }, blocked) : null,
         error.node,
         actions(close, submit)
       )
@@ -844,6 +1084,191 @@ function openNewGroupDialog(c, keys, done) {
   });
 }
 
+/** The Encrypt “<vault>” dialog; `done` runs after the vault was encrypted. */
+async function openEncryptVaultDialog(c, host, done) {
+  const st = await c.vaultStatus();
+  const features = c.vaultFeatures();
+  const renameCount = features.renameExisting ? await host.notes.countRenamableById() : null;
+  const title = `Encrypt “${vaultName(host.vault?.current()?.path)}”`;
+  openModal(title, (card, close) => {
+    const error = errorLine();
+    const submit = h("button", { type: "submit", className: "dialog-submit", disabled: !!st.usesLfs }, "Encrypt vault");
+    // The first option this app can do, the recommended one when it can.
+    let history = st.hasRemote ? (HISTORY_OPTIONS.find((o) => features[o.id])?.id ?? "now") : "now";
+    let rename = false;
+    const question = st.hasRemote
+      ? h(
+          "fieldset",
+          { className: "dialog-fieldset" },
+          h("legend", { className: "dialog-label" }, HISTORY_QUESTION),
+          HISTORY_OPTIONS.map((o) =>
+            h(
+              "label",
+              { className: "dialog-radio-row" },
+              h("input", {
+                type: "radio",
+                name: "enc-history",
+                value: o.id,
+                checked: o.id === history,
+                disabled: !features[o.id],
+                onChange: () => (history = o.id),
+              }),
+              h(
+                "span",
+                {},
+                h("span", {}, o.label, o.recommended ? h("span", { className: "text-caption" }, " (recommended)") : null),
+                h("span", { className: "text-caption", style: "display:block" }, o.text),
+                features[o.id] ? null : h("span", { className: "text-caption", style: "display:block" }, NEEDS_NEWER)
+              )
+            )
+          )
+        )
+      : null;
+    const renameLink = h(
+      "button",
+      {
+        type: "button",
+        className: "btn-link",
+        role: "switch",
+        "aria-checked": "false",
+        disabled: !features.renameExisting,
+        onClick: (e) => {
+          rename = !rename;
+          e.currentTarget.setAttribute("aria-checked", String(rename));
+        },
+      },
+      features.renameExisting ? `Rename ${renameCount} existing notes too` : "Rename existing notes too"
+    );
+    card.append(
+      h(
+        "form",
+        {
+          onSubmit: async (e) => {
+            e.preventDefault();
+            if (submit.disabled) return;
+            submit.disabled = true;
+            error.show(null);
+            host.progress("Encrypting the vault");
+            try {
+              await c.encryptVault({ history, renameExisting: rename });
+              close();
+              done?.();
+            } catch (err) {
+              error.show(err);
+              submit.disabled = false;
+            } finally {
+              host.progress("");
+            }
+          },
+        },
+        h("div", { className: "dialog-title" }, title),
+        h("p", { className: "dialog-hint" }, VAULT_DIALOG_TEXT),
+        question,
+        // The second sentence only where the app can keep it true.
+        h(
+          "p",
+          { className: "dialog-error", role: "note" },
+          features.nameById ? `${NAMES_TEXT} ${NAMES_BY_ID_TEXT} ` : `${NAMES_TEXT} `,
+          renameLink,
+          features.renameExisting ? null : ` ${NEEDS_NEWER}`
+        ),
+        st.usesLfs ? h("p", { className: "dialog-error", role: "alert" }, LFS_TEXT) : null,
+        error.node,
+        actions(close, submit)
+      )
+    );
+  });
+}
+
+/** Settings → Encryption's vault section: what `draw` appends. `unlockError` is the last Unlock's error, kept across redraws. */
+async function vaultSection(c, host, ctx, state, redraw) {
+  const parts = [h("div", { className: "section-title section-title-secondary" }, VAULT_SECTION)];
+  const fail = (err) => host.toast(messageOf(err), "error");
+  let st;
+  try {
+    st = await c.vaultStatus();
+  } catch (err) {
+    parts.push(h("p", { className: "form-error" }, messageOf(err)));
+    return parts;
+  }
+  if (!st.encrypted) {
+    parts.push(
+      h("p", { className: "text-caption" }, VAULT_TEXT),
+      h(
+        "div",
+        { className: "btn-row" },
+        h(
+          "button",
+          { type: "button", className: "btn", disabled: !ctx.keys.signing, onClick: () => void openEncryptVaultDialog(c, host, redraw).catch(fail) },
+          "Encrypt vault…"
+        )
+      )
+    );
+    return parts;
+  }
+  const busy = (btn, run) => async () => {
+    btn.disabled = true;
+    state.unlockError = null;
+    try {
+      await run();
+    } catch (err) {
+      if (err?.code === "noMemberKey") state.unlockError = err;
+      else fail(err);
+    }
+    redraw();
+  };
+  const toggle = h("button", { type: "button", className: "btn" }, st.unlocked ? "Lock" : "Unlock");
+  toggle.addEventListener("click", busy(toggle, () => (st.unlocked ? c.lockVault() : c.unlockVault())));
+  parts.push(h("div", { className: "dialog-row" }, h("span", {}, st.unlocked ? "Encrypted · unlocked on this Mac" : "Encrypted · locked on this Mac"), toggle));
+  const noKey = state.unlockError;
+  if (noKey && !st.unlocked) {
+    parts.push(
+      h(
+        "p",
+        { className: "form-error", role: "alert" },
+        noKey.fpr ? `${NO_VAULT_KEY_TEXT} ` : messageOf(noKey),
+        noKey.fpr ? h("code", {}, formatFpr(noKey.fpr)) : null,
+        noKey.fpr ? " " : null,
+        noKey.fpr
+          ? h("button", { type: "button", className: "btn-link", onClick: () => void globalThis.navigator?.clipboard?.writeText(noKey.fpr) }, "Copy")
+          : null
+      )
+    );
+  }
+  for (const m of c.vaultMembers(ctx.md, st.members, ctx.own)) {
+    const remove = async () => {
+      await c.removeVaultMember(m.fpr, m.login).catch(fail);
+      redraw();
+    };
+    parts.push(
+      h(
+        "div",
+        { className: "dialog-row" },
+        h("span", {}, m.login ? `@${m.login} ` : "", h("code", {}, shortFpr(m.fpr)), m.you ? " (you)" : ""),
+        m.you || !st.unlocked ? null : h("button", { type: "button", className: "btn-link", onClick: () => void remove() }, "Remove")
+      )
+    );
+  }
+  parts.push(
+    h(
+      "div",
+      { className: "btn-row" },
+      h(
+        "button",
+        {
+          type: "button",
+          className: "btn",
+          disabled: !st.unlocked,
+          onClick: () => openAddVaultMemberDialog(c, vaultName(host.vault?.current()?.path), redraw),
+        },
+        "Add member"
+      )
+    ),
+    h("p", { className: "text-caption" }, REMOVE_MEMBER_TEXT)
+  );
+  return parts;
+}
+
 /** A row of "Your keys": the key in use and a Change picker over `candidates`. */
 function keyPicker(label, current, candidates, onPick) {
   const text = h("span", {}, current ? keyLabel(candidates.find((k) => k.fpr === current) ?? { fpr: current }) : "Not set");
@@ -868,6 +1293,7 @@ function keyPicker(label, current, candidates, onPick) {
 function renderSettings(c, host, storage, container) {
   let alive = true;
   let drawing = 0;
+  const vaultUi = { unlockError: null };
   const root = h("div", { className: "encryption-settings" });
   container.replaceChildren(root);
   const fail = (err) => host.toast(messageOf(err), "error");
@@ -957,6 +1383,8 @@ function renderSettings(c, host, storage, container) {
       )
     );
 
+    if (host.vault?.current()) parts.push(...(await vaultSection(c, host, ctx, vaultUi, () => void draw())));
+
     const others = await c.networkedPlugins().catch(() => null);
     if (others && others.length > 0) {
       parts.push(
@@ -1006,6 +1434,19 @@ export function activate(host) {
   host.registerCommand({ id: "encrypt-note", label: "Encrypt note", when: c.isPlain, run: encrypt });
   host.registerCommand({ id: "decrypt-note", label: "Decrypt note", when: c.isUnlocked, run: decrypt });
   host.registerCommand({ id: "settings", label: "Encryption settings", run: openSettings });
+
+  // Whole-vault encryption. The palette's Unlock vault shows only in a vault locked on this Mac.
+  const unlockVault = () =>
+    c.unlockVault().catch((err) => {
+      fail(err);
+      if (err?.code === "noMemberKey") openSettings();
+    });
+  host.registerCommand({ id: "unlock-vault", label: "Unlock vault", when: c.isVaultLocked, run: unlockVault });
+  // The core locked-vault notice's Unlock button, where the app offers one (proposed `registerVaultUnlocker`).
+  host.registerVaultUnlocker?.({ label: "Unlock", unlock: () => c.unlockVault() });
+  const refreshVault = () => void c.vaultStatus().catch(() => {});
+  host.vault?.onOpen(refreshVault);
+  if (host.vault?.current()) refreshVault();
 
   // The toolbar: an open lock on a plain note, a filled one on an unlocked encrypted note.
   host.registerToolbarItem({
