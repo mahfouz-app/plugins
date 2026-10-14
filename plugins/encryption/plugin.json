@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "encryption",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "label": "Encryption",
   "description": "Encrypt notes end to end with GPG, readable only by you and the people you choose",
   "mahfouz": ">=0.12.1",
@@ -13,11 +13,11 @@
       "to": "gitbin",
       "artifacts": {
         "darwin-arm64": {
-          "url": "https://github.com/mahfouz-app/plugins/releases/download/encryption-v0.2.0/git-crypt-darwin-arm64.tar.gz",
+          "url": "https://github.com/mahfouz-app/plugins/releases/download/encryption-v0.3.0/git-crypt-darwin-arm64.tar.gz",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         },
         "darwin-x64": {
-          "url": "https://github.com/mahfouz-app/plugins/releases/download/encryption-v0.2.0/git-crypt-darwin-x64.tar.gz",
+          "url": "https://github.com/mahfouz-app/plugins/releases/download/encryption-v0.3.0/git-crypt-darwin-x64.tar.gz",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         }
       }

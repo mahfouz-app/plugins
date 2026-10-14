@@ -206,6 +206,7 @@ test("a changed plugin must raise its version", () => {
   assert.equal(versionBumpError("p", true, "1.0.0", "1.0.1"), null);
   assert.match(versionBumpError("p", true, "1.0.0", "1.0.0"), /must go above 1\.0\.0/);
   assert.match(versionBumpError("p", true, "1.2.0", "1.1.9"), /must go above 1\.2\.0/);
+  assert.match(versionBumpError("p", true, "1.0.0", "1.0.0", "origin/main"), /^plugins\/p: changed since origin\/main/);
 });
 
 function git(root, ...args) {
@@ -224,11 +225,45 @@ test("--base finds changed plugins through git", async () => {
 
   const errors = await check(root, { base: "main", log: quiet });
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /^plugins\/a: changed since the base branch/);
+  assert.match(errors[0], /^plugins\/a: changed since main/);
 
   fs.writeFileSync(path.join(root, "plugins", "a", "plugin.json"), JSON.stringify(minimal("a", { version: "1.0.1" })));
   git(root, "commit", "-qam", "bump");
   assert.deepEqual(await check(root, { base: "main", log: quiet }), []);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("--base main: a stack of PRs bumps against the release, not each other", async () => {
+  const root = tempRegistry({ a: { manifest: minimal("a") } });
+  git(root, "init", "-q", "-b", "main");
+  git(root, "add", "-A");
+  git(root, "commit", "-qm", "release");
+  // First PR of a stack: a new plugin, and a bump of the released one.
+  git(root, "checkout", "-q", "-b", "pr1");
+  fs.mkdirSync(path.join(root, "plugins", "n"));
+  fs.writeFileSync(path.join(root, "plugins", "n", "plugin.json"), JSON.stringify(minimal("n")));
+  fs.writeFileSync(path.join(root, "plugins", "a", "plugin.json"), JSON.stringify(minimal("a", { version: "1.1.0" })));
+  git(root, "add", "-A");
+  git(root, "commit", "-qm", "pr1");
+  // Second PR, stacked on the first, changes both again with no bump.
+  git(root, "checkout", "-q", "-b", "pr2");
+  fs.writeFileSync(path.join(root, "plugins", "n", "index.js"), "more");
+  fs.writeFileSync(path.join(root, "plugins", "a", "index.js"), "more");
+  git(root, "add", "-A");
+  git(root, "commit", "-qm", "pr2");
+
+  // Against the release line: n isn't on main yet, a is above main's 1.0.0.
+  assert.deepEqual(await check(root, { base: "main", log: quiet }), []);
+  // Against the stacked base, both would have to bump again.
+  const stacked = await check(root, { base: "pr1", log: quiet });
+  assert.deepEqual(stacked.map((e) => e.split(",")[0]), ["plugins/a: changed since pr1", "plugins/n: changed since pr1"]);
+
+  // A plugin on main still needs its bump: put a back to main's version.
+  fs.writeFileSync(path.join(root, "plugins", "a", "plugin.json"), JSON.stringify(minimal("a")));
+  git(root, "commit", "-qam", "undo the bump");
+  const errors = await check(root, { base: "main", log: quiet });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /^plugins\/a: changed since main, so its version must go above 1\.0\.0/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
