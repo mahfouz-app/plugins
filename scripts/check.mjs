@@ -51,6 +51,9 @@ export const FIELD_SINCE = {
   // plugin's own `.config/<configFile>`) arrive in 0.12.0 with it; an app
   // that doesn't parse it rejects the field like any unknown one.
   configFile: "0.12.0",
+  // A Markdown file in the plugin the user accepts before installing or
+  // enabling it (the app's install and enable dialogs show it).
+  terms: "0.13.0",
 };
 // A file directly under the vault's `.config/`: a lowercase name ending in
 // `.md`, no directory part, so a plugin can only name its own file there.
@@ -153,7 +156,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
 
   onlyKeys(
     m,
-    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets", "configFile"],
+    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets", "configFile", "terms"],
     where,
     errors
   );
@@ -258,6 +261,14 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
     paths.push(m.frontend);
     if (isContained(m.frontend) && !fs.existsSync(path.join(dir, m.frontend))) {
       errors.push(`${where}: frontend ${m.frontend} doesn't exist`);
+    }
+  }
+
+  if ("terms" in m) {
+    if (typeof m.terms !== "string" || !m.terms.endsWith(".md")) errors.push(`${where}: terms must be a .md file`);
+    else {
+      paths.push(m.terms);
+      if (isContained(m.terms) && !fs.existsSync(path.join(dir, m.terms))) errors.push(`${where}: terms ${m.terms} doesn't exist`);
     }
   }
 

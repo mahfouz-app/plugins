@@ -18,7 +18,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 | `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.12.0 |
-| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.12.1 (the first release with the host APIs it uses) |
+| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.13.0 (the first release that reads its manifest's `terms`) |
 
 `npm test` runs the plugins' tests and the registry checker's with `node --test` (no
 dependencies).
@@ -91,6 +91,13 @@ a repository `git-crypt` encrypted. CI checks both directions against the real C
   their public key (imported from `https://github.com/<login>.gpg`). **Removing a member doesn't
   rotate the key**: whoever had it can still decrypt everything committed with it, past and
   future, until the key changes.
+- **Terms:** `terms.md` (the manifest's `terms`) states git-crypt's limits: names, commit
+  messages and change times stay readable, the key can't be rotated, earlier commits stay
+  unencrypted, no Git LFS and terminal commands need the real `git-crypt`, and every installed
+  plugin can ask your keys to decrypt (set gpg-agent to ask for the passphrase or a YubiKey touch
+  on every decrypt). The app shows it at install and enable; the *Encrypt vault* dialog shows it
+  too and keeps *Encrypt vault* disabled until "I accept these terms" is ticked, or when the file
+  can't be read.
 - **What stays visible:** file and folder names, file sizes (to the byte), which files changed
   in each commit, commit messages, authors and dates, and branch names. Two identical files
   give identical ciphertext. Encrypt the content, not the shape.
@@ -207,7 +214,8 @@ approve the update.
   "sidecar": { "runtime": "node", "entry": "sidecar.js" },
   "network": { "hosts": ["api.example.com", "*.files.example.com"] },
   "secrets": { "token": { "hosts": ["api.example.com"] } },
-  "configFile": "example.md"
+  "configFile": "example.md",
+  "terms": "terms.md"
 }
 ```
 
@@ -233,6 +241,7 @@ relative and stay inside the plugin's directory.
 | `secrets` | `{ "<name>": { "hosts": [...] } }`: session secrets the user pastes into the app (an importer's `credential.secretName`), each bound to the hosts it may be sent to. Every host must also be in `network.hosts`; names follow the id rules. The app attaches the secret as a bearer token only to those hosts and never hands it to the plugin. Needs `"mahfouz": ">=0.12.0"`. |
 | `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the plugin's `node` for the user's platform, or the user's Node when there isn't one. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
 | `configFile` | The one file under the vault's `.config/` the plugin may read and write through the host (`encryption.md` → `.config/encryption.md`): a lowercase name of letters, digits and dashes ending in `.md`. Needs `"mahfouz": ">=0.12.0"`. |
+| `terms` | A Markdown file in the plugin the user has to accept before installing or enabling it: what the plugin can't do or protect, in plain words. The app shows it in its install and enable dialogs, and the plugin may show the same file in its own dialogs by reading `plugin.json`'s `terms` next to its module. `## ` headings, `- ` bullets and paragraphs only. Needs `"mahfouz": ">=0.13.0"`. |
 
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
 installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).

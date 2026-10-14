@@ -3,6 +3,7 @@
 // are the app's own (src/core/src/crypto/decrypt.test.ts).
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import {
   activate,
   addGroup,
@@ -25,6 +26,8 @@ import {
   skippedOf,
   STORAGE_KEY,
   LFS_TEXT,
+  loadTerms,
+  parseTerms,
   uidName,
 } from "./index.js";
 
@@ -785,4 +788,51 @@ test("vault members get their logins from the config's rows, else show the finge
     { fpr: ADA, login: "ada", you: false },
     { fpr: BOSS, login: "", you: false },
   ]);
+});
+
+// ---- terms ------------------------------------------------------------------------------
+
+test("parseTerms: the first heading is the title, bullets join their indented lines, the rest are paragraphs", () => {
+  const md = "## Limits\n\nIntro line\nstill intro.\n\n- one\n  more of one\n* two\n\nAfter.\n### Next\n- three\r\n";
+  assert.deepEqual(parseTerms(md), {
+    title: "Limits",
+    blocks: [
+      { type: "p", text: "Intro line still intro." },
+      { type: "ul", items: ["one more of one", "two"] },
+      { type: "p", text: "After." },
+      { type: "h", text: "Next" },
+      { type: "ul", items: ["three"] },
+    ],
+  });
+  assert.deepEqual(parseTerms(""), { title: null, blocks: [] });
+});
+
+test("the shipped terms are the manifest's, a title and git-crypt's five limits", () => {
+  const manifest = JSON.parse(readFileSync(new URL("./plugin.json", import.meta.url), "utf8"));
+  assert.equal(manifest.terms, "terms.md");
+  const terms = parseTerms(readFileSync(new URL(`./${manifest.terms}`, import.meta.url), "utf8"));
+  assert.equal(terms.title, "What git-crypt doesn't protect");
+  assert.equal(terms.blocks.length, 1);
+  assert.equal(terms.blocks[0].items.length, 5);
+});
+
+test("loadTerms reads the file plugin.json declares, next to the module, uncached", async () => {
+  const base = "http://127.0.0.1:9/mahfouz/encryption/index.js?v=3";
+  const seen = [];
+  const files = { "plugin.json": JSON.stringify({ terms: "limits.md" }), "limits.md": "## T\n- a\n" };
+  const fetchFn = async (url, opts) => {
+    seen.push([String(url), opts.cache]);
+    const name = new URL(url).pathname.split("/").pop();
+    const body = files[name];
+    return { ok: body != null, status: body != null ? 200 : 404, json: async () => JSON.parse(body), text: async () => body };
+  };
+  assert.deepEqual(await loadTerms(base, fetchFn), { title: "T", blocks: [{ type: "ul", items: ["a"] }] });
+  assert.deepEqual(seen, [
+    ["http://127.0.0.1:9/mahfouz/encryption/plugin.json", "no-store"],
+    ["http://127.0.0.1:9/mahfouz/encryption/limits.md", "no-store"],
+  ]);
+  files["plugin.json"] = "{}";
+  await assert.rejects(loadTerms(base, fetchFn), /declares no terms/);
+  files["plugin.json"] = JSON.stringify({ terms: "gone.md" });
+  await assert.rejects(loadTerms(base, fetchFn), /gone\.md: HTTP 404/);
 });

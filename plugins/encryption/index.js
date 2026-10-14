@@ -72,7 +72,8 @@ export const HISTORY_OPTIONS = [
   },
   { id: "now", label: "Encrypt from now on", text: "Earlier commits stay unencrypted on GitHub." },
 ];
-export const NAMES_TEXT = "File and folder names and commit messages stay readable on GitHub.";
+export const TERMS_ACCEPT = "I accept these terms";
+export const TERMS_LOAD_ERROR = "Couldn't load git-crypt's limits, so the vault can't be encrypted.";
 export const NAMES_BY_ID_TEXT = "New notes will be named by their ID, and commit messages won't name notes.";
 export const REMOVE_MEMBER_TEXT =
   "Removing a member stops new access only if the key changes; git-crypt can't rotate it. To shut someone out, move the vault to a fresh repository.";
@@ -734,6 +735,62 @@ export function createController(host, storage) {
   };
 }
 
+// ---- terms ----------------------------------------------------------------------------
+//
+// git-crypt's limits are the manifest's `terms` file, the one Markdown the app
+// shows at install and enable; the Encrypt vault dialog shows the same file.
+
+/**
+ * The terms Markdown as `{title, blocks}`: the first `## ` heading is the
+ * title, later ones are `{type: "h"}` blocks; `- ` (or `* `) lines are bullets,
+ * indented lines continue them, and anything else forms paragraphs. Text only:
+ * inline Markdown is shown as written.
+ */
+export function parseTerms(md) {
+  let title = null;
+  const blocks = [];
+  let list = null;
+  let para = null;
+  for (const raw of String(md).split(/\r?\n/)) {
+    const line = raw.trim();
+    const heading = /^#{1,6}\s+(.+?)\s*#*$/.exec(line);
+    const bullet = /^[-*]\s+(.*)$/.exec(line);
+    if (!line) {
+      para = null;
+      if (list) list.done = true;
+    } else if (heading) {
+      list = para = null;
+      if (title === null && !blocks.length) title = heading[1];
+      else blocks.push({ type: "h", text: heading[1] });
+    } else if (bullet) {
+      para = null;
+      if (!list || list.done) blocks.push((list = { type: "ul", items: [] }));
+      list.items.push(bullet[1]);
+    } else if (list && !list.done && /^\s/.test(raw)) {
+      list.items[list.items.length - 1] += ` ${line}`;
+    } else if (para) {
+      para.text += ` ${line}`;
+    } else {
+      list = null;
+      blocks.push((para = { type: "p", text: line }));
+    }
+  }
+  for (const b of blocks) delete b.done;
+  return { title, blocks };
+}
+
+/** Reads the terms file this plugin's manifest declares, next to this module. */
+export async function loadTerms(base = import.meta.url, fetchFn = (u, o) => fetch(u, o)) {
+  const get = async (name) => {
+    const res = await fetchFn(new URL(name, base), { cache: "no-store" });
+    if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+    return res;
+  };
+  const manifest = await (await get("plugin.json")).json();
+  if (typeof manifest.terms !== "string") throw new Error("plugin.json declares no terms");
+  return parseTerms(await (await get(manifest.terms)).text());
+}
+
 // ---- DOM ------------------------------------------------------------------------------
 //
 // Dialogs are the app's (`host.ui.openDialog`, `host.ui.confirm`) and the
@@ -995,15 +1052,32 @@ function openNewGroupDialog(c, host, keys, done) {
   });
 }
 
+/** The terms as dialog content: the title in bold, then the blocks. */
+function termsNodes({ title, blocks }) {
+  return h(
+    "div",
+    {},
+    title ? h("p", { className: "dialog-label" }, title) : null,
+    blocks.map((b) =>
+      b.type === "ul"
+        ? h("ul", { className: "dialog-hint", style: "padding-left:1.25em;margin:4px 0 8px" }, b.items.map((t) => h("li", { style: "margin-bottom:4px" }, t)))
+        : h("p", { className: b.type === "h" ? "dialog-label" : "dialog-hint" }, b.text)
+    )
+  );
+}
+
 /** The Encrypt “<vault>” dialog; `done` runs after the vault was encrypted. */
 async function openEncryptVaultDialog(c, host, done) {
   const st = await c.vaultStatus();
   const features = c.vaultFeatures();
   const renameCount = features.renameExisting ? await host.notes.countRenamableById() : null;
+  const terms = await loadTerms().catch(() => null);
   const title = `Encrypt “${vaultName(host.vault?.current()?.path)}”`;
   openDialog(host, title, (card, close) => {
     const error = errorLine();
-    const submit = h("button", { type: "submit", className: "dialog-submit", disabled: !!st.usesLfs }, "Encrypt vault");
+    let accepted = false;
+    const submit = h("button", { type: "submit", className: "dialog-submit", disabled: true }, "Encrypt vault");
+    const sync = () => (submit.disabled = !!st.usesLfs || !terms || !accepted);
     // Only the options this app can do; the recommended one first.
     const options = HISTORY_OPTIONS.filter((o) => features[o.id]);
     let history = st.hasRemote ? options[0].id : "now";
@@ -1066,7 +1140,7 @@ async function openEncryptVaultDialog(c, host, done) {
               done?.();
             } catch (err) {
               error.show(err);
-              submit.disabled = false;
+              sync();
             } finally {
               host.progress("");
             }
@@ -1074,15 +1148,32 @@ async function openEncryptVaultDialog(c, host, done) {
         },
         h("p", { className: "dialog-hint" }, VAULT_DIALOG_TEXT),
         question,
-        // The second sentence only where the app can keep it true.
-        h(
-          "p",
-          { className: "dialog-error", role: "note" },
-          features.nameById ? `${NAMES_TEXT} ${NAMES_BY_ID_TEXT}` : NAMES_TEXT,
-          renameLink ? " " : null,
-          renameLink
-        ),
+        terms ? termsNodes(terms) : h("p", { className: "dialog-error", role: "alert" }, TERMS_LOAD_ERROR),
+        // The naming sentence only where the app can keep it true.
+        features.nameById || renameLink
+          ? h(
+              "p",
+              { className: "dialog-hint" },
+              features.nameById ? NAMES_BY_ID_TEXT : null,
+              features.nameById && renameLink ? " " : null,
+              renameLink
+            )
+          : null,
         st.usesLfs ? h("p", { className: "dialog-error", role: "alert" }, LFS_TEXT) : null,
+        terms && !st.usesLfs
+          ? h(
+              "label",
+              { className: "dialog-checkbox-row" },
+              h("input", {
+                type: "checkbox",
+                onChange: (e) => {
+                  accepted = e.currentTarget.checked;
+                  sync();
+                },
+              }),
+              h("span", {}, TERMS_ACCEPT)
+            )
+          : null,
         error.node,
         actions(close, submit)
       )
