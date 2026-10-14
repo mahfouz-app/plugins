@@ -1454,7 +1454,8 @@ export function activate(host) {
         fail(err);
         if (err?.code === "noMemberKey") openSettings();
       });
-    host.registerCommand({ id: "unlock-vault", label: "Unlock vault", when: c.isVaultLocked, run: unlockVault });
+    // A vault command: a locked vault shows no notes, so a note command would never be offered.
+    host.registerCommand({ id: "unlock-vault", label: "Unlock vault", scope: "vault", when: (vault) => vault.locked === true, run: unlockVault });
     host.registerVaultUnlocker?.({ label: "Unlock", unlock: () => c.unlockVault() });
   }
   const refreshVault = () => void c.vaultStatus().catch(() => {});

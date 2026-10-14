@@ -605,6 +605,15 @@ test("activate registers the codec, a Settings tab, the commands and the toolbar
   assert.deepEqual(registered.unlockers.map((u) => u.label), ["Unlock"]);
   registered.commands.find((c) => c.id === "settings").run();
   assert.deepEqual(registered.opened, ["encryption"]);
+  // Unlock vault is a vault command, offered in a vault git-crypt keeps locked (which shows no notes).
+  assert.deepEqual(
+    registered.commands.filter((c) => c.scope === "vault").map((c) => c.id),
+    ["unlock-vault"]
+  );
+  const unlock = registered.commands.find((c) => c.id === "unlock-vault");
+  const vault = { vaultId: "v", name: "V", path: "/v" };
+  assert.equal(unlock.when({ ...vault, locked: true }), true);
+  assert.equal(unlock.when({ ...vault, locked: false }), false);
   deactivate();
 });
 
