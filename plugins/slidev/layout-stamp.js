@@ -17,6 +17,14 @@ export function slideLayout(frontmatter, defaults, page) {
   return layout;
 }
 
+/** The deck's `defaults`, read where the server reads them: the first
+ * slide's own frontmatter (`slides` is the client's list, `$nav.slides`).
+ * Not `configs.defaults`: `configs` is the entry stub's headmatter, and the
+ * note's `defaults:` comes in on its first slide. */
+export function deckDefaults(slides) {
+  return slides?.[0]?.meta?.slide?.frontmatter?.defaults;
+}
+
 /** A slide's `class:` (a string or a list) as space-separated tokens, keeping
  * only plain names an attribute selector can match. */
 export function slideClass(value) {

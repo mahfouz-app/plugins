@@ -40,8 +40,13 @@
 //   `data-layout`/`data-class` there; Vue only patches the attributes it
 //   binds on it (`data-slidev-no`, `class`, `style`, `lang`).
 // - The server picks a slide's layout as `(frontmatter.layout ??
-//   defaults.layout) || (slide 1 ? "cover" : "default")`, and `default` for
-//   an unknown name; the stamp mirrors the first part (layout-stamp.js).
+//   slides[0].frontmatter.defaults.layout) || (slide 1 ? "cover" :
+//   "default")`, and `default` for an unknown name; the stamp mirrors the
+//   first part (layout-stamp.js). `slides[0]` is the first kept slide: the
+//   note's first slide (the stub's headmatter spread over its frontmatter),
+//   or the next shown one when that's hidden. So `defaults` comes from the
+//   note, never `configs` (the stub's own headmatter, which has none);
+//   slide-top.vue reads it from `$nav.slides`, the same list in order.
 //   The client can't check a name against the layouts: `#slidev/layouts`
 //   generates `import __layout_two-cols …`, a SyntaxError that stops the
 //   whole deck, so no layer component may import it.
