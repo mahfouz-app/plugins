@@ -16,6 +16,7 @@ import type {
   BodyCodec,
   BodyCodecContext,
   CommandNote,
+  CommitFilesResult,
   CreatedRepo,
   EncryptionSwitch,
   ExportFormat,
@@ -55,6 +56,7 @@ export type {
   BodyCodec,
   BodyCodecContext,
   CommandNote,
+  CommitFilesResult,
   CreatedRepo,
   EncryptionSwitch,
   EmbedContext,
@@ -84,6 +86,8 @@ export type {
   PluginTabType,
   PublishRenderer,
   ResolvedSlidesTemplate,
+  SlidesPreviewRequest,
+  SlidesPreviewResult,
   ToolbarButton,
   VaultInfo,
 };
@@ -342,18 +346,20 @@ export interface MahfouzPluginHost {
      * origin goes with it. Only `.gitattributes`, files under `.git-crypt/`,
      * this plugin's own `.config/<configFile>` and note files: anything
      * else, an absolute path or a `..` refuses the whole call with nothing
-     * committed, as does a vault git-crypt has locked. Resolves whether
-     * anything was committed.
+     * committed, as does a vault git-crypt has locked. A disk-only note (one
+     * the user keeps out of commits) is skipped, never committed: its path
+     * is listed in `skipped`. Resolves with whether anything was committed.
      */
-    commitFiles(paths: string[], message: string): Promise<boolean>;
+    commitFiles(paths: string[], message: string): Promise<CommitFilesResult>;
   };
   /**
    * This plugin's own config file in the open vault: `.config/<configFile>`,
    * where `configFile` is its manifest's (`^[a-z0-9-]+\.md$`, never one of
-   * the app's own: settings, bookmarks, fields, attributes, slides). Every
-   * collaborator reads it; keep it readable Markdown. Refused for a plugin
-   * that declares none, or when another installed plugin declares the
-   * same file. Desktop only, and only while the vault has this plugin on.
+   * the app's own: settings, bookmarks, fields, attributes, slides,
+   * dictionary, commands). Every collaborator reads it; keep it readable
+   * Markdown. Refused for a plugin that declares none, when another
+   * installed plugin declares the same file, and when `.config` or the file
+   * is a link. Desktop only, and only while the vault has this plugin on.
    */
   config?: {
     /** The file's text, or null when it doesn't exist (or the vault is locked). */
@@ -370,8 +376,10 @@ export interface MahfouzPluginHost {
      * Stages `.gitattributes`, `.git-crypt/` and every tracked file cleaned
      * afresh (`git add --renormalize .`), then commits them with `message`
      * (the vault's own pending edits are committed first, apart). Refused
-     * while the vault is locked or a git operation is stopped, and when a
-     * file git-crypt should encrypt would be committed in plaintext.
+     * while the vault is locked or a git operation is stopped, while any
+     * other tracked file holds an uncommitted edit (a disk-only note's
+     * included: it would be swept into this commit), and when a file
+     * git-crypt should encrypt would be committed in plaintext.
      * Resolves whether it committed.
      */
     renormalize(message: string): Promise<boolean>;
@@ -380,8 +388,10 @@ export interface MahfouzPluginHost {
      * smudge runs (after an unlock: plaintext) or doesn't (with its config
      * removed, a lock: ciphertext), then rebuilds the vault's index. Runs
      * with the vault's auto-commit paused and file watching off. Refused
-     * while anything in the vault is uncommitted. Resolves with the paths
-     * written.
+     * while anything in the vault is uncommitted. When the checkout fails
+     * (a smudge that refuses), the files are put back as HEAD stores them
+     * before it rejects, so nothing is left deleted. Resolves with the
+     * paths written.
      */
     forceCheckout(): Promise<string[]>;
   };

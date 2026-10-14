@@ -375,6 +375,12 @@ export interface VaultInfo {
   path: string;
 }
 
+/** What `host.vault.commitFiles` resolves with: whether it committed, and the disk-only notes' paths it left out (the app's `src/core/src/db/vaultGitOps.ts`). */
+export interface CommitFilesResult {
+  committed: boolean;
+  skipped: string[];
+}
+
 /** What `host.notes.setEncryption` takes. */
 export type EncryptionSwitch = { group: string; armored: string; expected: string } | { plaintext: string; expected: string };
 
