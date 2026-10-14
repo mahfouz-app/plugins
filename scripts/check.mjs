@@ -4,7 +4,12 @@
 //
 //   node scripts/check.mjs                  manifests and files
 //   node scripts/check.mjs --base <ref>     …plus: every plugin changed since
-//                                           <ref> raised its version
+//                                           <ref> raised its version above
+//                                           <ref>'s. Pass the release line
+//                                           (origin/main), never a stacked
+//                                           PR's base: a plugin that isn't on
+//                                           main yet needs no bump, one that
+//                                           is must go above main's version
 //   node scripts/check.mjs --artifacts      …plus: every download artifact
 //                                           exists and matches its sha256
 //                                           (with --base: only the plugins
@@ -414,14 +419,16 @@ export function validateRegistry(info) {
 
 // ---- versions ---------------------------------------------------------------------
 
-/** The error for a plugin that changed since `base` without raising its
- * version, or null. `baseVersion` is null for a plugin new since `base`. */
-export function versionBumpError(id, changed, baseVersion, version) {
+/** The error for a plugin that changed since `base` (the release line,
+ * `origin/main`) without raising its version above the one released there,
+ * or null. `baseVersion` is null for a plugin `base` doesn't have yet: it's
+ * unreleased, so the PRs that build it up need no bump of their own. */
+export function versionBumpError(id, changed, baseVersion, version, base = "main") {
   if (!changed || baseVersion === null) return null;
   const cmp = compareVersions(version, baseVersion);
   if (cmp === null) return null; // reported by the manifest check
   if (cmp <= 0) {
-    return `plugins/${id}: changed since the base branch, so its version must go above ${baseVersion} (it's ${version}) — users only get an update when the version changes`;
+    return `plugins/${id}: changed since ${base}, so its version must go above ${baseVersion}, the released one (it's ${version}) — users only get an update when the version changes`;
   }
   return null;
 }
@@ -516,7 +523,7 @@ export async function check(root, { base = null, artifacts = false, log = consol
     for (const [id, m] of manifests) {
       const touched = changed.some((p) => p.startsWith(`plugins/${id}/`));
       const before = touched ? baseManifest(root, base, id) : null;
-      const error = versionBumpError(id, touched, before?.version ?? null, m.version);
+      const error = versionBumpError(id, touched, before?.version ?? null, m.version, base);
       if (error) errors.push(error);
     }
     log(`checked version bumps against ${base}`);
