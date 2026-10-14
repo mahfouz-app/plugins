@@ -340,8 +340,10 @@ note editor is open.
   adds a vault command: it gets the open vault (`{ vaultId, name, path, locked }`) instead of a
   note, and the palette lists it (and its shortcut runs) whenever a vault is open, with no note
   too, such as a vault git-crypt keeps locked (`locked`), which shows none. `when(vault)` hides it
-  for a vault it doesn't apply to; it's never in note menus. Needs the Mahfouz release that ships
-  vault commands; older apps treat one as a note command.
+  for a vault it doesn't apply to; it's never in note menus. Vault commands need Mahfouz 0.12.0:
+  declare `"mahfouz": ">=0.12.0"` (an older app runs one as a note command). A `scope` the app
+  doesn't know skips that command, with a console warning. One command holds a key: a later
+  command bound to the same keys gets none, even where the first can't run.
 - `host.ui.openOverlay({ title, render(container, { close }) })` covers the whole window (native
   full screen). The app handles Esc, View → Stop Presenting and the close button.
 - `host.registerExportFormat({ id, label, export(request, progress) })` adds a format to the Export

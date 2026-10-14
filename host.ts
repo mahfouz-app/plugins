@@ -28,7 +28,7 @@ interface CommandBase {
   label: string;
   /** Default binding, e.g. `Mod+Shift+P`. */
   shortcut?: string;
-  /** `false` leaves it out of the command palette (the note menu and its shortcut still run it). */
+  /** `false` leaves it out of the command palette (its shortcut, and a note command's note menu, still run it). */
   palette?: false;
 }
 
