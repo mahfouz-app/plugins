@@ -42,6 +42,10 @@
 // - The server picks a slide's layout as `(frontmatter.layout ??
 //   defaults.layout) || (slide 1 ? "cover" : "default")`, and `default` for
 //   an unknown name; the stamp mirrors the first part (layout-stamp.js).
+//   `defaults` there is `data.slides[0].frontmatter.defaults`, the note's
+//   own headmatter (or the first shown slide's), not the stub's: the client
+//   reads it from `$nav.slides[0].meta.slide.frontmatter`, since
+//   `configs.defaults` is the stub's and always unset.
 //   The client can't check a name against the layouts: `#slidev/layouts`
 //   generates `import __layout_two-cols …`, a SyntaxError that stops the
 //   whole deck, so no layer component may import it.

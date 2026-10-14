@@ -12,11 +12,11 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { configs, useSlideContext } from '@slidev/client'
 import { layerHtml } from './header-footer.js'
-import { slideClass, slideLayout, stampPage } from './layout-stamp.js'
+import { deckDefaults, slideClass, slideLayout, stampPage } from './layout-stamp.js'
 
 const { $page, $nav, $frontmatter } = useSlideContext()
 const anchor = ref(null)
-const layout = computed(() => slideLayout($frontmatter, configs.defaults, $page.value))
+const layout = computed(() => slideLayout($frontmatter, deckDefaults($nav.value), $page.value))
 const cls = computed(() => slideClass($frontmatter?.class))
 // The page is the wrapper this component renders in; `flush: 'post'` runs
 // after Vue has patched it, so a re-render can't race the stamp.

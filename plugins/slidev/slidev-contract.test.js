@@ -77,6 +77,19 @@ test("the server's layout rule: own layout, then defaults, then cover for slide 
   assert.match(serve, /if \(!layouts\[layoutName\]\) \{[\s\S]{0,400}?layoutName = "default";/);
 });
 
+test("the client reaches slide 1's own frontmatter defaults through $nav.slides", withSlidev, () => {
+  const serve = dist("serve");
+  // Each slide's frontmatter is the stub's headmatter defaults under its own.
+  assert.match(serve, /function getFrontmatter\(pageNo\) \{\s*return \{\s*\.\.\.data\.headmatter\?\.defaults \|\| \{\},\s*\.\.\.data\.slides\[pageNo\]\?\.frontmatter \|\| \{\}/);
+  // The slide list is data.slides, in order, each with meta.slide.frontmatter.
+  assert.match(serve, /const slides = data\.slides\.map\(\(_, idx\) => \{/);
+  assert.match(serve, /"  slide: \{",\s*`    \.\.\.\(\$\{JSON\.stringify\(slideBase\)\}\),`,\s*`    frontmatter,`/);
+  // The context is reactive, so $nav.value.slides is the unwrapped list, in Present and print.
+  assert.match(read(client, "setup", "root.ts"), /const context = reactive\(\{\s*nav: useNav\(\),/);
+  assert.match(read(client, "internals", "PrintSlideClick.vue"), /provideLocal\(injectionSlidevContext, reactive\(\{\s*nav,/);
+  assert.match(read(client, "composables", "useNav.ts"), /\n    slides,\n/);
+});
+
 test("changing fonts restarts the dev server; colorSchema doesn't", withSlidev, () => {
   const fields = /const CONFIG_RESTART_FIELDS = \[([^\]]*)\]/.exec(read(cli, "dist", "cli.mjs"));
   assert.ok(fields, "CONFIG_RESTART_FIELDS");
