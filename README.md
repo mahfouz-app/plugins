@@ -63,16 +63,18 @@ fails until they match. CI also runs the crate's `cargo fmt --check`, clippy and
 installed, so the tests against the real gpg run there.
 
 **TODO before the first merge:** `plugin.json`'s `sha256` values are placeholders (all zeros)
-until `encryption-v0.1.0` is cut.
+until `encryption-v0.3.0` is cut.
 
 ## Releasing
 
 `main` is the release: every Mahfouz install pulls this repository at launch, and shows **Update
 available** for any plugin whose `version` differs from the one it installed. So:
 
-1. **Change a plugin → raise its `version`** (semver) in the same PR. Without it, nobody gets the
-   change. CI fails a PR that changes anything under `plugins/<id>/` without raising that
-   plugin's version above the base branch's.
+1. **Change a plugin → raise its `version`** (semver) above the one on `main`. Without it, nobody
+   gets the change. CI fails a PR that changes anything under `plugins/<id>/` while that plugin's
+   version isn't above `main`'s. The comparison is always with `main`, the release line, never a
+   stacked PR's base: a stack of PRs that ships as one release raises the version once, and a
+   plugin that isn't on `main` yet needs no bump until it's released.
 2. **Needs something new from the app → raise `mahfouz`** to the first app release that has it,
    so older apps show "Requires Mahfouz …" instead of a broken plugin. It's a Rust `semver` range:
    comparators separated by commas (`">=0.5.0, <1.0.0"`), not spaces or `||`.
@@ -86,14 +88,14 @@ upstream (npm, GitHub releases) and is pinned by sha256.
 
 `.github/workflows/ci.yml` runs on every PR, on `main`, and weekly:
 
-- `node scripts/check.mjs --base <base branch>`: every manifest against the rules the app's
+- `node scripts/check.mjs --base origin/main`: every manifest against the rules the app's
   parser enforces (fields, slugs, versions, the `mahfouz` range, paths staying inside the plugin,
   dependencies, the files `frontend`/`sidecar`/npm steps name, fields newer than the `mahfouz` range
-  allows), plus the version-bump rule
+  allows), plus the version-bump rule against `main`
 - `npm ci --ignore-scripts` wherever there's a lockfile, so it's known to match its `package.json`
 - `npm test`, after those installs, since a plugin's tests can import its own dependencies
 - `node scripts/check.mjs --artifacts`: downloads each artifact and checks its sha256 (on a PR,
-  only for plugins whose manifest changed; weekly, all of them, in case an upstream URL breaks)
+  only for plugins whose manifest differs from `main`'s; weekly, all of them, in case an upstream URL breaks)
 
 Run the same locally with `npm test && node scripts/check.mjs --base origin/main`.
 

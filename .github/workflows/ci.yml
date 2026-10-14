@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The version check diffs against the base branch.
+          # The version check diffs against origin/main, the release line.
           fetch-depth: 0
 
       # The Slidev plugin's floor (Vite and its plugins need 22.12+).
@@ -30,10 +30,13 @@ jobs:
         with:
           node-version: 22
 
+      # Against main, not the PR's base: in a stack of PRs, a plugin that
+      # isn't released yet needs no bump per PR, and a released one must
+      # still go above main's version.
       - name: Manifests and version bumps
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            node scripts/check.mjs --base "origin/${{ github.base_ref }}"
+            node scripts/check.mjs --base origin/main
           else
             node scripts/check.mjs
           fi
@@ -57,12 +60,12 @@ jobs:
       - name: Tests
         run: npm test
 
-      # On a PR: the artifacts of plugins whose manifest changed. On main and
-      # weekly: all of them.
+      # On a PR: the artifacts of plugins whose manifest differs from main's.
+      # On main and weekly: all of them.
       - name: Artifacts
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            node scripts/check.mjs --artifacts --base "origin/${{ github.base_ref }}"
+            node scripts/check.mjs --artifacts --base origin/main
           else
             node scripts/check.mjs --artifacts
           fi

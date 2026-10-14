@@ -1,6 +1,6 @@
 [package]
 name = "mahfouz-encryption-sidecar"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 publish = false
 description = "The mahfouz/encryption plugin's sidecar: per-note OpenPGP encryption through the user's gpg"
