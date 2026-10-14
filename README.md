@@ -213,8 +213,16 @@ note editor is open.
 ### Commands, overlays, export formats, and other plugins
 
 - `host.registerCommand({ id, label, icon?, noteMenu?, shortcut?, run(note) })` adds a command to
-  note menus (`noteMenu`) and/or a keyboard shortcut. `shortcut` is only the default: users rebind
-  or disable it in `.config/settings.md` under `## Shortcuts`, row `<registry>/<plugin>:<command id>`.
+  the command palette, note menus (`noteMenu`) and/or a keyboard shortcut, acting on the active
+  tab's note (or the note whose menu was opened); it's offered only while there is one.
+  `shortcut` is only the default: users rebind or disable it in `.config/settings.md` under
+  `## Shortcuts`, row `<registry>/<plugin>:<command id>`.
+- `host.registerCommand({ id, label, scope: "vault", when?(vault), shortcut?, run(vault) })` adds a
+  vault command: it gets the open vault (`{ vaultId, name, path, locked }`) instead of a note, and
+  the palette lists it (and its shortcut runs) whenever a vault is open, with no note too, such as
+  a vault git-crypt keeps locked (`locked`), which shows none. `when` hides it for a vault it
+  doesn't apply to; it's never in note menus. An app older than vault commands treats one as a
+  note command.
 - `host.ui.openOverlay({ title, render(container, { close }) })` covers the whole window (native
   full screen). The app handles Esc, View → Stop Presenting and the close button.
 - `host.registerExportFormat({ id, label, export(request, progress) })` adds a format to the Export

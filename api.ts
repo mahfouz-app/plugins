@@ -14,6 +14,7 @@
 import type { EmbedContext, EmbedRenderer } from "./embed";
 import type {
   CommandNote,
+  CommandVault,
   ExportFormat,
   ExportRequest,
   ExportResult,
@@ -30,12 +31,14 @@ import type {
   ImportPage,
   ImportPerson,
   ImportPlan,
+  NoteCommand,
   NoteInfo,
   OverlaySpec,
   PluginCommand,
   ResolvedSlidesTemplate,
   SlidesPreviewRequest,
   SlidesPreviewResult,
+  VaultCommand,
 } from "./host";
 import type { NoteRef, PluginTabContext, PluginTabType, ToolbarButton } from "./tabs";
 import type { ToolbarItem } from "./toolbar";
@@ -48,6 +51,7 @@ type PublishRenderer = (lang: string, source: string) => Promise<string | null>;
 
 export type {
   CommandNote,
+  CommandVault,
   EmbedContext,
   EmbedRenderer,
   ExportFormat,
@@ -66,6 +70,7 @@ export type {
   ImportPage,
   ImportPerson,
   ImportPlan,
+  NoteCommand,
   NoteInfo,
   NoteRef,
   OverlaySpec,
@@ -76,6 +81,7 @@ export type {
   PublishRenderer,
   ResolvedSlidesTemplate,
   ToolbarButton,
+  VaultCommand,
 };
 export type { ToolbarItem, ToolbarDropdownOption } from "./toolbar";
 
@@ -182,9 +188,17 @@ export interface MahfouzPluginHost {
    * handed back as `ctx.arg` (e.g. which block to edit). Pending note saves
    * are flushed first. */
   openTab(type: string, note: NoteRef, arg: string): Promise<void>;
-  /** A command on notes: in note context menus (`noteMenu`) and/or on a
-   * shortcut (`shortcut` is the default; users rebind it in
-   * `.config/settings.md` under `<plugin>:<command id>`). */
+  /** A command, in the command palette and optionally on a shortcut
+   * (`shortcut` is the default; users rebind it in `.config/settings.md`
+   * under `<plugin>:<command id>`). A note command (the default `scope`)
+   * gets the note it acts on and is offered only while the active tab shows
+   * one; with `noteMenu` it's in note context menus too. A vault command
+   * (`scope: "vault"`) gets the open vault (`CommandVault`) and is offered
+   * whenever a vault is open, with no note too, e.g. a git-crypt locked
+   * vault (`vault.locked`), which shows none; its optional `when(vault)`
+   * hides it. Vault commands are never in note menus. Apps before vault
+   * commands treat one as a note command, passing it a `CommandNote` while
+   * a note is open; check `"locked" in target` if that matters. */
   registerCommand(command: PluginCommand): Disposable;
   /** A format in the Export dialog. The app collects the dialog's options,
    * passes the content to render, and offers to save the file you return. */

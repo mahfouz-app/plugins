@@ -9,17 +9,47 @@ export interface CommandNote {
   title: string;
 }
 
-export interface PluginCommand {
+/** The open vault, as a vault command receives it. */
+export interface CommandVault {
+  vaultId: string;
+  name: string;
+  /** Where the vault lives: an absolute directory on desktop, `handle:<id>` or `opfs:<uuid>` on the web. */
+  path: string;
+  /** git-crypt keeps it locked on this device: its notes can't be read, so none are shown. */
+  locked: boolean;
+}
+
+interface CommandBase {
   id: string;
   label: string;
+  /** Default binding, e.g. `Mod+Shift+P`. */
+  shortcut?: string;
+}
+
+/** A command on one note (the default scope). */
+export interface NoteCommand extends CommandBase {
+  scope?: "note";
   /** Inline SVG markup for the menu icon (24×24 viewBox, stroke-based). */
   icon?: string;
   /** Show it in note context menus. */
   noteMenu?: boolean;
-  /** Default binding, e.g. `Mod+Shift+P`. */
-  shortcut?: string;
   run(note: CommandNote): void | Promise<void>;
 }
+
+/** A command on the open vault: in the palette and on its shortcut whenever a vault is open, note or not. */
+export interface VaultCommand extends CommandBase {
+  scope: "vault";
+  /**
+   * Whether the command applies to `vault`: false leaves it out of the
+   * palette, and its shortcut does nothing. Called on every render of the
+   * palette, so keep it cheap and synchronous; one that throws counts as
+   * false.
+   */
+  when?(vault: CommandVault): boolean;
+  run(vault: CommandVault): void | Promise<void>;
+}
+
+export type PluginCommand = NoteCommand | VaultCommand;
 
 export interface ExportRequest {
   note: { vaultId: string; noteId: string; path: string; title: string; attributes: Record<string, string> };
