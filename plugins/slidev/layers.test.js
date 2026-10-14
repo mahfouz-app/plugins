@@ -106,8 +106,11 @@ function mountInPage(Comp) {
   return { page, unmount: () => app.unmount() };
 }
 
-function stub({ configs = {}, page = 1, frontmatter = {} } = {}) {
-  const context = { $page: vue.ref(page), $nav: vue.ref({ total: 3 }), $frontmatter: vue.reactive(frontmatter) };
+/** `slides` is each slide's frontmatter, as Slidev's slide list carries it
+ * (`$nav.slides[i].meta.slide.frontmatter`, reactive and unwrapped). */
+function stub({ configs = {}, page = 1, frontmatter = {}, slides = [{}, {}, {}] } = {}) {
+  const list = slides.map((fm) => ({ meta: { slide: { frontmatter: vue.reactive(fm) } } }));
+  const context = { $page: vue.ref(page), $nav: vue.ref({ total: list.length, slides: list }), $frontmatter: vue.reactive(frontmatter) };
   globalThis.__slidevStub = { configs, context };
   return context;
 }
@@ -136,10 +139,26 @@ test("slide-top stamps slide 1 with no layout as cover, and follows defaults.lay
   const first = mountInPage(SlideTop);
   assert.equal(first.page.dataset.layout, "cover");
   first.unmount();
-  stub({ page: 4, configs: { defaults: { layout: "center" } } });
+  const ctx = stub({ page: 4, slides: [{ defaults: { layout: "center" } }, {}, {}, {}] });
   const later = mountInPage(SlideTop);
   assert.equal(later.page.dataset.layout, "center");
+  // An edit to the note's headmatter hot-reloads slide 1's frontmatter.
+  ctx.$nav.value.slides[0].meta.slide.frontmatter.defaults = { layout: "quote" };
+  await vue.nextTick();
+  assert.equal(later.page.dataset.layout, "quote");
   later.unmount();
+  stub({ page: 1, slides: [{ defaults: { layout: "center" } }] });
+  const cover = mountInPage(SlideTop);
+  assert.equal(cover.page.dataset.layout, "center");
+  cover.unmount();
+});
+
+test("slide-top ignores configs.defaults, the entry stub's, which the server doesn't read", withVue, async () => {
+  const SlideTop = await load("./slide-top.vue");
+  stub({ page: 2, configs: { defaults: { layout: "center" } } });
+  const { page, unmount } = mountInPage(SlideTop);
+  assert.equal(page.dataset.layout, "default");
+  unmount();
 });
 
 /** A FontFaceSet stub: a family's faces exist once `add` is called. */
