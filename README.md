@@ -125,9 +125,6 @@ then copy the two checksums from the workflow's summary into `plugin.json`. CI's
 fails until they match. CI also runs the crate's `cargo fmt --check`, clippy and tests, with gpg
 and git-crypt installed, so the tests against the real gpg and git-crypt run there.
 
-**TODO before the first merge:** `plugin.json`'s `sha256` values are placeholders (all zeros)
-until `encryption-v0.3.0` is cut.
-
 ## Releasing
 
 `main` is the release: every Mahfouz install pulls this repository at launch, and shows **Update
