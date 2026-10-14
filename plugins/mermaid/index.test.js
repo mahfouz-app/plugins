@@ -13,6 +13,8 @@ import {
   createMermaidRenderer,
   createMermaidRuntime,
   createPublishRenderer,
+  EMBED_SIZES,
+  embedSize,
   exportFileName,
   isPublishableSvg,
   loadSplit,
@@ -26,6 +28,7 @@ import {
   sourceErrorLocation,
   storeSplit,
   svgSize,
+  withEmbedSize,
 } from "./index.js";
 
 function fakeHost({ enabled = false } = {}) {
@@ -67,13 +70,15 @@ function fakeHost({ enabled = false } = {}) {
 }
 
 function fakeContainer({ clientWidth = 500, renderedWidth = 100 } = {}) {
+  const rendered = { scrollWidth: renderedWidth, style: {} };
   return {
     innerHTML: "",
     textContent: "",
     error: null,
     clientWidth,
+    parentElement: { style: {} },
     get firstElementChild() {
-      return this.innerHTML ? { scrollWidth: renderedWidth } : null;
+      return this.innerHTML ? rendered : null;
     },
   };
 }
@@ -215,6 +220,70 @@ test("wide diagrams get pan/zoom, undone on dispose", async () => {
   const narrow = fakeContainer();
   await renderer.render(narrow, "b", "light");
   assert.equal(host.panZoomed.length, 1);
+});
+
+test("a natural-size diagram keeps mermaid's own sizing", async () => {
+  const renderer = createMermaidRenderer(fakeHost(), { loadModule: async () => fakeMermaid() });
+  const c = fakeContainer();
+  await renderer.render(c, "%% size: natural\ngraph TD;\nA-->B;", "light");
+  assert.deepEqual(c.firstElementChild.style, {});
+  assert.equal(c.parentElement.style.width, "");
+});
+
+test("a fitted diagram fills the column, and a wide one gets no pan/zoom", async () => {
+  const host = fakeHost();
+  const renderer = createMermaidRenderer(host, { loadModule: async () => fakeMermaid() });
+  const c = fakeContainer({ clientWidth: 100, renderedWidth: 900 });
+  await renderer.render(c, "%% size: fit\ngraph LR;\nA-->B;", "light");
+  assert.deepEqual(c.firstElementChild.style, { width: "100%", maxWidth: "100%", height: "auto", maxHeight: "" });
+  assert.equal(c.parentElement.style.width, "100%");
+  assert.deepEqual(host.panZoomed, []);
+});
+
+test("a fit-height diagram also stops at most of the window's height", async () => {
+  const renderer = createMermaidRenderer(fakeHost(), { loadModule: async () => fakeMermaid() });
+  const c = fakeContainer();
+  await renderer.render(c, "graph TD;\nA-->B;\n  %%  Size:Fit-Height  ", "light");
+  assert.equal(c.firstElementChild.style.maxHeight, "80vh");
+  assert.equal(c.firstElementChild.style.width, "100%");
+});
+
+test("a re-render of the same container drops the earlier pan/zoom", async () => {
+  const host = fakeHost();
+  const renderer = createMermaidRenderer(host, { loadModule: async () => fakeMermaid() });
+  const c = fakeContainer({ clientWidth: 100, renderedWidth: 900 });
+  await renderer.render(c, "a", "light");
+  assert.equal(host.panZoomed.length, 1);
+  await renderer.render(c, "%% size: fit\na", "light");
+  assert.equal(c.panZoomUndone, true);
+  assert.equal(host.panZoomed.length, 1);
+});
+
+test("embedSize reads the block's size line, natural without a known one", () => {
+  assert.equal(embedSize("graph TD\n  A-->B"), "natural");
+  assert.equal(embedSize("%% size: fit\ngraph TD"), "fit");
+  assert.equal(embedSize("graph TD\n    %% size: fit-height"), "fit-height");
+  assert.equal(embedSize("%% size: huge\ngraph TD"), "natural");
+  // Only a line of its own counts.
+  assert.equal(embedSize("A-->B %% size: fit"), "natural");
+  assert.deepEqual(
+    EMBED_SIZES.map((s) => s.id),
+    ["natural", "fit", "fit-height"]
+  );
+});
+
+test("withEmbedSize adds, replaces and removes the size line", () => {
+  assert.equal(withEmbedSize("graph TD\n  A-->B", "fit"), "%% size: fit\ngraph TD\n  A-->B");
+  assert.equal(withEmbedSize("%% size: fit\ngraph TD", "fit-height"), "%% size: fit-height\ngraph TD");
+  assert.equal(withEmbedSize("%% size: fit\ngraph TD", "natural"), "graph TD");
+  // Moved first, and only one kept.
+  assert.equal(withEmbedSize("graph TD\n%% size: fit\nA-->B\n%% size: natural", "fit"), "%% size: fit\ngraph TD\nA-->B");
+  assert.equal(withEmbedSize("graph TD\nA-->B", "natural"), "graph TD\nA-->B");
+  // After front matter, which mermaid only reads at the very start.
+  assert.equal(
+    withEmbedSize("---\ntitle: Hello\n---\ngraph TD", "fit"),
+    "---\ntitle: Hello\n---\n%% size: fit\ngraph TD"
+  );
 });
 
 test("the init cache is keyed on the whole config, not the theme name", async () => {

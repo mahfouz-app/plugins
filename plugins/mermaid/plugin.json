@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "mermaid",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "label": "Mermaid diagrams",
   "description": "Render mermaid code blocks as diagrams, and edit one in a split editor tab",
   "mahfouz": ">=0.8.0",
