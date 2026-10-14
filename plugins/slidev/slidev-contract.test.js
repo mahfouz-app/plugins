@@ -77,6 +77,20 @@ test("the server's layout rule: own layout, then defaults, then cover for slide 
   assert.match(serve, /if \(!layouts\[layoutName\]\) \{[\s\S]{0,400}?layoutName = "default";/);
 });
 
+// slide-top.vue reads `defaults` where the server does, from slides[0]'s
+// frontmatter: the client's slides list is the server's `data.slides`, in
+// order, each with that slide's frontmatter in `meta.slide.frontmatter`, and
+// a slide's `$nav` (Present's and print's alike) carries it as `slides`.
+test("the client sees each slide's frontmatter in order, through $nav.slides", withSlidev, () => {
+  const serve = dist("serve");
+  assert.match(serve, /const slides = data\.slides\.map\(\(_, idx\) => \{\s*const no = idx \+ 1;\s*statements\.push\(`import \{ meta as f\$\{no\} \}/);
+  assert.match(serve, /"  slide: \{",\s*`    \.\.\.\(\$\{JSON\.stringify\(slideBase\)\}\),`,\s*`    frontmatter,`/);
+  const nav = read(client, "composables", "useNav.ts");
+  assert.match(nav, /export interface SlidevContextNav \{\s*slides: Ref<SlideRoute\[\]>/);
+  assert.match(nav, /export function useFixedNav\([\s\S]*?\): SlidevContextNav \{/);
+  assert.match(read(client, "context.ts"), /const \$nav = toRef\(\$slidev, 'nav'\)/);
+});
+
 test("changing fonts restarts the dev server; colorSchema doesn't", withSlidev, () => {
   const fields = /const CONFIG_RESTART_FIELDS = \[([^\]]*)\]/.exec(read(cli, "dist", "cli.mjs"));
   assert.ok(fields, "CONFIG_RESTART_FIELDS");

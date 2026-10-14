@@ -106,8 +106,11 @@ function mountInPage(Comp) {
   return { page, unmount: () => app.unmount() };
 }
 
-function stub({ configs = {}, page = 1, frontmatter = {} } = {}) {
-  const context = { $page: vue.ref(page), $nav: vue.ref({ total: 3 }), $frontmatter: vue.reactive(frontmatter) };
+/** The context Slidev gives a slide. `$nav` is a ref to its reactive nav,
+ * so `slides` reads unwrapped, each with the frontmatter in `meta.slide`. */
+function stub({ configs = {}, page = 1, frontmatter = {}, slides = [{}, {}, {}] } = {}) {
+  const nav = vue.reactive({ total: slides.length, slides: vue.shallowRef(slides.map((fm, i) => ({ no: i + 1, meta: { slide: { frontmatter: fm } } }))) });
+  const context = { $page: vue.ref(page), $nav: vue.computed(() => nav), $frontmatter: vue.reactive(frontmatter) };
   globalThis.__slidevStub = { configs, context };
   return context;
 }
@@ -136,9 +139,23 @@ test("slide-top stamps slide 1 with no layout as cover, and follows defaults.lay
   const first = mountInPage(SlideTop);
   assert.equal(first.page.dataset.layout, "cover");
   first.unmount();
-  stub({ page: 4, configs: { defaults: { layout: "center" } } });
+  stub({ page: 4, slides: [{ defaults: { layout: "center" } }, {}, {}, {}] });
   const later = mountInPage(SlideTop);
   assert.equal(later.page.dataset.layout, "center");
+  later.unmount();
+});
+
+test("slide-top reads defaults from the first slide, not from configs (the entry stub's headmatter)", withVue, async () => {
+  const SlideTop = await load("./slide-top.vue");
+  // The note's `defaults: {layout: center}` lands on slide 1's frontmatter;
+  // `configs` is the stub's headmatter, which never has it.
+  stub({ page: 1, slides: [{ defaults: { layout: "center" } }, {}] });
+  const first = mountInPage(SlideTop);
+  assert.equal(first.page.dataset.layout, "center");
+  first.unmount();
+  stub({ page: 2, configs: { defaults: { layout: "quote" } }, slides: [{}, {}] });
+  const later = mountInPage(SlideTop);
+  assert.equal(later.page.dataset.layout, "default");
   later.unmount();
 });
 

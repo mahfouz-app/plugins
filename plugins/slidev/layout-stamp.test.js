@@ -6,7 +6,7 @@
 // The component itself is mounted in layers.test.js.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { slideClass, slideLayout, stampPage } from "./layout-stamp.js";
+import { deckDefaults, slideClass, slideLayout, stampPage } from "./layout-stamp.js";
 
 test("the slide's own layout wins, then defaults.layout, then cover for slide 1 and default after", () => {
   assert.equal(slideLayout({ layout: "quote" }, { layout: "center" }, 3), "quote");
@@ -21,6 +21,20 @@ test("an empty layout falls through like the server's `||`", () => {
   // serve: (frontmatter.layout ?? defaults.layout) || (index === 0 ? "cover" : "default")
   assert.equal(slideLayout({ layout: "" }, { layout: "center" }, 1), "cover");
   assert.equal(slideLayout({ layout: null }, { layout: "center" }, 2), "center");
+});
+
+test("defaults come from the first slide's own frontmatter, which is where the server reads them", () => {
+  // serve: data.slides[0]?.frontmatter?.defaults?.layout. With the note
+  // imported by `src:`, that's the note's frontmatter (the stub's headmatter
+  // spread over it), or the first shown slide's when slide 1 is hidden;
+  // never the stub's own headmatter, which is what `configs` holds.
+  const slide = (frontmatter) => ({ meta: { slide: { frontmatter } } });
+  assert.deepEqual(deckDefaults([slide({ defaults: { layout: "center" } }), slide({ layout: "quote" })]), { layout: "center" });
+  assert.equal(deckDefaults([slide({ layout: "cover" }), slide({ defaults: { layout: "center" } })]), undefined);
+  assert.equal(deckDefaults([]), undefined);
+  assert.equal(deckDefaults(undefined), undefined);
+  assert.equal(deckDefaults([{ meta: {} }]), undefined);
+  assert.equal(slideLayout({}, deckDefaults([slide({ defaults: { layout: "center" } })]), 1), "center");
 });
 
 test("a name that isn't a layout is stamped as written (Slidev renders it with default); a non-string is default", () => {
