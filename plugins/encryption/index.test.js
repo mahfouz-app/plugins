@@ -25,7 +25,6 @@ import {
   skippedOf,
   STORAGE_KEY,
   LFS_TEXT,
-  NEEDS_NEWER,
   uidName,
 } from "./index.js";
 
@@ -372,9 +371,13 @@ test("the codec matches encrypted notes, decodes only through the app, and encod
   assert.equal(c.codec.matches({ title: "x" }), false);
 
   const ctx = { vaultId: "v", noteId: "n1", path: "n1.md", group: "work", armored: "ARMOR" };
-  await assert.rejects(c.codec.decode(ctx), /earlier version/);
+  // An Unlock decrypts the file; a merge's version decrypts that commit's blob.
   assert.equal(await c.codec.decode({ ...ctx, decryptNote: async () => "secret" }), "secret");
-  assert.equal(c.isUnlocked(ref("n1")), true);
+  const asked = [];
+  const blob = async (sha) => (asked.push(sha), "from history");
+  assert.equal(await c.codec.decode({ ...ctx, sha: "abc123", decryptBlob: blob }), "from history");
+  assert.deepEqual(asked, ["abc123"]);
+  assert.equal(await c.codec.decode({ ...ctx, sha: "abc123", decryptBlob: blob, decryptNote: async () => "file" }), "file");
 
   const armored = await c.codec.encode(ctx, "secret v2");
   assert.deepEqual(host.encrypts.at(-1), { plaintext: "secret v2", recipients: [ME, BOSS, BACKUP], signer: ME });
@@ -403,10 +406,6 @@ test("encode fetches a member's keys from GitHub once when the plugin keyring la
 
 test("Encrypt: Only me creates your group with your keys, writes it, then switches the note", async () => {
   const { host, c } = setup({ notes: { n1: { title: "Diary", path: "Diary.md", attributes: {}, body: "dear diary" } } });
-  assert.equal(c.statusOf(ref("n1")), undefined);
-  await new Promise((r) => setTimeout(r));
-  assert.equal(c.isPlain(ref("n1")), true);
-
   assert.equal(await c.encryptNote(ref("n1"), { onlyMe: true, login: "o" }), "only-o");
   assert.deepEqual(groupSigners(host.configText, "only-o"), [ME, BACKUP]);
   assert.deepEqual(host.encrypts.at(-1).recipients, [ME, BACKUP]);
@@ -415,8 +414,6 @@ test("Encrypt: Only me creates your group with your keys, writes it, then switch
     host.log.filter(([m]) => m === "config.write" || m === "setEncryption").map(([m]) => m),
     ["config.write", "setEncryption"]
   );
-  assert.equal(c.isPlain(ref("n1")), false);
-  assert.equal(c.isUnlocked(ref("n1")), false);
   await assert.rejects(c.encryptNote(ref("n1"), { group: "only-o" }), /already encrypted/);
 });
 
@@ -429,23 +426,40 @@ test("Encrypt works without a backup key, and leaves the config alone when nothi
   assert.equal(host.configText, config);
 });
 
-test("Decrypt writes the unlocked plaintext, only while the file still holds what it came from", async () => {
+test("commands and toolbar items apply by what the app says of the note", () => {
+  const { host, c } = setup();
+  const note = (extra) => ({ vaultId: "v", noteId: "n", path: "n.md", title: "N", ...extra });
+  assert.equal(c.isPlain(note()), true);
+  assert.equal(c.isUnlocked(note()), false);
+  assert.equal(c.isPlain(note({ encryptedGroup: "family", unlocked: false })), false);
+  assert.equal(c.isUnlocked(note({ encryptedGroup: "family", unlocked: false })), false);
+  assert.equal(c.isUnlocked(note({ encryptedGroup: "family", unlocked: true })), true);
+  // Without the app's decrypt, Decrypt isn't offered.
+  delete host.notes.decrypt;
+  assert.equal(c.isUnlocked(note({ encryptedGroup: "family", unlocked: true })), false);
+});
+
+test("Decrypt writes what the app decrypts from the file, only while the file still holds it", async () => {
   const note = encNote("Diary", "family", "dear diary");
-  const { host, c } = setup({ config: addGroup("", "family", [{ login: "o", fpr: ME }]), notes: { n: note } });
-  await assert.rejects(c.decryptPlan(ref("n")), /Unlock “Diary” first/);
-  await c.codec.decode({ vaultId: "v", noteId: "n", path: "Diary.md", group: "family", armored: note.body, decryptNote: async () => "dear diary" });
-  const plan = await c.decryptPlan(ref("n"));
-  await c.decryptNote(ref("n"), plan);
+  const { host, c } = setup({ config: addGroup("", "family", [{ login: "o", fpr: ME }]), notes: { n: note, p: { title: "P", path: "P.md", attributes: {}, body: "x" } } });
+  await assert.rejects(c.encryptedNote(ref("p")), /“P” isn't encrypted/);
+  assert.equal((await c.encryptedNote(ref("n"))).title, "Diary");
+  await c.decryptNote(ref("n"));
+  assert.deepEqual(host.log.filter(([m]) => m === "decrypt" || m === "setEncryption").map(([m]) => m), ["decrypt", "setEncryption"]);
   assert.equal(host.notesById.n.body, "dear diary");
   assert.equal(host.notesById.n.attributes.encrypted, undefined);
-  assert.equal(c.isPlain(ref("n")), true);
 
-  // Re-encrypted elsewhere since the unlock: refused.
+  // Re-encrypted elsewhere between the decrypt and the write: refused.
   const other = encNote("Other", "family", "b");
   host.notesById.o = other;
-  await c.codec.decode({ vaultId: "v", noteId: "o", path: "Other.md", group: "family", armored: other.body, decryptNote: async () => "b" });
-  other.body = armorOf("b2", [ME]);
-  await assert.rejects(c.decryptPlan(ref("o")), /Unlock “Other” first/);
+  const decrypt = host.notes.decrypt;
+  host.notes.decrypt = async (n) => {
+    const out = await decrypt(n);
+    other.body = armorOf("b2", [ME]);
+    return out;
+  };
+  await assert.rejects(c.decryptNote(ref("o")), /changed/);
+  assert.equal(other.attributes.encrypted, "family");
 });
 
 test("Add member: looks the login up on GitHub, keeps only keys that can be encrypted to", async () => {
@@ -499,10 +513,9 @@ test("Add member: a note that changed stops it before the config is written", as
   assert.equal(host.log.some(([m]) => m === "commit"), false);
 });
 
-test("Add member needs the app to list and decrypt the group's notes", async () => {
-  const { c } = setup({ listApis: false, config: addGroup("", "family", [{ login: "o", fpr: ME }]) });
-  assert.equal(await c.groupNotes("family"), null);
-  await assert.rejects(c.addMemberAndReencrypt("family", { login: "ada", fpr: ADA }), /can't re-encrypt notes/);
+test("Add member is offered only where the app can list, decrypt and rewrite the group's notes", () => {
+  assert.equal(setup().c.canReencrypt(), true);
+  assert.equal(setup({ listApis: false }).c.canReencrypt(), false);
 });
 
 test("Stop sharing removes their rows and commits the config; nothing is re-encrypted", async () => {
@@ -548,26 +561,37 @@ test("the network warning lists the other enabled plugins that may reach it", as
   assert.deepEqual(await c.networkedPlugins(), ["Notion"]);
 });
 
-test("activate registers the codec, the commands and the toolbar toggles, with no default shortcuts", () => {
-  const registered = { commands: [], toolbar: [], codecs: [] };
+/** A 0.12.1 host recording what `activate` registers. */
+function activatedHost(extra = {}) {
+  const registered = { commands: [], toolbar: [], codecs: [], settingsTabs: [], unlockers: [], opened: [] };
   const host = {
     ...fakeHost(),
     registerBodyCodec: (codec) => registered.codecs.push(codec),
     registerCommand: (cmd) => registered.commands.push(cmd),
     registerToolbarItem: (item) => registered.toolbar.push(item),
-    ui: { openOverlay: () => () => {} },
+    registerSettingsTab: (tab) => (registered.settingsTabs.push(tab), { dispose() {} }),
+    openSettingsTab: (id) => registered.opened.push(id),
+    registerVaultUnlocker: (u) => (registered.unlockers.push(u), { dispose() {} }),
+    ui: { openDialog: () => ({ close() {} }), confirm: async () => false },
+    ...extra,
   };
   activate(host);
+  return { host, registered };
+}
+
+test("activate registers the codec, a Settings tab, the commands and the toolbar toggles, with no default shortcuts", () => {
+  const { registered } = activatedHost({ git: { forceCheckout: async () => [] } });
   assert.equal(registered.codecs.length, 1);
+  assert.deepEqual(registered.settingsTabs.map((t) => [t.id, t.label]), [["encryption", "Encryption"]]);
   assert.deepEqual(
-    registered.commands.map((c) => [c.id, c.label, !!c.noteMenu]),
+    registered.commands.map((c) => [c.id, c.label, !!c.noteMenu, c.palette !== false, typeof c.when]),
     [
-      ["encrypt", "Encrypt…", true],
-      ["decrypt", "Decrypt…", true],
-      ["encrypt-note", "Encrypt note", false],
-      ["decrypt-note", "Decrypt note", false],
-      ["settings", "Encryption settings", false],
-      ["unlock-vault", "Unlock vault", false],
+      ["encrypt", "Encrypt…", true, false, "function"],
+      ["decrypt", "Decrypt…", true, false, "function"],
+      ["encrypt-note", "Encrypt note", false, true, "function"],
+      ["decrypt-note", "Decrypt note", false, true, "function"],
+      ["settings", "Encryption settings", false, true, "undefined"],
+      ["unlock-vault", "Unlock vault", false, true, "function"],
     ]
   );
   assert.ok(registered.commands.every((c) => !c.shortcut));
@@ -575,6 +599,23 @@ test("activate registers the codec, the commands and the toolbar toggles, with n
     ["toggle", "lock", false],
     ["toggle", "unlock", false],
   ]);
+  assert.deepEqual(registered.unlockers.map((u) => u.label), ["Unlock"]);
+  registered.commands.find((c) => c.id === "settings").run();
+  assert.deepEqual(registered.opened, ["encryption"]);
+  deactivate();
+});
+
+test("activate leaves Unlock out where the app can't check a vault out again", () => {
+  const { registered } = activatedHost();
+  assert.equal(registered.commands.some((c) => c.id === "unlock-vault"), false);
+  assert.equal(registered.unlockers.length, 0);
+  deactivate();
+});
+
+test("an app without plugin dialogs and Settings tabs gets the codec alone", () => {
+  const { registered } = activatedHost({ ui: {}, registerSettingsTab: undefined });
+  assert.equal(registered.codecs.length, 1);
+  assert.equal(registered.commands.length + registered.toolbar.length + registered.settingsTabs.length, 0);
   deactivate();
 });
 
@@ -656,22 +697,44 @@ test("Encrypt vault refuses a vault using Git LFS before anything changes", asyn
   assert.deepEqual(vaultCalls(host), ["vaultStatus"]);
 });
 
-test("the history options this app has no API for are disabled; Encrypt from now on always works", async () => {
-  const { host, c } = vaultSetup({ vault: { hasRemote: true } });
-  host.repo = { createPrivate: async () => ({ cloneUrl: "git@github.com:o/x.git" }) };
-  assert.deepEqual(c.vaultFeatures(), { move: false, rewrite: false, now: true, nameById: false, renameExisting: false });
-  for (const history of ["move", "rewrite"]) {
-    await assert.rejects(c.encryptVault({ history }), (err) => err.message === NEEDS_NEWER);
-  }
-  await assert.rejects(c.encryptVault({ renameExisting: true }), (err) => err.message === NEEDS_NEWER);
-  assert.equal(host.log.some(([m]) => m === "initVault"), false);
-  await c.encryptVault({ history: "now" });
-  assert.equal(host.vaultRpc.state.encrypted, true);
+test("vaultFeatures offers only what the app has an API for; Encrypt from now on always", () => {
+  const { host, c } = vaultSetup();
+  assert.deepEqual(c.vaultFeatures(), {
+    encrypt: true,
+    lock: true,
+    unlock: true,
+    move: false,
+    rewrite: false,
+    now: true,
+    nameById: false,
+    renameExisting: false,
+  });
+  host.repo = { moveToNewPrivate: async () => {} };
+  host.git.rewriteHistory = async () => true;
+  host.settings = { setNewNoteNaming: async () => {}, setCommitMessageNaming: async () => {} };
+  assert.deepEqual(c.vaultFeatures(), { ...c.vaultFeatures(), move: true, rewrite: true, nameById: true });
+  const bare = setup().c.vaultFeatures();
+  assert.deepEqual([bare.encrypt, bare.lock, bare.unlock], [false, false, false]);
 });
 
-test("Encrypt vault needs the app's renormalize", async () => {
-  const { c } = setup();
-  await assert.rejects(c.encryptVault(), (err) => err.message === NEEDS_NEWER);
+test("Encrypt vault: naming by id, then the history option through the app, which asks and pushes", async () => {
+  for (const [history, expected] of [
+    ["move", ["setNewNoteNaming id", "setCommitMessageNaming none", "moveToNewPrivate Diary-encrypted"]],
+    ["rewrite", ["setNewNoteNaming id", "setCommitMessageNaming none", "rewriteHistory Encrypt vault"]],
+    ["now", ["setNewNoteNaming id", "setCommitMessageNaming none"]],
+  ]) {
+    const { host, c } = vaultSetup({ vault: { hasRemote: true } });
+    const calls = [];
+    host.repo = { moveToNewPrivate: async (name) => void calls.push(`moveToNewPrivate ${name}`) };
+    host.git.rewriteHistory = async (message) => (calls.push(`rewriteHistory ${message}`), true);
+    host.settings = {
+      setNewNoteNaming: async (v) => void calls.push(`setNewNoteNaming ${v}`),
+      setCommitMessageNaming: async (v) => void calls.push(`setCommitMessageNaming ${v}`),
+    };
+    await c.encryptVault({ history });
+    assert.deepEqual(calls, expected, history);
+    assert.equal(host.vaultRpc.state.encrypted, true);
+  }
 });
 
 test("Unlock calls unlockVault, then forceCheckout", async () => {

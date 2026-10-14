@@ -6,8 +6,9 @@
 // whole-vault encryption `vaultStatus`, `initVault`, `unlockVault`,
 // `lockVault`, `addVaultMember` and `removeVaultMember`. `decrypt` is the
 // app's alone: the host refuses it from this module, and a note is only ever
-// decrypted by the app, through `ctx.decryptNote()` in the body codec (and
-// `host.notes.decrypt` for a re-encryption), reading the file itself. The
+// decrypted by the app, through `ctx.decryptNote()` (or, in a merge,
+// `ctx.decryptBlob(sha)`) in the body codec and `host.notes.decrypt` for a
+// re-encryption or a Decrypt, reading the file or git itself. The
 // same binary is git-crypt's filter (`clean`, `smudge`, `diff`); `gitPath`
 // puts it on git's PATH.
 //
@@ -21,9 +22,8 @@
 // - Your signing and backup keys, and your GitHub login once known: this
 //   machine's `localStorage` (`mahfouz.encryption.keys`). They're per user
 //   and per machine, so they never go in the vault.
-// - The plaintext of notes this module decoded or encoded this session, so
-//   Decrypt can write it: memory only, dropped when the plugin unloads or
-//   the vault closes.
+// - Nothing about notes: whether a note is encrypted or unlocked comes from
+//   the app with each command (`CommandNote.encryptedGroup`, `unlocked`).
 // - Whole-vault encryption: git-crypt's own files in the vault
 //   (`.git-crypt/`, the root `.gitattributes` block, both written by the
 //   sidecar and committed by the app) and this clone's key in `.git/`. Its
@@ -52,7 +52,6 @@ export const DECRYPT_TEXT =
 export const STOP_SHARING_TEXT =
   "New edits are re-encrypted without their key. They can still read anything they already decrypted or that's in history.";
 const NO_SIGNING_KEY = "Choose your signing key in Settings → Encryption.";
-const CANT_REENCRYPT = "This version of Mahfouz can't re-encrypt notes.";
 
 export const VAULT_SECTION = "Encrypt this vault on GitHub";
 export const VAULT_TEXT = "Notes stay readable on this Mac. On GitHub and in every clone without a key, they're encrypted with git-crypt.";
@@ -75,7 +74,6 @@ export const HISTORY_OPTIONS = [
 ];
 export const NAMES_TEXT = "File and folder names and commit messages stay readable on GitHub.";
 export const NAMES_BY_ID_TEXT = "New notes will be named by their ID, and commit messages won't name notes.";
-export const NEEDS_NEWER = "Needs a newer version of Mahfouz.";
 export const REMOVE_MEMBER_TEXT =
   "Removing a member stops new access only if the key changes; git-crypt can't rotate it. To shut someone out, move the vault to a fresh repository.";
 export const NO_VAULT_KEY_TEXT = "None of your GPG keys can unlock it. Ask a member to add yours:";
@@ -271,7 +269,6 @@ export function skippedText(n) {
 /** The last component of a vault's path, as its name. */
 export const vaultName = (path) => String(path ?? "").replace(/\/+$/, "").split("/").pop() || "vault";
 
-const sameArmor = (a, b) => String(a).replace(/\r\n/g, "\n").trim() === String(b).replace(/\r\n/g, "\n").trim();
 export const usableForSigning = (k) => !!k.canSign && !k.expired && !k.revoked;
 export const usableForEncryption = (k) => !!k.canEncrypt && !k.expired && !k.revoked;
 const messageOf = (err) => (err instanceof Error ? err.message : String(err));
@@ -302,15 +299,11 @@ export function saveKeys(storage, keys) {
 
 /**
  * The plugin's logic over `host` and `storage`, testable without a DOM.
- * `onChange` listeners hear when a note's known state changes (the
- * toolbar's toggles re-render on it).
+ * `onChange` listeners hear when this plugin encrypted or decrypted a note,
+ * or read the vault's state (the toolbar's toggles re-render on it).
  */
 export function createController(host, storage) {
-  const statuses = new Map(); // note key → its group, or null for a plain note
-  const pending = new Set();
-  const unlocked = new Map(); // note key → {plaintext, armored}, memory only
   const listeners = new Set();
-  const keyOf = (note) => `${note.vaultId}\n${note.noteId}`;
   const changed = () => {
     for (const fn of [...listeners]) {
       try {
@@ -385,46 +378,21 @@ export function createController(host, storage) {
   const codec = {
     id: "gpg",
     matches: (fm) => typeof fm.encrypted === "string",
-    async decode(ctx) {
-      // A merge's base or theirs comes without decryptNote, and the host keeps the sidecar's decrypt from plugins.
-      if (typeof ctx.decryptNote !== "function") throw new Error("This version of Mahfouz can't decrypt an earlier version of an encrypted note.");
-      const plaintext = await ctx.decryptNote();
-      unlocked.set(keyOf(ctx), { plaintext, armored: ctx.armored });
-      statuses.set(keyOf(ctx), ctx.group);
-      changed();
-      return plaintext;
+    // An Unlock's decode gets decryptNote (the file); a merge's base, ours or theirs gets decryptBlob (that commit's version).
+    // The host keeps the sidecar's decrypt from plugins, so neither hands ciphertext over.
+    decode(ctx) {
+      return typeof ctx.decryptNote === "function" ? ctx.decryptNote() : ctx.decryptBlob(ctx.sha);
     },
     async encode(ctx, plaintext) {
-      const armored = await encryptFor(ctx.group, plaintext, await readConfig());
-      unlocked.set(keyOf(ctx), { plaintext, armored });
-      return armored;
+      return encryptFor(ctx.group, plaintext, await readConfig());
     },
   };
 
-  /** The note's group, null for a plain note, undefined until it has been read (listeners hear when it is). */
-  function statusOf(note) {
-    const key = keyOf(note);
-    if (statuses.has(key)) return statuses.get(key);
-    if (!pending.has(key)) {
-      pending.add(key);
-      Promise.resolve()
-        .then(() => host.notes.get(note))
-        .then((info) => {
-          const enc = info.attributes?.encrypted;
-          statuses.set(key, typeof enc === "string" ? enc : null);
-        })
-        .catch(() => {})
-        .finally(() => {
-          pending.delete(key);
-          changed();
-        });
-    }
-    return undefined;
-  }
-
-  const isPlain = (note) => statusOf(note) === null;
-  /** Encrypted, and this session holds its plaintext. */
-  const isUnlocked = (note) => typeof statusOf(note) === "string" && unlocked.has(keyOf(note));
+  /** A note this plugin can encrypt: not encrypted, as the app says (`CommandNote.encryptedGroup`). */
+  const isPlain = (note) => !note?.encryptedGroup && typeof host.notes.setEncryption === "function";
+  /** An encrypted note unlocked this session (`CommandNote.unlocked`), so Decrypt applies. */
+  const isUnlocked = (note) =>
+    !!note?.encryptedGroup && note.unlocked === true && typeof host.notes.setEncryption === "function" && typeof host.notes.decrypt === "function";
 
   /** Your secret keys, your stored keys and login, and the config. */
   async function context() {
@@ -451,9 +419,7 @@ export function createController(host, storage) {
   /** The note's info, refused when it's already encrypted. */
   async function plainNote(note) {
     const info = await host.notes.get(note);
-    const enc = info.attributes?.encrypted;
-    statuses.set(keyOf(note), typeof enc === "string" ? enc : null);
-    if (typeof enc === "string") throw new Error(`“${info.title}” is already encrypted.`);
+    if (typeof info.attributes?.encrypted === "string") throw new Error(`“${info.title}” is already encrypted.`);
     return info;
   }
 
@@ -465,7 +431,6 @@ export function createController(host, storage) {
   async function encryptNote(note, choice) {
     const keys = loadKeys(storage);
     if (!keys.signing) throw new Error(NO_SIGNING_KEY);
-    if (!host.notes.setEncryption) throw new Error("This version of Mahfouz can't encrypt notes.");
     let md = await readConfig();
     let group = choice.group;
     let configChanged = false;
@@ -482,34 +447,34 @@ export function createController(host, storage) {
     const armored = await encryptFor(group, info.body, md);
     if (configChanged) await host.config.write(md);
     await host.notes.setEncryption(note, { group, armored, expected: info.body });
-    statuses.set(keyOf(note), group);
-    unlocked.delete(keyOf(note));
     changed();
     return group;
   }
 
-  /** What Decrypt writes: the unlocked plaintext, while the file still holds the armored body it came from. */
-  async function decryptPlan(note) {
+  /** The note Decrypt asks about, refused when it isn't encrypted. */
+  async function encryptedNote(note) {
     const info = await host.notes.get(note);
     if (typeof info.attributes?.encrypted !== "string") throw new Error(`“${info.title}” isn't encrypted.`);
-    const u = unlocked.get(keyOf(note));
-    if (!u || !sameArmor(u.armored, info.body)) throw new Error(`Unlock “${info.title}” first.`);
-    return { info, plaintext: u.plaintext };
+    return info;
   }
 
-  async function decryptNote(note, plan) {
-    if (!host.notes.setEncryption) throw new Error("This version of Mahfouz can't decrypt notes.");
-    await host.notes.setEncryption(note, { plaintext: plan.plaintext, expected: plan.info.body });
-    statuses.set(keyOf(note), null);
-    unlocked.delete(keyOf(note));
+  /**
+   * Decrypts `note` for good: the app decrypts its file (`notes.decrypt`),
+   * and the plaintext is written only while the file still holds the
+   * armored body it came from.
+   */
+  async function decryptNote(note) {
+    const { plaintext, armored } = await host.notes.decrypt(note);
+    await host.notes.setEncryption(note, { plaintext, expected: armored });
     changed();
   }
 
-  /** The group's notes, or null when this app can't list, decrypt and rewrite them (`notes.listEncrypted`, `notes.decrypt`). */
-  async function groupNotes(group) {
-    if (!host.notes.listEncrypted || !host.notes.decrypt || !host.notes.writeBody) return null;
-    return host.notes.listEncrypted(group);
-  }
+  /** Whether this app can list, decrypt and rewrite a group's notes, which Add member needs. */
+  const canReencrypt = () =>
+    typeof host.notes.listEncrypted === "function" && typeof host.notes.decrypt === "function" && typeof host.notes.writeBody === "function";
+
+  /** The group's notes, from the app's index. */
+  const groupNotes = (group) => host.notes.listEncrypted(group);
 
   /** `login`'s keys from GitHub, imported into the plugin keyring: those that can be encrypted to. */
   async function lookUpMember(login) {
@@ -529,7 +494,6 @@ export function createController(host, storage) {
    */
   async function addMemberAndReencrypt(group, member) {
     const notes = await groupNotes(group);
-    if (notes == null) throw new Error(CANT_REENCRYPT);
     const keys = loadKeys(storage);
     if (!keys.signing) throw new Error(NO_SIGNING_KEY);
     const md = await readConfig();
@@ -545,7 +509,6 @@ export function createController(host, storage) {
         const { plaintext, armored } = await host.notes.decrypt(note);
         const out = await encryptTo(plaintext, recipients, keys.signing, next, group);
         await host.notes.writeBody(note, out, armored);
-        unlocked.delete(keyOf(note));
         paths.push(info.path);
       }
     } finally {
@@ -588,8 +551,6 @@ export function createController(host, storage) {
   }
 
   function forgetAll() {
-    unlocked.clear();
-    statuses.clear();
     vaultState = null;
     changed();
   }
@@ -615,19 +576,23 @@ export function createController(host, storage) {
   const isVaultLocked = () => !!vaultState?.encrypted && !vaultState.unlocked;
 
   /**
-   * What this app lets the Encrypt dialog do. Each needs an app API that
-   * doesn't exist yet (see the README's required app APIs): moving to a new
-   * repository needs `git.setRemote` and `git.push`, rewriting needs
-   * `git.rewriteHistory`, naming new notes by id and keeping notes out of
-   * commit messages need `settings.setNewNoteNaming` and
-   * `settings.setCommitMessageNaming`, and renaming the existing notes
-   * needs `notes.renameAllById` (with `notes.countRenamableById`).
+   * What this app lets the vault section and the Encrypt dialog do; what it
+   * can't is left out of them. Encrypting, locking and unlocking need
+   * `git.renormalize` and `git.forceCheckout`; moving to a new repository
+   * needs `repo.moveToNewPrivate` and rewriting `git.rewriteHistory` (both
+   * ask the user themselves, then push); naming new notes by id and keeping
+   * notes out of commit messages need `settings.setNewNoteNaming` and
+   * `settings.setCommitMessageNaming`; renaming the existing notes needs
+   * `notes.renameAllById` (with `notes.countRenamableById`).
    */
   function vaultFeatures() {
     const fn = (f) => typeof f === "function";
     return {
-      move: fn(host.repo?.createPrivate) && fn(host.git?.setRemote) && fn(host.git?.push),
-      rewrite: fn(host.git?.rewriteHistory) && fn(host.git?.push),
+      encrypt: fn(host.git?.renormalize),
+      lock: fn(host.git?.renormalize) && fn(host.git?.forceCheckout),
+      unlock: fn(host.git?.forceCheckout),
+      move: fn(host.repo?.moveToNewPrivate),
+      rewrite: fn(host.git?.rewriteHistory),
       now: true,
       nameById: fn(host.settings?.setNewNoteNaming) && fn(host.settings?.setCommitMessageNaming),
       renameExisting: fn(host.notes?.renameAllById) && fn(host.notes?.countRenamableById),
@@ -647,21 +612,19 @@ export function createController(host, storage) {
 
   /**
    * Encrypts the open vault with git-crypt for your signing and backup
-   * keys. `history` is `now`, `move` or `rewrite` (the last two only where
-   * the app has their APIs); `renameExisting` renames the existing notes
-   * by id first, where the app can. Order: a renormalize commits what's
-   * pending and refuses an edited file before anything changes; the
-   * sidecar writes the key, `.git-crypt/` and the root `.gitattributes`
-   * block; a renormalize commits them with every file encrypted; then the
-   * naming settings and the history option.
+   * keys. `history` is `now`, `move` or `rewrite`, and `renameExisting`
+   * renames the existing notes by id first: each only where `vaultFeatures`
+   * says the app can (the dialog offers nothing else). Order: a renormalize
+   * commits what's pending and refuses an edited file before anything
+   * changes; the sidecar writes the key, `.git-crypt/` and the root
+   * `.gitattributes` block; a renormalize commits them with every file
+   * encrypted; then the naming settings and the history option, whose
+   * confirm and push are the app's.
    */
   async function encryptVault({ history = "now", renameExisting = false } = {}) {
     const keys = loadKeys(storage);
     if (!keys.signing) throw new Error(NO_SIGNING_KEY);
     const features = vaultFeatures();
-    if (!features[history]) throw new Error(NEEDS_NEWER);
-    if (renameExisting && !features.renameExisting) throw new Error(NEEDS_NEWER);
-    if (typeof host.git?.renormalize !== "function") throw new Error(NEEDS_NEWER);
     const vault = vaultPath();
     const st = await vaultStatus();
     if (st.usesLfs) throw new Error(LFS_TEXT);
@@ -678,20 +641,13 @@ export function createController(host, storage) {
       await host.settings.setCommitMessageNaming("none");
     }
     if (renameExisting) await host.notes.renameAllById();
-    if (history === "move") {
-      const repo = await host.repo.createPrivate(`${vaultName(vault)}-encrypted`);
-      await host.git.setRemote(repo.cloneUrl);
-      await host.git.push();
-    } else if (history === "rewrite") {
-      await host.git.rewriteHistory(VAULT_MESSAGE);
-      await host.git.push({ force: true });
-    }
+    if (history === "move") await host.repo.moveToNewPrivate(`${vaultName(vault)}-encrypted`);
+    else if (history === "rewrite") await host.git.rewriteHistory(VAULT_MESSAGE);
     return init;
   }
 
   /** Unlocks the open vault with one of your keys, then checks its files out again as plaintext. */
   async function unlockVault() {
-    if (typeof host.git?.forceCheckout !== "function") throw new Error(NEEDS_NEWER);
     try {
       await host.sidecar.call("unlockVault", { vault: vaultPath() });
     } catch (err) {
@@ -717,7 +673,6 @@ export function createController(host, storage) {
    * checked out again as ciphertext.
    */
   async function lockVault() {
-    if (typeof host.git?.forceCheckout !== "function" || typeof host.git?.renormalize !== "function") throw new Error(NEEDS_NEWER);
     const vault = vaultPath();
     await host.git.renormalize("Commit before locking the vault");
     await host.sidecar.call("lockVault", { vault });
@@ -747,15 +702,15 @@ export function createController(host, storage) {
 
   return {
     codec,
-    statusOf,
     isPlain,
     isUnlocked,
     context,
     yourGroups,
     plainNote,
     encryptNote,
-    decryptPlan,
+    encryptedNote,
     decryptNote,
+    canReencrypt,
     groupNotes,
     lookUpMember,
     addMemberAndReencrypt,
@@ -781,8 +736,9 @@ export function createController(host, storage) {
 
 // ---- DOM ------------------------------------------------------------------------------
 //
-// The host has no dialog or settings-page primitive for plugins, so these
-// are built from the app's own classes (`.dialog-card` and friends, `.btn`,
+// Dialogs are the app's (`host.ui.openDialog`, `host.ui.confirm`) and the
+// settings page is a Settings tab (`host.registerSettingsTab`); what goes
+// inside them uses the app's own classes (`.dialog-row`, `.btn`,
 // `.section-title`, `.text-caption`; ui-components.md).
 
 function h(tag, props = {}, ...children) {
@@ -798,61 +754,23 @@ function h(tag, props = {}, ...children) {
   return node;
 }
 
-const openModals = new Set();
-
-/** A dialog in the app's backdrop; Escape and a click outside close it. `onClose` runs once, however it closed. */
-function openModal(label, build, onClose) {
-  const card = h("div", { className: "dialog-card", role: "dialog", "aria-modal": "true", "aria-label": label });
-  const backdrop = h("div", { className: "palette-backdrop" }, card);
-  const onKey = (e) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      close();
-    }
+/** The app's dialog titled `title`; `build(container, close)` draws the rest. Escape and a click outside close it. */
+function openDialog(host, title, build) {
+  let handle = null;
+  let closed = false;
+  const close = () => {
+    closed = true;
+    handle?.close();
   };
-  function close() {
-    if (!openModals.delete(close)) return;
-    document.removeEventListener("keydown", onKey, true);
-    backdrop.remove();
-    onClose?.();
-  }
-  backdrop.addEventListener("mousedown", (e) => {
-    if (e.target === backdrop) close();
+  handle = host.ui.openDialog({
+    title,
+    render(container) {
+      build(container, close);
+      container.querySelector("input, select, .dialog-submit")?.focus();
+    },
   });
-  document.addEventListener("keydown", onKey, true);
-  openModals.add(close);
-  build(card, close);
-  document.body.append(backdrop);
-  card.querySelector("input, select, .dialog-submit")?.focus();
+  if (closed) handle.close();
   return close;
-}
-
-/** A yes/no question laid out like the app's `confirmDialog`; Escape or a click outside is a no. */
-function confirmModal({ title, message, confirm, danger }) {
-  return new Promise((resolve) => {
-    let answer = false;
-    openModal(
-      title,
-      (card, close) => {
-        const done = (v) => {
-          answer = v;
-          close();
-        };
-        card.classList.add("confirm-dialog");
-        card.append(
-          h("div", { className: "dialog-title" }, title),
-          h("p", { className: "confirm-dialog-message" }, message),
-          h(
-            "div",
-            { className: "dialog-actions" },
-            h("button", { type: "button", className: "dialog-cancel", onClick: () => done(false) }, "Cancel"),
-            h("button", { type: "button", className: danger ? "dialog-submit is-danger" : "dialog-submit", onClick: () => done(true) }, confirm)
-          )
-        );
-      },
-      () => resolve(answer)
-    );
-  });
 }
 
 function errorLine() {
@@ -876,12 +794,12 @@ const actions = (close, submit) =>
   h("div", { className: "dialog-actions" }, h("button", { type: "button", className: "dialog-cancel", onClick: close }, "Cancel"), submit);
 
 /** The Encrypt dialog for `note`. */
-async function openEncryptDialog(c, note) {
+async function openEncryptDialog(c, host, note) {
   const info = await c.plainNote(note);
   const { md, keys, own } = await c.context();
   const groups = c.yourGroups(md, own, keys.login);
   const title = `Encrypt “${info.title}”`;
-  openModal(title, (card, close) => {
+  openDialog(host, title, (card, close) => {
     const select = h(
       "select",
       { className: "dialog-select", id: "enc-group" },
@@ -913,7 +831,6 @@ async function openEncryptDialog(c, note) {
             }
           },
         },
-        h("div", { className: "dialog-title" }, title),
         h("div", { className: "dialog-row" }, h("label", { className: "dialog-label", for: "enc-group" }, "Group"), select),
         loginRow,
         h("p", { className: "dialog-hint" }, ENCRYPT_TEXT),
@@ -927,31 +844,29 @@ async function openEncryptDialog(c, note) {
   });
 }
 
-async function runDecrypt(c, note) {
-  const plan = await c.decryptPlan(note);
-  const ok = await confirmModal({ title: `Decrypt “${plan.info.title}”?`, message: DECRYPT_TEXT, confirm: "Decrypt", danger: true });
-  if (ok) await c.decryptNote(note, plan);
+/** Decrypt: the app's question first, then the app decrypts the file and the plaintext is written. */
+async function runDecrypt(c, host, note) {
+  const info = await c.encryptedNote(note);
+  const ok = await host.ui.confirm({ title: `Decrypt “${info.title}”?`, body: DECRYPT_TEXT, confirmLabel: "Decrypt", danger: true });
+  if (ok) await c.decryptNote(note);
 }
 
 /** The Add member dialog for `group`; `done` runs after someone was added. */
-async function openAddMemberDialog(c, group, done) {
-  const notes = await c.groupNotes(group);
-  const n = notes?.length ?? 0;
-  openKeyLookupDialog(c, {
+async function openAddMemberDialog(c, host, group, done) {
+  const n = (await c.groupNotes(group)).length;
+  openKeyLookupDialog(c, host, {
     title: `Add member to “${group}”`,
     submitLabel: `Add and re-encrypt ${n} ${n === 1 ? "note" : "notes"}`,
-    blocked: notes == null ? CANT_REENCRYPT : null,
     add: (member) => c.addMemberAndReencrypt(group, member),
     done,
   });
 }
 
 /** Add member for the vault: the same GitHub lookup and fingerprint check, then `addVaultMember`. */
-function openAddVaultMemberDialog(c, name, done) {
-  openKeyLookupDialog(c, {
+function openAddVaultMemberDialog(c, host, name, done) {
+  openKeyLookupDialog(c, host, {
     title: `Add member to “${name}”`,
     submitLabel: "Add member",
-    blocked: null,
     add: (member) => c.addVaultMember(member),
     done,
   });
@@ -959,11 +874,10 @@ function openAddVaultMemberDialog(c, name, done) {
 
 /**
  * Looks a GitHub login's keys up, has the user pick one and confirm its
- * fingerprint outside Mahfouz, then runs `add({login, fpr})`. `blocked`,
- * when set, is shown and keeps the dialog from adding.
+ * fingerprint outside Mahfouz, then runs `add({login, fpr})`.
  */
-function openKeyLookupDialog(c, { title, submitLabel, blocked, add, done }) {
-  openModal(title, (card, close) => {
+function openKeyLookupDialog(c, host, { title, submitLabel, add, done }) {
+  openDialog(host, title, (card, close) => {
     const login = h("input", { className: "dialog-input", autocomplete: "off", spellcheck: "false", placeholder: "GitHub login", "aria-label": "GitHub login" });
     const find = h("button", { type: "button", className: "btn" }, "Find keys");
     const keysBox = h("div");
@@ -972,7 +886,7 @@ function openKeyLookupDialog(c, { title, submitLabel, blocked, add, done }) {
     let found = null;
     let chosen = null;
     let confirmed = false;
-    const refresh = () => (submit.disabled = !(found && chosen && confirmed && !blocked));
+    const refresh = () => (submit.disabled = !(found && chosen && confirmed));
     const lookUp = async () => {
       error.show(null);
       keysBox.replaceChildren();
@@ -1040,10 +954,8 @@ function openKeyLookupDialog(c, { title, submitLabel, blocked, add, done }) {
             }
           },
         },
-        h("div", { className: "dialog-title" }, title),
         h("div", { className: "dialog-row" }, login, find),
         keysBox,
-        blocked ? h("p", { className: "dialog-error" }, blocked) : null,
         error.node,
         actions(close, submit)
       )
@@ -1051,8 +963,8 @@ function openKeyLookupDialog(c, { title, submitLabel, blocked, add, done }) {
   });
 }
 
-function openNewGroupDialog(c, keys, done) {
-  openModal("New group", (card, close) => {
+function openNewGroupDialog(c, host, keys, done) {
+  openDialog(host, "New group", (card, close) => {
     const name = h("input", { className: "dialog-input", id: "enc-group-name", autocomplete: "off", spellcheck: "false" });
     const login = h("input", { className: "dialog-input", id: "enc-self-login", autocomplete: "off", spellcheck: "false" });
     const error = errorLine();
@@ -1072,7 +984,6 @@ function openNewGroupDialog(c, keys, done) {
             }
           },
         },
-        h("div", { className: "dialog-title" }, "New group"),
         h("div", { className: "dialog-row" }, h("label", { className: "dialog-label", for: "enc-group-name" }, "Name"), name),
         keys.login
           ? null
@@ -1090,18 +1001,19 @@ async function openEncryptVaultDialog(c, host, done) {
   const features = c.vaultFeatures();
   const renameCount = features.renameExisting ? await host.notes.countRenamableById() : null;
   const title = `Encrypt “${vaultName(host.vault?.current()?.path)}”`;
-  openModal(title, (card, close) => {
+  openDialog(host, title, (card, close) => {
     const error = errorLine();
     const submit = h("button", { type: "submit", className: "dialog-submit", disabled: !!st.usesLfs }, "Encrypt vault");
-    // The first option this app can do, the recommended one when it can.
-    let history = st.hasRemote ? (HISTORY_OPTIONS.find((o) => features[o.id])?.id ?? "now") : "now";
+    // Only the options this app can do; the recommended one first.
+    const options = HISTORY_OPTIONS.filter((o) => features[o.id]);
+    let history = st.hasRemote ? options[0].id : "now";
     let rename = false;
     const question = st.hasRemote
       ? h(
           "fieldset",
           { className: "dialog-fieldset" },
           h("legend", { className: "dialog-label" }, HISTORY_QUESTION),
-          HISTORY_OPTIONS.map((o) =>
+          options.map((o) =>
             h(
               "label",
               { className: "dialog-radio-row" },
@@ -1110,35 +1022,34 @@ async function openEncryptVaultDialog(c, host, done) {
                 name: "enc-history",
                 value: o.id,
                 checked: o.id === history,
-                disabled: !features[o.id],
                 onChange: () => (history = o.id),
               }),
               h(
                 "span",
                 {},
                 h("span", {}, o.label, o.recommended ? h("span", { className: "text-caption" }, " (recommended)") : null),
-                h("span", { className: "text-caption", style: "display:block" }, o.text),
-                features[o.id] ? null : h("span", { className: "text-caption", style: "display:block" }, NEEDS_NEWER)
+                h("span", { className: "text-caption", style: "display:block" }, o.text)
               )
             )
           )
         )
       : null;
-    const renameLink = h(
-      "button",
-      {
-        type: "button",
-        className: "btn-link",
-        role: "switch",
-        "aria-checked": "false",
-        disabled: !features.renameExisting,
-        onClick: (e) => {
-          rename = !rename;
-          e.currentTarget.setAttribute("aria-checked", String(rename));
-        },
-      },
-      features.renameExisting ? `Rename ${renameCount} existing notes too` : "Rename existing notes too"
-    );
+    const renameLink = features.renameExisting
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "btn-link",
+            role: "switch",
+            "aria-checked": "false",
+            onClick: (e) => {
+              rename = !rename;
+              e.currentTarget.setAttribute("aria-checked", String(rename));
+            },
+          },
+          `Rename ${renameCount} existing notes too`
+        )
+      : null;
     card.append(
       h(
         "form",
@@ -1161,16 +1072,15 @@ async function openEncryptVaultDialog(c, host, done) {
             }
           },
         },
-        h("div", { className: "dialog-title" }, title),
         h("p", { className: "dialog-hint" }, VAULT_DIALOG_TEXT),
         question,
         // The second sentence only where the app can keep it true.
         h(
           "p",
           { className: "dialog-error", role: "note" },
-          features.nameById ? `${NAMES_TEXT} ${NAMES_BY_ID_TEXT} ` : `${NAMES_TEXT} `,
-          renameLink,
-          features.renameExisting ? null : ` ${NEEDS_NEWER}`
+          features.nameById ? `${NAMES_TEXT} ${NAMES_BY_ID_TEXT}` : NAMES_TEXT,
+          renameLink ? " " : null,
+          renameLink
         ),
         st.usesLfs ? h("p", { className: "dialog-error", role: "alert" }, LFS_TEXT) : null,
         error.node,
@@ -1191,18 +1101,21 @@ async function vaultSection(c, host, ctx, state, redraw) {
     parts.push(h("p", { className: "form-error" }, messageOf(err)));
     return parts;
   }
+  const features = c.vaultFeatures();
   if (!st.encrypted) {
     parts.push(
       h("p", { className: "text-caption" }, VAULT_TEXT),
-      h(
-        "div",
-        { className: "btn-row" },
-        h(
-          "button",
-          { type: "button", className: "btn", disabled: !ctx.keys.signing, onClick: () => void openEncryptVaultDialog(c, host, redraw).catch(fail) },
-          "Encrypt vault…"
-        )
-      )
+      features.encrypt
+        ? h(
+            "div",
+            { className: "btn-row" },
+            h(
+              "button",
+              { type: "button", className: "btn", disabled: !ctx.keys.signing, onClick: () => void openEncryptVaultDialog(c, host, redraw).catch(fail) },
+              "Encrypt vault…"
+            )
+          )
+        : null
     );
     return parts;
   }
@@ -1217,8 +1130,9 @@ async function vaultSection(c, host, ctx, state, redraw) {
     }
     redraw();
   };
-  const toggle = h("button", { type: "button", className: "btn" }, st.unlocked ? "Lock" : "Unlock");
-  toggle.addEventListener("click", busy(toggle, () => (st.unlocked ? c.lockVault() : c.unlockVault())));
+  const canToggle = st.unlocked ? features.lock : features.unlock;
+  const toggle = canToggle ? h("button", { type: "button", className: "btn" }, st.unlocked ? "Lock" : "Unlock") : null;
+  toggle?.addEventListener("click", busy(toggle, () => (st.unlocked ? c.lockVault() : c.unlockVault())));
   parts.push(h("div", { className: "dialog-row" }, h("span", {}, st.unlocked ? "Encrypted · unlocked on this Mac" : "Encrypted · locked on this Mac"), toggle));
   const noKey = state.unlockError;
   if (noKey && !st.unlocked) {
@@ -1259,7 +1173,7 @@ async function vaultSection(c, host, ctx, state, redraw) {
           type: "button",
           className: "btn",
           disabled: !st.unlocked,
-          onClick: () => openAddVaultMemberDialog(c, vaultName(host.vault?.current()?.path), redraw),
+          onClick: () => openAddVaultMemberDialog(c, host, vaultName(host.vault?.current()?.path), redraw),
         },
         "Add member"
       )
@@ -1342,10 +1256,10 @@ function renderSettings(c, host, storage, container) {
     parts.push(h("div", { className: "section-title section-title-secondary" }, "Groups"));
     for (const g of parseConfig(md).groups.filter((x) => GROUP_RE.test(x.name))) {
       const stop = async (login) => {
-        const ok = await confirmModal({
+        const ok = await host.ui.confirm({
           title: `Stop sharing “${g.name}” with @${login}?`,
-          message: STOP_SHARING_TEXT,
-          confirm: "Stop sharing",
+          body: STOP_SHARING_TEXT,
+          confirmLabel: "Stop sharing",
           danger: true,
         });
         if (!ok) return;
@@ -1367,11 +1281,13 @@ function renderSettings(c, host, storage, container) {
               firstOfLogin && !isYou && m.login ? h("button", { type: "button", className: "btn-link", onClick: () => void stop(m.login) }, "Stop sharing") : null
             );
           }),
-          h(
-            "div",
-            { className: "btn-row" },
-            h("button", { type: "button", className: "btn", onClick: () => void openAddMemberDialog(c, g.name, draw).catch(fail) }, "Add member")
-          )
+          c.canReencrypt()
+            ? h(
+                "div",
+                { className: "btn-row" },
+                h("button", { type: "button", className: "btn", onClick: () => void openAddMemberDialog(c, host, g.name, draw).catch(fail) }, "Add member")
+              )
+            : null
         )
       );
     }
@@ -1379,7 +1295,7 @@ function renderSettings(c, host, storage, container) {
       h(
         "div",
         { className: "btn-row" },
-        h("button", { type: "button", className: "btn", disabled: !keys.signing, onClick: () => openNewGroupDialog(c, keys, draw) }, "New group")
+        h("button", { type: "button", className: "btn", disabled: !keys.signing, onClick: () => openNewGroupDialog(c, host, keys, draw) }, "New group")
       )
     );
 
@@ -1419,31 +1335,33 @@ export function activate(host) {
   host.registerBodyCodec(c.codec);
   host.vault?.onClose(() => c.forgetAll());
 
-  const fail = (err) => host.toast(messageOf(err), "error");
-  const encrypt = (note) => openEncryptDialog(c, note).catch(fail);
-  const decrypt = (note) => runDecrypt(c, note).catch(fail);
-  const render = (container) => renderSettings(c, host, storage, container);
-  // Settings → Encryption where the app has plugin settings tabs; an overlay otherwise.
-  const tab = host.registerSettingsTab?.({ id: "encryption", label: "Encryption", render });
-  const openSettings = () => (tab && host.openSettingsTab ? host.openSettingsTab("encryption") : host.ui.openOverlay({ title: "Encryption settings", render }));
+  // Without the app's dialogs and Settings tabs (an app older than 0.12.1), the codec alone: encrypted notes still unlock and save.
+  if (typeof host.ui.openDialog !== "function" || typeof host.ui.confirm !== "function" || typeof host.registerSettingsTab !== "function") return;
 
-  // The note menu; `when` and `palette: false` are honoured where the app supports them.
+  const fail = (err) => host.toast(messageOf(err), "error");
+  const encrypt = (note) => openEncryptDialog(c, host, note).catch(fail);
+  const decrypt = (note) => runDecrypt(c, host, note).catch(fail);
+  host.registerSettingsTab({ id: "encryption", label: "Encryption", render: (container) => renderSettings(c, host, storage, container) });
+  const openSettings = () => host.openSettingsTab?.("encryption");
+
+  // The note menu, for the notes each applies to (`CommandNote.encryptedGroup`, `unlocked`).
   host.registerCommand({ id: "encrypt", label: "Encrypt…", noteMenu: true, palette: false, when: c.isPlain, run: encrypt });
   host.registerCommand({ id: "decrypt", label: "Decrypt…", noteMenu: true, palette: false, when: c.isUnlocked, run: decrypt });
-  // The palette. No default shortcuts.
+  // The palette, for the active note. No default shortcuts.
   host.registerCommand({ id: "encrypt-note", label: "Encrypt note", when: c.isPlain, run: encrypt });
   host.registerCommand({ id: "decrypt-note", label: "Decrypt note", when: c.isUnlocked, run: decrypt });
-  host.registerCommand({ id: "settings", label: "Encryption settings", run: openSettings });
+  if (typeof host.openSettingsTab === "function") host.registerCommand({ id: "settings", label: "Encryption settings", run: openSettings });
 
-  // Whole-vault encryption. The palette's Unlock vault shows only in a vault locked on this Mac.
-  const unlockVault = () =>
-    c.unlockVault().catch((err) => {
-      fail(err);
-      if (err?.code === "noMemberKey") openSettings();
-    });
-  host.registerCommand({ id: "unlock-vault", label: "Unlock vault", when: c.isVaultLocked, run: unlockVault });
-  // The core locked-vault notice's Unlock button, where the app offers one (proposed `registerVaultUnlocker`).
-  host.registerVaultUnlocker?.({ label: "Unlock", unlock: () => c.unlockVault() });
+  // Whole-vault encryption: the palette's Unlock vault in a vault locked on this Mac, and the locked-vault notice's Unlock.
+  if (c.vaultFeatures().unlock) {
+    const unlockVault = () =>
+      c.unlockVault().catch((err) => {
+        fail(err);
+        if (err?.code === "noMemberKey") openSettings();
+      });
+    host.registerCommand({ id: "unlock-vault", label: "Unlock vault", when: c.isVaultLocked, run: unlockVault });
+    host.registerVaultUnlocker?.({ label: "Unlock", unlock: () => c.unlockVault() });
+  }
   const refreshVault = () => void c.vaultStatus().catch(() => {});
   host.vault?.onOpen(refreshVault);
   if (host.vault?.current()) refreshVault();
@@ -1472,7 +1390,6 @@ export function activate(host) {
 }
 
 export function deactivate() {
-  if (typeof document !== "undefined") for (const close of [...openModals]) close();
   controller?.forgetAll();
   controller = null;
 }

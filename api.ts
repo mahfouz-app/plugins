@@ -18,6 +18,7 @@ import type {
   CommandNote,
   CommitFilesResult,
   CreatedRepo,
+  DialogSpec,
   EncryptionSwitch,
   ExportFormat,
   ExportRequest,
@@ -38,10 +39,13 @@ import type {
   NoteInfo,
   OverlaySpec,
   PluginCommand,
+  PluginConfirmOptions,
   ResolvedSlidesTemplate,
+  SettingsTab,
   SlidesPreviewRequest,
   SlidesPreviewResult,
   VaultInfo,
+  VaultUnlocker,
 } from "./host";
 import type { NoteRef, PluginTabContext, PluginTabType, ToolbarButton } from "./tabs";
 import type { ToolbarItem } from "./toolbar";
@@ -58,6 +62,7 @@ export type {
   CommandNote,
   CommitFilesResult,
   CreatedRepo,
+  DialogSpec,
   EncryptionSwitch,
   EmbedContext,
   EmbedRenderer,
@@ -81,15 +86,18 @@ export type {
   NoteRef,
   OverlaySpec,
   PluginCommand,
+  PluginConfirmOptions,
   PluginId,
   PluginTabContext,
   PluginTabType,
   PublishRenderer,
   ResolvedSlidesTemplate,
   SlidesPreviewRequest,
+  SettingsTab,
   SlidesPreviewResult,
   ToolbarButton,
   VaultInfo,
+  VaultUnlocker,
 };
 export type { ToolbarItem, ToolbarDropdownOption } from "./toolbar";
 
@@ -176,6 +184,17 @@ export interface PanZoomControls {
   dispose(): void;
 }
 
+/** One installed plugin, as `host.plugins.list` reports it. */
+export interface PluginListing {
+  /** Qualified id, `<registry>/<id>`. */
+  id: PluginId;
+  label: string;
+  /** Turned on for the open vault (`## Plugins`). */
+  enabled: boolean;
+  /** May reach the network: its manifest declares `network`, it has a sidecar, or the catalog doesn't say (the rule that keeps embeds out of an unlocked encrypted note). */
+  networked: boolean;
+}
+
 export interface SaveFileOptions {
   /** Suggested file name; only its last path component is used. */
   defaultName: string;
@@ -196,10 +215,34 @@ export interface MahfouzPluginHost {
    * handed back as `ctx.arg` (e.g. which block to edit). Pending note saves
    * are flushed first. */
   openTab(type: string, note: NoteRef, arg: string): Promise<void>;
-  /** A command on notes: in note context menus (`noteMenu`) and/or on a
-   * shortcut (`shortcut` is the default; users rebind it in
-   * `.config/settings.md` under `<plugin>:<command id>`). */
+  /** A command on notes: in note context menus (`noteMenu`), the command
+   * palette (unless `palette: false`) and/or on a shortcut (`shortcut` is
+   * the default; users rebind it in `.config/settings.md` under
+   * `<plugin>:<command id>`). `when(note)` hides it from the note menu and
+   * the palette, and keeps its shortcut from running it, for a note it
+   * doesn't apply to (absent in apps older than 0.12.1, where every command
+   * shows for every note). */
   registerCommand(command: PluginCommand): Disposable;
+  /** A page in Settings, listed under `label` after the app's own, only
+   * while the vault has this plugin on (a plugin loaded only as a
+   * dependency gets a no-op). `render(container)` draws the page (use the
+   * app's classes: `.section-title`, `.btn`, `.text-caption`…) and returns
+   * its cleanup, run when the page closes. Absent in apps older than 0.12.1. */
+  registerSettingsTab?(tab: SettingsTab): Disposable;
+  /** Opens Settings on this plugin's tab `id`. Throws when it isn't registered. Absent in apps older than 0.12.1. */
+  openSettingsTab?(id: string): void;
+  /** A button on the locked-vault notice in the sidebar (a vault git-crypt
+   * keeps locked on this device), labelled `label`, beside Learn more, for
+   * the open vault. `unlock()` unlocks the open vault; its rejection is
+   * shown under the button. Once it resolves, the app reads the vault's lock
+   * again and syncs it in full. The latest registration is shown. While the
+   * open vault is locked, its settings can't say which plugins are on, so
+   * the app loads `mahfouz/encryption` for it when it's installed on this
+   * machine. Desktop only, while the vault has this plugin on: absent on
+   * the web and in apps older than 0.12.1. */
+  registerVaultUnlocker?(unlocker: VaultUnlocker): Disposable;
+  /** The plugins installed on this machine. Absent in apps older than 0.12.1. */
+  plugins?: { list(): Promise<PluginListing[]> };
   /** A format in the Export dialog. The app collects the dialog's options,
    * passes the content to render, and offers to save the file you return. */
   registerExportFormat(format: ExportFormat): Disposable;
@@ -328,6 +371,34 @@ export interface MahfouzPluginHost {
      * Desktop only, and only while the vault has this plugin on.
      */
     setEncryption?(note: NoteRef, change: EncryptionSwitch): Promise<void>;
+    /**
+     * The open vault's encrypted notes (`encrypted: <group>` in their
+     * frontmatter), or only `group`'s, from the app's index, in path order.
+     * Empty while the vault is git-crypt locked.
+     *
+     * Desktop only, and only while the vault has this plugin on: absent on
+     * the web and in apps older than 0.12.1.
+     */
+    listEncrypted?(group?: string): Promise<NoteRef[]>;
+    /**
+     * The plaintext of encrypted note `note`, and the armored body it was
+     * decrypted from (pass that to `writeBody` as `expected`). The app reads
+     * the note's file itself and decrypts it as an Unlock does
+     * (`ctx.decryptNote()`): the `mahfouz/encryption` plugin's sidecar gets
+     * only the armored body and the group's fingerprints from
+     * `.config/encryption.md`. Refused for a note of another vault, a note
+     * that isn't encrypted, a git-crypt locked vault, and while
+     * `mahfouz/encryption` is off.
+     *
+     * Installed plugins share one JavaScript realm and are one trust domain:
+     * any enabled plugin could ask for a decrypt. The gate is gpg-agent:
+     * configure it to ask for the passphrase or a YubiKey touch on every
+     * decrypt (no cache) if other plugins are installed.
+     *
+     * Desktop only, and only while the vault has this plugin on: absent on
+     * the web and in apps older than 0.12.1.
+     */
+    decrypt?(note: NoteRef): Promise<{ plaintext: string; armored: string }>;
   };
   /**
    * The open vault. Desktop only: absent on the web and in older apps.
@@ -495,6 +566,16 @@ export interface MahfouzPluginHost {
      * there. Resolves to the path written, or null when the user cancelled.
      * On the web it downloads `data` instead and resolves to the file name. */
     saveFile?(options: SaveFileOptions): Promise<string | null>;
+    /** The app's yes/no question: `title`, `body`, Cancel and `confirmLabel`
+     * (red, with focus on Cancel, when `danger`). Resolves true for the
+     * confirm button. Absent in apps older than 0.12.1. */
+    confirm?(options: PluginConfirmOptions): Promise<boolean>;
+    /** A dialog with the app's look: `title` on top, and `render(container)`
+     * draws the rest (use `.dialog-row`, `.dialog-input`, `.dialog-actions`
+     * with `.dialog-cancel` and `.dialog-submit`…) and returns its cleanup.
+     * Escape and a click outside close it, as does `close()`, and the
+     * plugin unloading. Absent in apps older than 0.12.1. */
+    openDialog?(spec: DialogSpec): { close(): void };
   };
 }
 

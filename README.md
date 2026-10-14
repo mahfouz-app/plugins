@@ -47,7 +47,21 @@ decrypts. It needs **GPG** on the Mac ([GPG Suite](https://gpgtools.org), or
 - **Your signing key, backup key and GitHub login** are per machine, in the app's `localStorage`
   (`mahfouz.encryption.keys`), never in the vault.
 - **Decrypting is the app's:** the host refuses the sidecar's `decrypt` from plugin code. The body
-  codec calls `ctx.decryptNote()`, where the desktop reads the note's file itself.
+  codec calls `ctx.decryptNote()` on an Unlock, where the desktop reads the note's file itself,
+  and `ctx.decryptBlob(ctx.sha)` in a merge, where it reads that commit's version from git.
+  Decrypt and a member's re-encryption ask `host.notes.decrypt(note)`, which reads the file too.
+- **Adding a member** to a group re-encrypts each of its notes (`host.notes.listEncrypted(group)`,
+  `host.notes.decrypt`, encrypt, `host.notes.writeBody(note, armored, expected)`, written only
+  while the file still holds what was decrypted), then writes `.config/encryption.md` and commits
+  the notes and the config in one `host.vault.commitFiles` (a disk-only note is left out, and the
+  plugin says how many). **Stop sharing** only removes their rows: new edits leave their key out.
+- **In the app:** Settings → Encryption is a Settings tab (`host.registerSettingsTab`); the dialogs
+  and questions are the app's (`host.ui.openDialog`, `host.ui.confirm`). Encrypt… shows only on a
+  plain note and Decrypt… only on an encrypted note unlocked this session, from what the app says
+  of the note (`CommandNote.encryptedGroup`, `unlocked`), in the note menu, the palette and the
+  toolbar. The settings page warns when other enabled plugins can reach the network
+  (`host.plugins.list()`). In an app without these (older than 0.12.1) the plugin registers its
+  body codec alone, so encrypted notes still unlock and save.
 
 > **Trust:** Installed plugins share one JavaScript realm; any enabled plugin could ask for a
 > decrypt. Configure gpg-agent to ask for your passphrase or a YubiKey touch on every decrypt.
@@ -84,17 +98,17 @@ a repository `git-crypt` encrypted. CI checks both directions against the real C
   for your signing and backup keys (a renormalize commits what's pending first and refuses an
   edited file; then `initVault`; then a renormalize commits every file encrypted), and once it's
   encrypted shows Lock/Unlock (and the palette's **Unlock vault**) and its members, by login where
-  `.config/encryption.md` lists the fingerprint. Only *Encrypt from now on* works today; the
-  other choices are shown disabled ("Needs a newer version of Mahfouz.") until the app has the
-  APIs below.
-- **Required app APIs** (feature-detected, absent in 0.12.1): `host.git.setRemote(url)` and
-  `host.git.push(opts?: {force?: boolean})` (move to a new private repository, with
-  `host.repo.createPrivate`); `host.git.rewriteHistory(message)` (rewrite history under the
-  vault's lock, never from the sidecar); `host.settings.setNewNoteNaming("title" | "id")` and
-  `host.settings.setCommitMessageNaming("titles" | "none")` (new notes named by id, commit
-  messages that don't name notes); `host.notes.countRenamableById()` and
-  `host.notes.renameAllById()` (rename existing notes); `host.registerVaultUnlocker({label,
-  unlock})` (an Unlock button in the app's locked-vault notice).
+  `.config/encryption.md` lists the fingerprint. The sidebar's locked-vault notice gets an
+  **Unlock** button (`host.registerVaultUnlocker`).
+- **History and naming:** with a remote, the Encrypt dialog asks what happens to the unencrypted
+  history, offering only what the app can do: *Move to a new private repository*
+  (`host.repo.moveToNewPrivate(name)`), *Rewrite history and force-push*
+  (`host.git.rewriteHistory(message)`), and *Encrypt from now on*. The app asks its own
+  confirmation and pushes; the plugin never sets a remote or pushes. Where the app has
+  `host.settings.setNewNoteNaming("id")` and `host.settings.setCommitMessageNaming("none")`, new
+  notes are named by id and commit messages stop naming notes; where it has
+  `host.notes.countRenamableById()` and `host.notes.renameAllById()`, the dialog offers to rename
+  the existing notes too. Each is feature-detected and left out of the dialog when absent.
 - **In a terminal:** git runs the filter by the path Mahfouz configured, so `git` works in an
   unlocked vault. Commands like `git-crypt unlock`, `lock` and `status` need the real
   `git-crypt` installed (`brew install git-crypt`); the plugin's binary only runs git's filters.
@@ -296,9 +310,14 @@ note editor is open.
 
 ### Commands, overlays, export formats, and other plugins
 
-- `host.registerCommand({ id, label, icon?, noteMenu?, shortcut?, run(note) })` adds a command to
-  note menus (`noteMenu`) and/or a keyboard shortcut. `shortcut` is only the default: users rebind
-  or disable it in `.config/settings.md` under `## Shortcuts`, row `<registry>/<plugin>:<command id>`.
+- `host.registerCommand({ id, label, icon?, noteMenu?, shortcut?, when?, palette?, run(note) })`
+  adds a command to note menus (`noteMenu`), the command palette (unless `palette: false`) and/or a
+  keyboard shortcut. `when(note)` hides it from the menu and the palette, and keeps its shortcut
+  from running, for a note it doesn't apply to; it gets the same `CommandNote` as `run`, which for
+  an encrypted note also carries `encryptedGroup` and `unlocked`. Keep it cheap and synchronous.
+  `shortcut` is only the default: users rebind or disable it in `.config/settings.md` under
+  `## Shortcuts`, row `<registry>/<plugin>:<command id>`. `when` and `palette` need Mahfouz 0.12.1;
+  older apps show every command for every note.
 - `host.ui.openOverlay({ title, render(container, { close }) })` covers the whole window (native
   full screen). The app handles Esc, View → Stop Presenting and the close button.
 - `host.registerExportFormat({ id, label, export(request, progress) })` adds a format to the Export
@@ -324,6 +343,12 @@ note editor is open.
     the path written, or null if cancelled. On the web it downloads the file instead and resolves to
     its name.
   - `ctx.theme`, `ctx.onThemeChange` and a toolbar button's `menu` (see Tabs).
+  - From Mahfouz 0.12.1: `host.registerSettingsTab({ id, label, render(container) })` adds a page
+    to Settings while the vault has the plugin on, and `host.openSettingsTab(id)` opens it;
+    `host.ui.openDialog({ title, render(container) })` opens a dialog with the app's look (Escape
+    and a click outside close it; returns `{ close }`), and `host.ui.confirm({ title, body,
+    confirmLabel, danger? })` asks the app's yes/no question; `host.plugins.list()` lists the
+    installed plugins (`{ id, label, enabled, networked }`).
   - `host.registerImporter(importer)` and `host.http` (see Importers). Absent before Mahfouz 0.12.0
     and on the web.
   - `host.registerPublishRenderer(languages, publishRender)` draws a fence language to an SVG

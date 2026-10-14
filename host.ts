@@ -1,4 +1,4 @@
-// Vendored from mahfouz-app/app src/core/src/plugins/{bodyCodec,commands,exportFormats,fencedBlocks,hostVault,notes,overlay}.ts,
+// Vendored from mahfouz-app/app src/core/src/plugins/{bodyCodec,commands,dialogs,exportFormats,fencedBlocks,hostVault,notes,overlay,settingsTabs,vaultUnlockers}.ts,
 // src/core/src/db/slidesTemplates.ts, src/core/src/plugins/slidesPreview.ts and src/core/src/import/types.ts — keep in sync.
 import type { NoteRef } from "./tabs";
 
@@ -7,6 +7,10 @@ export interface CommandNote {
   noteId: string;
   path: string;
   title: string;
+  /** The group an encrypted note is encrypted for (its `encrypted:` value); absent for any other note. */
+  encryptedGroup?: string;
+  /** An encrypted note this session holds the plaintext of (crypto/unlocked.ts); absent for any other note. */
+  unlocked?: boolean;
 }
 
 export interface PluginCommand {
@@ -18,6 +22,15 @@ export interface PluginCommand {
   noteMenu?: boolean;
   /** Default binding, e.g. `Mod+Shift+P`. */
   shortcut?: string;
+  /**
+   * Whether the command applies to `note`: false hides it from the note
+   * menu and the palette, and its shortcut does nothing for that note.
+   * Called on every render of those, so keep it cheap and synchronous; one
+   * that throws counts as false.
+   */
+  when?(note: CommandNote): boolean;
+  /** `false` leaves it out of the command palette (the note menu and its shortcut still run it). */
+  palette?: false;
   run(note: CommandNote): void | Promise<void>;
 }
 
@@ -352,9 +365,30 @@ export interface BodyCodecContext {
    * the group, the only signers it accepts). A codec should call it rather than decrypt
    * `armored` itself: no API decrypts ciphertext a caller hands in. Rejects
    * when the file no longer holds `armored`. Absent in a merge's decode (a
-   * base or theirs from history, not the file) and in apps older than it.
+   * base or theirs from history, not the file: `decryptBlob` is that) and
+   * in apps older than it.
+   *
+   * Installed plugins share one JavaScript realm and are one trust domain:
+   * any enabled plugin could ask for a decrypt. The gate is gpg-agent:
+   * configure it to ask for the passphrase or a YubiKey touch on every
+   * decrypt (no cache) if other plugins are installed.
    */
   decryptNote?(): Promise<string>;
+  /**
+   * In a merge's decode: the commit this version of the note comes from (a
+   * merge's base, ours or theirs).
+   */
+  sha?: string;
+  /**
+   * In `decode` for a merge the user started (Sync now, of a note unlocked
+   * this session): the plaintext of this version, which the desktop reads
+   * from git itself (commit `sha`, which must be `ctx.sha`, at `ctx.path`)
+   * and decrypts like `decryptNote`, with the same checks. Rejects when that
+   * version's armored body isn't `armored`. Absent in an Unlock's decode, in
+   * background merges (which never decrypt: the conflict notice's Keep both
+   * settles them) and in apps older than it.
+   */
+  decryptBlob?(sha: string): Promise<string>;
 }
 
 export interface BodyCodec {
@@ -391,4 +425,38 @@ export interface CreatedRepo {
   /** The SSH URL to set as the vault's remote. */
   cloneUrl: string;
   htmlUrl: string;
+}
+
+/** A page in Settings a plugin adds (the app's `src/core/src/plugins/settingsTabs.ts`). */
+export interface SettingsTab {
+  /** Unique within the plugin. */
+  id: string;
+  /** The tab's name in Settings' list. */
+  label: string;
+  /** Renders the page into `container`; the returned function runs when the page closes. */
+  render(container: HTMLElement): void | (() => void);
+}
+
+/** A dialog a plugin opens with `host.ui.openDialog` (the app's `src/core/src/plugins/dialogs.ts`). */
+export interface DialogSpec {
+  /** The dialog's title, and its accessible name. */
+  title: string;
+  /** Renders the dialog's content into `container`; the returned function runs when it closes. */
+  render(container: HTMLElement): void | (() => void);
+}
+
+/** `host.ui.confirm`'s question (the app's `src/core/src/plugins/dialogs.ts`). */
+export interface PluginConfirmOptions {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  danger?: boolean;
+}
+
+/** A button on the locked-vault notice (the app's `src/core/src/plugins/vaultUnlockers.ts`). */
+export interface VaultUnlocker {
+  /** The button's label, e.g. "Unlock". */
+  label: string;
+  /** Unlocks the open vault; rejects with what went wrong. */
+  unlock(): Promise<unknown>;
 }
