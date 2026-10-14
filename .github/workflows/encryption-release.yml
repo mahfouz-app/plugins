@@ -1,0 +1,94 @@
+# Builds the mahfouz/encryption plugin's `git-crypt` binary for macOS and
+# attaches it to a GitHub release, from which plugins/encryption/plugin.json
+# downloads it (pinned by sha256).
+#
+# To cut one:
+#   1. Raise `version` in plugins/encryption/plugin.json and
+#      plugins/encryption/sidecar/Cargo.toml, and point the artifact URLs at
+#      encryption-v<version>.
+#   2. Push the tag `encryption-v<version>` on that commit.
+#   3. Copy the two sha256 values from this run's summary (or the
+#      .sha256 assets) into plugin.json, in a PR. CI's artifact check fails
+#      until they match, so a manifest never reaches main without them.
+name: Encryption release
+
+on:
+  push:
+    tags: ["encryption-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            platform: darwin-arm64
+          - target: x86_64-apple-darwin
+            platform: darwin-x64
+    defaults:
+      run:
+        working-directory: plugins/encryption/sidecar
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the plugin and crate versions
+        working-directory: .
+        run: |
+          tag="${GITHUB_REF_NAME#encryption-v}"
+          plugin=$(node -p 'require("./plugins/encryption/plugin.json").version')
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' plugins/encryption/sidecar/Cargo.toml | head -1)
+          if [ "$tag" != "$plugin" ] || [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, plugin.json $plugin, Cargo.toml $crate must agree"
+            exit 1
+          fi
+
+      - name: Toolchain
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        run: |
+          name="git-crypt-${{ matrix.platform }}.tar.gz"
+          bin="target/${{ matrix.target }}/release/git-crypt"
+          file "$bin"
+          tar -czf "$name" -C "$(dirname "$bin")" git-crypt
+          shasum -a 256 "$name" | tee "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "\`${{ matrix.platform }}\`: \`$(cut -d' ' -f1 "$name.sha256")\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            plugins/encryption/sidecar/${{ steps.package.outputs.name }}
+            plugins/encryption/sidecar/${{ steps.package.outputs.name }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l dist
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "Encryption plugin ${GITHUB_REF_NAME#encryption-v}" \
+              --notes "The \`git-crypt\` sidecar binary for the mahfouz/encryption plugin. Checksums are pinned in plugins/encryption/plugin.json."
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

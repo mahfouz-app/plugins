@@ -18,18 +18,130 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 | `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.12.0 |
+| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.12.0 (the first release with the host APIs and the manifest `terms` it uses) |
 
 `npm test` runs the plugins' tests and the registry checker's with `node --test` (no
 dependencies).
+
+## Encryption plugin
+
+`mahfouz/encryption` encrypts a note's body as one signed and encrypted, ASCII-armored OpenPGP
+message, readable only by the keys it was encrypted to. It's **desktop only**: the web app never
+decrypts. It needs **GPG** on the Mac ([GPG Suite](https://gpgtools.org), or
+`brew install gnupg pinentry-mac`); the sidecar looks for `gpg` on `PATH`, then in
+`/opt/homebrew/bin`, `/usr/local/bin` and `/usr/local/MacGPG2/bin`, and reports the path it uses.
+
+- Signing and decrypting use **your** keyring and gpg-agent, so your passphrase or security key
+  is asked for by your own pinentry. Nothing is ever imported into your keyring.
+- Other people's public keys (fetched from `https://github.com/<login>.gpg`, the plugin's only
+  network host) go into a **plugin-owned keyring** in the plugin's data directory.
+- A note decrypts only when it's signed by a key you allow. A signer's key that has expired
+  since still counts for what it signed while valid; a revoked one never does. Recipients that
+  are expired, revoked or can't encrypt are refused, and so is signing with an expired key.
+
+- **Groups** live in the vault's `.config/encryption.md`: a `## <group>` heading per group, each
+  with a `| login | fingerprint |` table of full (40- or 64-digit) fingerprints. The app reads the
+  same file (`groupSigners`): a group's fingerprints are the only signers its notes' decrypts
+  accept, and with your backup key they're the recipients of every encrypt. "Only me" is the
+  group `only-<login>`; a group you create lists your signing and backup keys.
+- **Your signing key, backup key and GitHub login** are per machine, in the app's `localStorage`
+  (`mahfouz.encryption.keys`), never in the vault.
+- **Decrypting is the app's:** the host refuses the sidecar's `decrypt` from plugin code. The body
+  codec calls `ctx.decryptNote()` on an Unlock, where the desktop reads the note's file itself,
+  and `ctx.decryptBlob(ctx.sha)` in a merge, where it reads that commit's version from git.
+  Decrypt and a member's re-encryption ask `host.notes.decrypt(note)`, which reads the file too.
+- **Adding a member** to a group re-encrypts each of its notes (`host.notes.listEncrypted(group)`,
+  `host.notes.decrypt`, encrypt, `host.notes.writeBody(note, armored, expected)`, written only
+  while the file still holds what was decrypted), then writes `.config/encryption.md` and commits
+  the notes and the config in one `host.vault.commitFiles` (a disk-only note is left out, and the
+  plugin says how many). **Stop sharing** only removes their rows: new edits leave their key out.
+- **In the app:** Settings → Encryption is a Settings tab (`host.registerSettingsTab`); the dialogs
+  and questions are the app's (`host.ui.openDialog`, `host.ui.confirm`). Encrypt… shows only on a
+  plain note and Decrypt… only on an encrypted note unlocked this session, from what the app says
+  of the note (`CommandNote.encryptedGroup`, `unlocked`), in the note menu, the palette and the
+  toolbar. The settings page warns when other enabled plugins can reach the network
+  (`host.plugins.list()`). In an app without these (older than 0.12.0) the plugin registers its
+  body codec alone, so encrypted notes still unlock and save.
+
+> **Trust:** Installed plugins share one JavaScript realm; any enabled plugin could ask for a
+> decrypt. Configure gpg-agent to ask for your passphrase or a YubiKey touch on every decrypt.
+
+### Vault encryption
+
+The plugin can also encrypt a whole vault's git repository, so the remote (GitHub) only ever
+holds ciphertext. It uses [git-crypt](https://github.com/AGWA/git-crypt)'s scheme and layout,
+byte for byte, so the real `git-crypt` reads a vault the plugin encrypted and the plugin reads
+a repository `git-crypt` encrypted. CI checks both directions against the real CLI.
+
+- **Enable** (`initVault`): generates the vault key, stores it in `.git/git-crypt/keys/default`
+  (this clone only, 0600), encrypts it to each member's GPG key as
+  `.git-crypt/keys/default/0/<fingerprint>.gpg` (committed), and points git's
+  `filter.git-crypt` and `diff.git-crypt` at the plugin's binary. It also appends
+  `* filter=git-crypt diff=git-crypt` (with `.gitattributes` and `.git-crypt/**` left out) to
+  the root `.gitattributes`, since the app has no plugin API that writes that file; Mahfouz then
+  renormalizes and commits. One of the members must be one of your own keys; add a second one
+  (a backup key) so a lost key doesn't lose the vault. A vault that stores files with Git LFS is
+  refused: git-crypt would encrypt the LFS pointer files.
+- **Unlock** (`unlockVault`), on another Mac or a fresh clone: decrypts your member file with
+  your gpg (pinentry asks), installs the key and the filter, and Mahfouz checks the files out
+  again as plaintext. **Lock** (`lockVault`) removes both, and is refused while anything is
+  uncommitted (once the key is gone nothing can be encrypted); the files are checked out again
+  as ciphertext.
+- **Members** (`addVaultMember`, `removeVaultMember`): adding one encrypts the vault key to
+  their public key (imported from `https://github.com/<login>.gpg`). **Removing a member doesn't
+  rotate the key**: whoever had it can still decrypt everything committed with it, past and
+  future, until the key changes.
+- **Terms:** `terms.md` (the manifest's `terms`) states git-crypt's limits: names, commit
+  messages and change times stay readable, the key can't be rotated, earlier commits stay
+  unencrypted, no Git LFS and terminal commands need the real `git-crypt`, and every installed
+  plugin can ask your keys to decrypt (set gpg-agent to ask for the passphrase or a YubiKey touch
+  on every decrypt). The app shows it at install and enable; the *Encrypt vault* dialog shows it
+  too and keeps *Encrypt vault* disabled until "I accept these terms" is ticked, or when the file
+  can't be read.
+- **What stays visible:** file and folder names, file sizes (to the byte), which files changed
+  in each commit, commit messages, authors and dates, and branch names. Two identical files
+  give identical ciphertext. Encrypt the content, not the shape.
+- **In the app:** Settings → Encryption → *Encrypt this vault on GitHub* encrypts the open vault
+  for your signing and backup keys (a renormalize commits what's pending first and refuses an
+  edited file; then `initVault`; then a renormalize commits every file encrypted), and once it's
+  encrypted shows Lock/Unlock (and the palette's **Unlock vault**) and its members, by login where
+  `.config/encryption.md` lists the fingerprint. The sidebar's locked-vault notice gets an
+  **Unlock** button (`host.registerVaultUnlocker`).
+- **History and naming:** with a remote, the Encrypt dialog asks what happens to the unencrypted
+  history, offering only what the app can do: *Move to a new private repository*
+  (`host.repo.moveToNewPrivate(name)`), *Rewrite history and force-push*
+  (`host.git.rewriteHistory(message)`), and *Encrypt from now on*. The app asks its own
+  confirmation and pushes; the plugin never sets a remote or pushes. Where the app has
+  `host.settings.setNewNoteNaming("id")` and `host.settings.setCommitMessageNaming("none")`, new
+  notes are named by id and commit messages stop naming notes; where it has
+  `host.notes.countRenamableById()` and `host.notes.renameAllById()`, the dialog offers to rename
+  the existing notes too. Each is feature-detected and left out of the dialog when absent.
+- **In a terminal:** git runs the filter by the path Mahfouz configured, so `git` works in an
+  unlocked vault. Commands like `git-crypt unlock`, `lock` and `status` need the real
+  `git-crypt` installed (`brew install git-crypt`); the plugin's binary only runs git's filters.
+
+The sidecar is a Rust crate in `plugins/encryption/sidecar/`, built into one binary named
+`git-crypt`: run with no arguments it's the sidecar, and run as `git-crypt clean`, `smudge` or
+`diff` it's git-crypt's filter (the manifest's `gitPath` puts it on the PATH of every git
+command Mahfouz runs). It isn't built by the app:
+`.github/workflows/encryption-release.yml` builds it for both Macs when a tag
+`encryption-v<version>` is pushed and attaches `git-crypt-darwin-<arch>.tar.gz` to that
+release, and `plugin.json` downloads it pinned by sha256. A new sidecar version is released in
+that order: raise `version` (plugin.json and `Cargo.toml`) and the artifact URLs, push the tag,
+then copy the two checksums from the workflow's summary into `plugin.json`. CI's artifact check
+fails until they match. CI also runs the crate's `cargo fmt --check`, clippy and tests, with gpg
+and git-crypt installed, so the tests against the real gpg and git-crypt run there.
 
 ## Releasing
 
 `main` is the release: every Mahfouz install pulls this repository at launch, and shows **Update
 available** for any plugin whose `version` differs from the one it installed. So:
 
-1. **Change a plugin → raise its `version`** (semver) in the same PR. Without it, nobody gets the
-   change. CI fails a PR that changes anything under `plugins/<id>/` without raising that
-   plugin's version above the base branch's.
+1. **Change a plugin → raise its `version`** (semver) above the one on `main`. Without it, nobody
+   gets the change. CI fails a PR that changes anything under `plugins/<id>/` while that plugin's
+   version isn't above `main`'s. The comparison is always with `main`, the release line, never a
+   stacked PR's base: a stack of PRs that ships as one release raises the version once, and a
+   plugin that isn't on `main` yet needs no bump until it's released.
 2. **Needs something new from the app → raise `mahfouz`** to the first app release that has it,
    so older apps show "Requires Mahfouz …" instead of a broken plugin. It's a Rust `semver` range:
    comparators separated by commas (`">=0.5.0, <1.0.0"`), not spaces or `||`.
@@ -43,14 +155,14 @@ upstream (npm, GitHub releases) and is pinned by sha256.
 
 `.github/workflows/ci.yml` runs on every PR, on `main`, and weekly:
 
-- `node scripts/check.mjs --base <base branch>`: every manifest against the rules the app's
+- `node scripts/check.mjs --base origin/main`: every manifest against the rules the app's
   parser enforces (fields, slugs, versions, the `mahfouz` range, paths staying inside the plugin,
   dependencies, the files `frontend`/`sidecar`/npm steps name, fields newer than the `mahfouz` range
-  allows), plus the version-bump rule
+  allows), plus the version-bump rule against `main`
 - `npm ci --ignore-scripts` wherever there's a lockfile, so it's known to match its `package.json`
 - `npm test`, after those installs, since a plugin's tests can import its own dependencies
 - `node scripts/check.mjs --artifacts`: downloads each artifact and checks its sha256 (on a PR,
-  only for plugins whose manifest changed; weekly, all of them, in case an upstream URL breaks)
+  only for plugins whose manifest differs from `main`'s; weekly, all of them, in case an upstream URL breaks)
 
 Run the same locally with `npm test && node scripts/check.mjs --base origin/main`.
 
@@ -100,7 +212,9 @@ approve the update.
   "frontend": "index.js",
   "sidecar": { "runtime": "node", "entry": "sidecar.js" },
   "network": { "hosts": ["api.example.com", "*.files.example.com"] },
-  "secrets": { "token": { "hosts": ["api.example.com"] } }
+  "secrets": { "token": { "hosts": ["api.example.com"] } },
+  "configFile": "example.md",
+  "terms": "terms.md"
 }
 ```
 
@@ -125,6 +239,8 @@ relative and stay inside the plugin's directory.
 | `network` | `{ "hosts": [...] }`: the only hosts `host.http.request` (and the app's downloads for an importer's attachments) may reach, over https. Each is an exact lowercase DNS name with at least two labels (`api.notion.com`), or `*.` followed by one (`*.notion.so`: any subdomain, never `notion.so` itself). No scheme, port, path, IP address, bare `*` or `*.<tld>`. Without it the plugin has no network access through the host. Needs `"mahfouz": ">=0.12.0"`. |
 | `secrets` | `{ "<name>": { "hosts": [...] } }`: session secrets the user pastes into the app (an importer's `credential.secretName`), each bound to the hosts it may be sent to. Every host must also be in `network.hosts`; names follow the id rules. The app attaches the secret as a bearer token only to those hosts and never hands it to the plugin. Needs `"mahfouz": ">=0.12.0"`. |
 | `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the plugin's `node` for the user's platform, or the user's Node when there isn't one. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
+| `configFile` | The one file under the vault's `.config/` the plugin may read and write through the host (`encryption.md` → `.config/encryption.md`): a lowercase name of letters, digits and dashes ending in `.md`. Needs `"mahfouz": ">=0.12.0"`. |
+| `terms` | A Markdown file in the plugin the user has to accept before installing or enabling it: what the plugin can't do or protect, in plain words. The app shows it in its install and enable dialogs, and the plugin may show the same file in its own dialogs by reading `plugin.json`'s `terms` next to its module. `## ` headings, `- ` bullets and paragraphs only. Needs `"mahfouz": ">=0.12.0"`. |
 
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
 installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).
@@ -212,9 +328,20 @@ note editor is open.
 
 ### Commands, overlays, export formats, and other plugins
 
-- `host.registerCommand({ id, label, icon?, noteMenu?, shortcut?, run(note) })` adds a command to
-  note menus (`noteMenu`) and/or a keyboard shortcut. `shortcut` is only the default: users rebind
-  or disable it in `.config/settings.md` under `## Shortcuts`, row `<registry>/<plugin>:<command id>`.
+- `host.registerCommand({ id, label, icon?, noteMenu?, shortcut?, when?, palette?, run(note) })`
+  adds a command to note menus (`noteMenu`), the command palette (unless `palette: false`) and/or a
+  keyboard shortcut. `when(note)` hides it from the menu and the palette, and keeps its shortcut
+  from running, for a note it doesn't apply to; it gets the same `CommandNote` as `run`, which for
+  an encrypted note also carries `encryptedGroup` and `unlocked`. Keep it cheap and synchronous.
+  `shortcut` is only the default: users rebind or disable it in `.config/settings.md` under
+  `## Shortcuts`, row `<registry>/<plugin>:<command id>`. `when` and `palette` need Mahfouz 0.12.0;
+  older apps show every command for every note.
+- `host.registerCommand({ id, label, scope: "vault", when?(vault), palette?, shortcut?, run(vault) })`
+  adds a vault command: it gets the open vault (`{ vaultId, name, path, locked }`) instead of a
+  note, and the palette lists it (and its shortcut runs) whenever a vault is open, with no note
+  too, such as a vault git-crypt keeps locked (`locked`), which shows none. `when(vault)` hides it
+  for a vault it doesn't apply to; it's never in note menus. Needs the Mahfouz release that ships
+  vault commands; older apps treat one as a note command.
 - `host.ui.openOverlay({ title, render(container, { close }) })` covers the whole window (native
   full screen). The app handles Esc, View → Stop Presenting and the close button.
 - `host.registerExportFormat({ id, label, export(request, progress) })` adds a format to the Export
@@ -240,6 +367,12 @@ note editor is open.
     the path written, or null if cancelled. On the web it downloads the file instead and resolves to
     its name.
   - `ctx.theme`, `ctx.onThemeChange` and a toolbar button's `menu` (see Tabs).
+  - From Mahfouz 0.12.0: `host.registerSettingsTab({ id, label, render(container) })` adds a page
+    to Settings while the vault has the plugin on, and `host.openSettingsTab(id)` opens it;
+    `host.ui.openDialog({ title, render(container) })` opens a dialog with the app's look (Escape
+    and a click outside close it; returns `{ close }`), and `host.ui.confirm({ title, body,
+    confirmLabel, danger? })` asks the app's yes/no question; `host.plugins.list()` lists the
+    installed plugins (`{ id, label, enabled, networked }`).
   - `host.registerImporter(importer)` and `host.http` (see Importers). Absent before Mahfouz 0.12.0
     and on the web.
   - `host.registerPublishRenderer(languages, publishRender)` draws a fence language to an SVG

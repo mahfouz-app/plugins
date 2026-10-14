@@ -1,4 +1,4 @@
-// Vendored from mahfouz-app/app src/core/src/plugins/{commands,exportFormats,fencedBlocks,notes,overlay}.ts,
+// Vendored from mahfouz-app/app src/core/src/plugins/{bodyCodec,commands,dialogs,exportFormats,fencedBlocks,hostRepo,hostVault,notes,overlay,settingsTabs,vaultUnlockers}.ts,
 // src/core/src/db/slidesTemplates.ts, src/core/src/plugins/slidesPreview.ts and src/core/src/import/types.ts — keep in sync.
 import type { NoteRef } from "./tabs";
 
@@ -7,19 +7,62 @@ export interface CommandNote {
   noteId: string;
   path: string;
   title: string;
+  /** The group an encrypted note is encrypted for (its `encrypted:` value); absent for any other note. */
+  encryptedGroup?: string;
+  /** An encrypted note this session holds the plaintext of (crypto/unlocked.ts); absent for any other note. */
+  unlocked?: boolean;
 }
 
-export interface PluginCommand {
+/** The open vault, as a vault command receives it. */
+export interface CommandVault {
+  vaultId: string;
+  name: string;
+  /** Where the vault lives: an absolute directory on desktop, `handle:<id>` or `opfs:<uuid>` on the web. */
+  path: string;
+  /** git-crypt keeps it locked on this device: its notes can't be read, so none are shown. */
+  locked: boolean;
+}
+
+interface CommandBase {
   id: string;
   label: string;
+  /** Default binding, e.g. `Mod+Shift+P`. */
+  shortcut?: string;
+  /** `false` leaves it out of the command palette (the note menu and its shortcut still run it). */
+  palette?: false;
+}
+
+/** A command on one note (the default scope). */
+export interface NoteCommand extends CommandBase {
+  scope?: "note";
   /** Inline SVG markup for the menu icon (24×24 viewBox, stroke-based). */
   icon?: string;
   /** Show it in note context menus. */
   noteMenu?: boolean;
-  /** Default binding, e.g. `Mod+Shift+P`. */
-  shortcut?: string;
+  /**
+   * Whether the command applies to `note`: false hides it from the note
+   * menu and the palette, and its shortcut does nothing for that note.
+   * Called on every render of those, so keep it cheap and synchronous; one
+   * that throws counts as false.
+   */
+  when?(note: CommandNote): boolean;
   run(note: CommandNote): void | Promise<void>;
 }
+
+/** A command on the open vault: in the palette and on its shortcut whenever a vault is open, note or not. */
+export interface VaultCommand extends CommandBase {
+  scope: "vault";
+  /**
+   * Whether the command applies to `vault`: false leaves it out of the
+   * palette, and its shortcut does nothing. Called on every render of the
+   * palette, so keep it cheap and synchronous; one that throws counts as
+   * false.
+   */
+  when?(vault: CommandVault): boolean;
+  run(vault: CommandVault): void | Promise<void>;
+}
+
+export type PluginCommand = NoteCommand | VaultCommand;
 
 export interface ExportRequest {
   note: { vaultId: string; noteId: string; path: string; title: string; attributes: Record<string, string> };
@@ -332,4 +375,125 @@ export interface ImportResult {
   files: string[];
   /** The plan's warnings followed by the writer's own. */
   warnings: string[];
+}
+
+/** What a body codec is told about the note it decodes or encodes (the app's `src/core/src/plugins/bodyCodec.ts`). */
+export interface BodyCodecContext {
+  vaultId: string;
+  noteId: string;
+  /** Vault-relative path of the note's file. */
+  path: string;
+  /** The group the note is encrypted for (its `encrypted:` value). */
+  group: string;
+  /** The armored body: the one to decode, or (encode) the one being replaced, "" for a new note. */
+  armored: string;
+  /**
+   * In `decode` for a user's Unlock (or the changed-on-disk banner): the
+   * plaintext of this note, which the desktop reads from its file and has
+   * the `mahfouz/encryption` plugin's sidecar decrypt (`decrypt`, given only
+   * the armored body and the fingerprints `.config/encryption.md` lists for
+   * the group, the only signers it accepts). A codec should call it rather than decrypt
+   * `armored` itself: no API decrypts ciphertext a caller hands in. Rejects
+   * when the file no longer holds `armored`. Absent in a merge's decode (a
+   * base or theirs from history, not the file: `decryptBlob` is that) and
+   * in apps older than it.
+   *
+   * Installed plugins share one JavaScript realm and are one trust domain:
+   * any enabled plugin could ask for a decrypt. The gate is gpg-agent:
+   * configure it to ask for the passphrase or a YubiKey touch on every
+   * decrypt (no cache) if other plugins are installed.
+   */
+  decryptNote?(): Promise<string>;
+  /**
+   * In a merge's decode: the commit this version of the note comes from (a
+   * merge's base, ours or theirs).
+   */
+  sha?: string;
+  /**
+   * In `decode` for a merge the user started (Sync now, of a note unlocked
+   * this session): the plaintext of this version, which the desktop reads
+   * from git itself (commit `sha`, which must be `ctx.sha`, at `ctx.path`)
+   * and decrypts like `decryptNote`, with the same checks. Rejects when that
+   * version's armored body isn't `armored`. Absent in an Unlock's decode, in
+   * background merges (which never decrypt: the conflict notice's Keep both
+   * settles them) and in apps older than it.
+   */
+  decryptBlob?(sha: string): Promise<string>;
+}
+
+export interface BodyCodec {
+  /** Unique within the plugin. */
+  id: string;
+  /** Whether this codec handles a note with this frontmatter (`encrypted` included). */
+  matches(frontmatter: Readonly<Record<string, string>>): boolean;
+  /** The plaintext of `ctx.armored`. Called only from a user action. */
+  decode(ctx: BodyCodecContext): Promise<string>;
+  /** `plaintext` as one ASCII-armored OpenPGP message for `ctx.group`. */
+  encode(ctx: BodyCodecContext, plaintext: string): Promise<string>;
+}
+
+/** The open vault, as a plugin sees it (the app's `src/core/src/plugins/hostVault.ts`). */
+export interface VaultInfo {
+  vaultId: string;
+  /** Absolute path of the vault's root directory. */
+  path: string;
+}
+
+/** What `host.vault.commitFiles` resolves with: whether it committed, and the disk-only notes' paths it left out (the app's `src/core/src/db/vaultGitOps.ts`). */
+export interface CommitFilesResult {
+  committed: boolean;
+  skipped: string[];
+}
+
+/** What `host.notes.setEncryption` takes. */
+export type EncryptionSwitch = { group: string; armored: string; expected: string } | { plaintext: string; expected: string };
+
+/** What `host.repo.createPrivate` resolves with. */
+export interface CreatedRepo {
+  /** `owner/name`. */
+  fullName: string;
+  /** The SSH URL to set as the vault's remote. */
+  cloneUrl: string;
+  htmlUrl: string;
+}
+
+/** A page in Settings a plugin adds (the app's `src/core/src/plugins/settingsTabs.ts`). */
+export interface SettingsTab {
+  /** Unique within the plugin. */
+  id: string;
+  /** The tab's name in Settings' list. */
+  label: string;
+  /** Renders the page into `container`; the returned function runs when the page closes. */
+  render(container: HTMLElement): void | (() => void);
+}
+
+/** A dialog a plugin opens with `host.ui.openDialog` (the app's `src/core/src/plugins/dialogs.ts`). */
+export interface DialogSpec {
+  /** The dialog's title, and its accessible name. */
+  title: string;
+  /** Renders the dialog's content into `container`; the returned function runs when it closes. */
+  render(container: HTMLElement): void | (() => void);
+}
+
+/** `host.ui.confirm`'s question (the app's `src/core/src/plugins/dialogs.ts`). */
+export interface PluginConfirmOptions {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  danger?: boolean;
+}
+
+/** A button on the locked-vault notice (the app's `src/core/src/plugins/vaultUnlockers.ts`). */
+export interface VaultUnlocker {
+  /** The button's label, e.g. "Unlock". */
+  label: string;
+  /** Unlocks the open vault; rejects with what went wrong. */
+  unlock(): Promise<unknown>;
+}
+
+/** What `host.repo.moveToNewPrivate` resolves with (the app's `src/core/src/plugins/hostRepo.ts`). */
+export interface MovedRepo {
+  /** `owner/name`. */
+  fullName: string;
+  htmlUrl: string;
 }

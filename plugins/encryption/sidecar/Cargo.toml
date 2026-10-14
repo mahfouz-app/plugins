@@ -1,0 +1,33 @@
+[package]
+name = "mahfouz-encryption-sidecar"
+version = "0.3.0"
+edition = "2021"
+publish = false
+description = "The mahfouz/encryption plugin's sidecar: per-note OpenPGP encryption through the user's gpg"
+
+# One binary, named git-crypt on purpose: it is also git-crypt's filter
+# (`clean`, `smudge`, `diff`), and the manifest's `gitPath` puts it on the PATH
+# of every git command Mahfouz runs.
+[[bin]]
+name = "git-crypt"
+path = "src/main.rs"
+
+[lib]
+name = "encryption_sidecar"
+path = "src/lib.rs"
+
+[dependencies]
+aes = "0.9.3"
+ctr = "0.10.1"
+getrandom = "0.4.3"
+hmac = "0.13.0"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.11.0"
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

@@ -4,7 +4,12 @@
 //
 //   node scripts/check.mjs                  manifests and files
 //   node scripts/check.mjs --base <ref>     …plus: every plugin changed since
-//                                           <ref> raised its version
+//                                           <ref> raised its version above
+//                                           <ref>'s. Pass the release line
+//                                           (origin/main), never a stacked
+//                                           PR's base: a plugin that isn't on
+//                                           main yet needs no bump, one that
+//                                           is must go above main's version
 //   node scripts/check.mjs --artifacts      …plus: every download artifact
 //                                           exists and matches its sha256
 //                                           (with --base: only the plugins
@@ -41,7 +46,23 @@ const RUST_WS = "\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2
 // Top-level fields newer than the app's first plugin release, and the first
 // app version that understands each. An older app rejects an unknown field, so
 // the plugin's `mahfouz` range must start at that version or later.
-export const FIELD_SINCE = { node: "0.9.0", icon: "0.8.0", logo: "0.8.0", network: "0.12.0", secrets: "0.12.0" };
+export const FIELD_SINCE = {
+  node: "0.9.0",
+  icon: "0.8.0",
+  logo: "0.8.0",
+  network: "0.12.0",
+  secrets: "0.12.0",
+  // The app's plugin host APIs (`config.read/write`, limited to the
+  // plugin's own `.config/<configFile>`) arrive in 0.12.0 with it; an app
+  // that doesn't parse it rejects the field like any unknown one.
+  configFile: "0.12.0",
+  // A Markdown file in the plugin the user accepts before installing or
+  // enabling it (the app's install and enable dialogs show it).
+  terms: "0.12.0",
+};
+// A file directly under the vault's `.config/`: a lowercase name ending in
+// `.md`, no directory part, so a plugin can only name its own file there.
+const CONFIG_FILE = /^[a-z0-9][a-z0-9-]{0,63}\.md$/;
 // The same for fields of a download step's artifact.
 export const ARTIFACT_FIELD_SINCE = { extract: "0.9.0" };
 const EXTRACTS = ["none", "tar.gz", "zip"];
@@ -140,7 +161,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
 
   onlyKeys(
     m,
-    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets"],
+    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets", "configFile", "terms"],
     where,
     errors
   );
@@ -248,6 +269,14 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
     }
   }
 
+  if ("terms" in m) {
+    if (typeof m.terms !== "string" || !m.terms.endsWith(".md")) errors.push(`${where}: terms must be a .md file`);
+    else {
+      paths.push(m.terms);
+      if (isContained(m.terms) && !fs.existsSync(path.join(dir, m.terms))) errors.push(`${where}: terms ${m.terms} doesn't exist`);
+    }
+  }
+
   for (const field of ["icon", "logo"]) {
     if (!(field in m)) continue;
     const rel = m[field];
@@ -323,6 +352,10 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
     }
   }
 
+  if ("configFile" in m && (typeof m.configFile !== "string" || !CONFIG_FILE.test(m.configFile))) {
+    errors.push(`${where}: configFile must be a file name under the vault's .config/ (lowercase letters, digits and dashes, ending in .md)`);
+  }
+
   // `network` and `secrets`, as `validate_network` in manifest.rs reads them.
   let network = [];
   if ("network" in m) {
@@ -386,14 +419,16 @@ export function validateRegistry(info) {
 
 // ---- versions ---------------------------------------------------------------------
 
-/** The error for a plugin that changed since `base` without raising its
- * version, or null. `baseVersion` is null for a plugin new since `base`. */
-export function versionBumpError(id, changed, baseVersion, version) {
+/** The error for a plugin that changed since `base` (the release line,
+ * `origin/main`) without raising its version above the one released there,
+ * or null. `baseVersion` is null for a plugin `base` doesn't have yet: it's
+ * unreleased, so the PRs that build it up need no bump of their own. */
+export function versionBumpError(id, changed, baseVersion, version, base = "main") {
   if (!changed || baseVersion === null) return null;
   const cmp = compareVersions(version, baseVersion);
   if (cmp === null) return null; // reported by the manifest check
   if (cmp <= 0) {
-    return `plugins/${id}: changed since the base branch, so its version must go above ${baseVersion} (it's ${version}) — users only get an update when the version changes`;
+    return `plugins/${id}: changed since ${base}, so its version must go above ${baseVersion}, the released one (it's ${version}) — users only get an update when the version changes`;
   }
   return null;
 }
@@ -488,7 +523,7 @@ export async function check(root, { base = null, artifacts = false, log = consol
     for (const [id, m] of manifests) {
       const touched = changed.some((p) => p.startsWith(`plugins/${id}/`));
       const before = touched ? baseManifest(root, base, id) : null;
-      const error = versionBumpError(id, touched, before?.version ?? null, m.version);
+      const error = versionBumpError(id, touched, before?.version ?? null, m.version, base);
       if (error) errors.push(error);
     }
     log(`checked version bumps against ${base}`);
