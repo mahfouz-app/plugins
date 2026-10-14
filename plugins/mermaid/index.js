@@ -118,6 +118,66 @@ export function sourceErrorLocation(source, at) {
   return result;
 }
 
+// ---- how large a diagram is drawn in the note ----------------------------
+
+/**
+ * The sizes a block can ask for, in the Size menu's order. `natural` is
+ * mermaid's own size, capped at the column; `fit` fills the column's width;
+ * `fit-height` fills it too, but never taller than the window.
+ */
+export const EMBED_SIZES = [
+  { id: "natural", label: "Natural" },
+  { id: "fit", label: "Fit width" },
+  { id: "fit-height", label: "Fit height" },
+];
+// A `%%` comment, so mermaid drops it like any other.
+const SIZE_LINE_RE = /^[ \t]*%%[ \t]*size[ \t]*:[ \t]*([\w-]*)[ \t]*$/im;
+const SIZE_LINES_RE = new RegExp(`${SIZE_LINE_RE.source}\\n?`, "gim");
+// How much of the window a `fit-height` diagram may take.
+const FIT_HEIGHT_MAX = "80vh";
+
+/** The size `source`'s `%% size: …` line asks for; `natural` without one,
+ * or for a value it doesn't know. */
+export function embedSize(source) {
+  const value = SIZE_LINE_RE.exec(source)?.[1].toLowerCase();
+  return EMBED_SIZES.some((s) => s.id === value) ? value : "natural";
+}
+
+/** `source` with its size line set to `size`, or removed for `natural`. */
+export function withEmbedSize(source, size) {
+  let rest = source.replace(SIZE_LINES_RE, "");
+  // A size line that ended the block leaves the line break before it.
+  if (!source.endsWith("\n") && rest.endsWith("\n")) rest = rest.slice(0, -1);
+  return size === "natural" ? rest : insertAfterConfig(rest, `%% size: ${size}`);
+}
+
+/** `source` with `line` added first, or after a leading `---` config
+ * block, which mermaid only reads at the very start. */
+function insertAfterConfig(source, line) {
+  const config = /^---[ \t]*\n[\s\S]*?\n---[ \t]*(?:\n|$)/.exec(source);
+  if (!config) return `${line}\n${source}`;
+  const head = config[0].endsWith("\n") ? config[0] : `${config[0]}\n`;
+  return `${head}${line}\n${source.slice(config[0].length)}`;
+}
+
+/**
+ * Sizes the embed's rendered `<svg>`. The app's embed wrapper (the
+ * container's parent) shrinks to its content, so a fitted diagram widens it
+ * to the column; the app makes a new wrapper whenever the source changes.
+ */
+function applyEmbedSize(container, svg, size) {
+  const natural = size === "natural";
+  if (container.parentElement) container.parentElement.style.width = natural ? "" : "100%";
+  if (natural || !svg?.style) return;
+  // Inline, over mermaid's `max-width: <its width>px`.
+  Object.assign(svg.style, {
+    width: "100%",
+    maxWidth: "100%",
+    height: "auto",
+    maxHeight: size === "fit-height" ? FIT_HEIGHT_MAX : "",
+  });
+}
+
 /**
  * The one mermaid instance the plugin renders with: the embed and the
  * editor tab share it, so the module loads once. `loadModule` and
@@ -255,9 +315,14 @@ export function createMermaidRenderer(host, options = {}) {
         return;
       }
       if (latest.get(container) !== seq) return;
+      panZoomUndo.get(container)?.();
+      panZoomUndo.delete(container);
       container.innerHTML = svg;
       const rendered = container.firstElementChild;
-      if (rendered && rendered.scrollWidth > container.clientWidth) {
+      const size = embedSize(source);
+      applyEmbedSize(container, rendered, size);
+      // A fitted diagram is never wider than the column.
+      if (size === "natural" && rendered && rendered.scrollWidth > container.clientWidth) {
         panZoomUndo.set(container, host.ui.attachPanZoom(container));
       }
     },
@@ -646,10 +711,7 @@ export const MERMAID_SAMPLES = [
 /** `source` with the PNG export's directive added: first, or after a
  * leading `---` config block, which mermaid only reads at the very start. */
 export function pngExportSource(source) {
-  const config = /^---[ \t]*\n[\s\S]*?\n---[ \t]*(?:\n|$)/.exec(source);
-  if (!config) return `${PNG_INIT}\n${source}`;
-  const head = config[0].endsWith("\n") ? config[0] : `${config[0]}\n`;
-  return `${head}${PNG_INIT}\n${source.slice(config[0].length)}`;
+  return insertAfterConfig(source, PNG_INIT);
 }
 
 /** Whether `svg` can't be drawn onto a canvas and read back: an HTML label
@@ -1175,6 +1237,23 @@ function createEditorTab(host, runtime) {
             })),
           },
         ];
+        const size = editor ? embedSize(editor.getValue()) : "natural";
+        buttons.push({
+          label: `Size: ${EMBED_SIZES.find((s) => s.id === size).label}`,
+          title: "How large the diagram is drawn in the note (a %% size line in the block)",
+          disabled: !editable,
+          menu: EMBED_SIZES.map(({ id, label }) => ({
+            label: id === size ? `✓ ${label}` : label,
+            onSelect() {
+              if (!editable || !editor) return;
+              const text = withEmbedSize(editor.getValue(), id);
+              if (text === editor.getValue()) return;
+              editor.setValue(text);
+              session.change(text);
+              void renderNow();
+            },
+          })),
+        });
         if (panZoom) {
           buttons.push(
             {
