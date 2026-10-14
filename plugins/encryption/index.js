@@ -740,6 +740,10 @@ export function createController(host, storage) {
 // git-crypt's limits are the manifest's `terms` file, the one Markdown the app
 // shows at install and enable; the Encrypt vault dialog shows the same file.
 
+// Bidi overrides and zero-width characters, dropped before parsing, as the
+// app's parseTerms (src/core/src/plugins/termsParse.ts) drops them.
+const TERMS_INVISIBLE = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\u2060\uFEFF]/g;
+
 /**
  * The terms Markdown as `{title, blocks}`: the first `## ` heading is the
  * title, later ones are `{type: "h"}` blocks; `- ` (or `* `) lines are bullets,
@@ -751,7 +755,7 @@ export function parseTerms(md) {
   const blocks = [];
   let list = null;
   let para = null;
-  for (const raw of String(md).split(/\r?\n/)) {
+  for (const raw of String(md).replace(TERMS_INVISIBLE, "").split(/\r?\n/)) {
     const line = raw.trim();
     const heading = /^#{1,6}\s+(.+?)\s*#*$/.exec(line);
     const bullet = /^[-*]\s+(.*)$/.exec(line);

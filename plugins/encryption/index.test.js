@@ -805,6 +805,8 @@ test("parseTerms: the first heading is the title, bullets join their indented li
     ],
   });
   assert.deepEqual(parseTerms(""), { title: null, blocks: [] });
+  // Bidi overrides and zero-width characters are dropped, as the app drops them.
+  assert.deepEqual(parseTerms("\uFEFF## Ti\u200Btle\n- a\u202Eb\u2066c\u2060\n"), { title: "Title", blocks: [{ type: "ul", items: ["abc"] }] });
 });
 
 test("the shipped terms are the manifest's, a title and git-crypt's five limits", () => {
