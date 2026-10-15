@@ -237,10 +237,15 @@ export interface MahfouzPluginHost {
    * A vault command (`scope: "vault"`) gets the open vault (`CommandVault`)
    * and is offered whenever a vault is open, with no note too, e.g. a
    * git-crypt locked vault (`vault.locked`), which shows none; `when(vault)`
-   * hides it the same way. Vault commands are never in note menus. Apps
-   * before vault commands treat one as a note command, passing it a
-   * `CommandNote` while a note is open; check `"locked" in target` if that
-   * matters. */
+   * hides it the same way. Vault commands are never in note menus. They
+   * need 0.12.0: declare `"mahfouz": ">=0.12.0"` (an older app runs one as
+   * a note command, with a `CommandNote`). A `scope` this app doesn't know
+   * skips that command, with a console warning.
+   *
+   * One command holds a key: the first registered with that binding, note
+   * or vault. A later command bound to the same keys gets a console warning
+   * and no key, even where the first can't run (a note command in a vault
+   * with no note open); users can rebind either in `## Shortcuts`. */
   registerCommand(command: PluginCommand): Disposable;
   /** A page in Settings, listed under `label` after the app's own, only
    * while the vault has this plugin on (a plugin loaded only as a
