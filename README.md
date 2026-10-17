@@ -106,7 +106,9 @@ a repository `git-crypt` encrypted. CI checks both directions against the real C
   edited file; then `initVault`; then a renormalize commits every file encrypted), and once it's
   encrypted shows Lock/Unlock (and the palette's **Unlock vault**) and its members, by login where
   `.config/encryption.md` lists the fingerprint. The sidebar's locked-vault notice gets an
-  **Unlock** button (`host.registerVaultUnlocker`).
+  **Unlock** button (`host.registerVaultUnlocker`). The palette's **Unlock vault** runs that same
+  unlocker through `host.vault.unlock()`, so both take the app's steps after the unlock; on an app
+  without it, the command unlocks directly.
 - **History and naming:** with a remote, the Encrypt dialog asks what happens to the unencrypted
   history, offering only what the app can do: *Move to a new private repository*
   (`host.repo.moveToNewPrivate(name)`), *Rewrite history and force-push*
@@ -375,6 +377,19 @@ note editor is open.
     and a click outside close it; returns `{ close }`), and `host.ui.confirm({ title, body,
     confirmLabel, danger? })` asks the app's yes/no question; `host.plugins.list()` lists the
     installed plugins (`{ id, label, enabled, networked }`).
+  - From Mahfouz 0.12.0: `host.vault.unlock()` unlocks the open vault with this plugin's own
+    vault unlocker (`host.registerVaultUnlocker`), through the same steps as the locked-vault
+    notice's **Unlock** button: once the unlocker resolves, the app reads the vault's git-crypt
+    lock again and syncs the vault in full. A command that unlocks the vault should call it
+    instead of its own unlock, and fall back to that unlock when it's absent. It rejects with the
+    unlocker's error (show it the way you show your own), or when the plugin registered no
+    unlocker. Only while the vault has the plugin on; desktop only.
+  - After Mahfouz 0.12.0 (absent in 0.12.0 and older): `host.commands.refresh()` says this
+    plugin's commands' `when` may answer differently now, because state the app doesn't see
+    changed. The note menu, toolbar and palette call `when` each time they open and need nothing;
+    the desktop OS menu's Note submenu caches it and evaluates it again for the active note.
+    Calls in the same task coalesce, and on the web it does nothing. Call it optional-chained
+    (`host.commands?.refresh()`).
   - `host.registerImporter(importer)` and `host.http` (see Importers). Absent before Mahfouz 0.12.0
     and on the web.
   - `host.registerPublishRenderer(languages, publishRender)` draws a fence language to an SVG

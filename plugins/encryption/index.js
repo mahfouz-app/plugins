@@ -1455,8 +1455,10 @@ export function activate(host) {
 
   // Whole-vault encryption: the palette's Unlock vault in a vault locked on this Mac, and the locked-vault notice's Unlock.
   if (c.vaultFeatures().unlock) {
+    // Through the app's unlockVault (host.vault.unlock, from 0.12.0) where it has it, so the command takes the
+    // locked-vault button's steps after the unlock: the lock read again, a full sync. Older apps: the unlock alone.
     const unlockVault = () =>
-      c.unlockVault().catch((err) => {
+      (typeof host.vault?.unlock === "function" ? host.vault.unlock() : c.unlockVault()).catch((err) => {
         fail(err);
         if (err?.code === "noMemberKey") openSettings();
       });
