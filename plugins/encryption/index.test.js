@@ -617,6 +617,47 @@ test("activate registers the codec, a Settings tab, the commands and the toolbar
   deactivate();
 });
 
+test("Unlock vault goes through host.vault.unlock where the app has it, so the app's unlockVault runs its steps", async () => {
+  const calls = [];
+  const fh = fakeHost();
+  const { host, registered } = activatedHost({
+    git: { forceCheckout: async () => (calls.push("forceCheckout"), []) },
+    vault: {
+      ...fh.vault,
+      // The app's unlockVault: the plugin's own unlocker, then the lock read again and a full sync.
+      unlock: async () => {
+        calls.push("host.vault.unlock");
+        await registered.unlockers.at(-1).unlock();
+        calls.push("refreshCryptLock", "syncFromVault");
+      },
+    },
+  });
+  const vault = { vaultId: "v", name: "V", path: "/v", locked: true };
+  await registered.commands.find((c) => c.id === "unlock-vault").run(vault);
+  assert.deepEqual(calls, ["host.vault.unlock", "forceCheckout", "refreshCryptLock", "syncFromVault"]);
+  assert.equal(host.vaultRpc.state.unlocked, true);
+
+  // The unlocker's error comes back through host.vault.unlock, and the command shows it.
+  host.vault.unlock = async () => Promise.reject(Object.assign(new Error("no key"), { code: "noMemberKey" }));
+  await registered.commands.find((c) => c.id === "unlock-vault").run(vault);
+  assert.ok(host.log.some(([m, text]) => m === "toast" && /no key/.test(text)));
+  assert.deepEqual(registered.opened, ["encryption"]);
+  deactivate();
+});
+
+test("Unlock vault unlocks directly on an app without host.vault.unlock (older than 0.12.0)", async () => {
+  const calls = [];
+  const fh = fakeHost();
+  const { host, registered } = activatedHost({
+    git: { forceCheckout: async () => (calls.push("forceCheckout"), []) },
+    vault: { ...fh.vault, unlock: undefined },
+  });
+  await registered.commands.find((c) => c.id === "unlock-vault").run({ vaultId: "v", name: "V", path: "/v", locked: true });
+  assert.deepEqual(calls, ["forceCheckout"]);
+  assert.equal(host.vaultRpc.state.unlocked, true);
+  deactivate();
+});
+
 test("activate leaves Unlock out where the app can't check a vault out again", () => {
   const { registered } = activatedHost();
   assert.equal(registered.commands.some((c) => c.id === "unlock-vault"), false);

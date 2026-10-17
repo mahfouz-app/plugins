@@ -231,7 +231,7 @@ export interface MahfouzPluginHost {
    * offered only while the active tab shows one; with `noteMenu` it's in
    * note context menus too. `when(note)` hides it from the note menu and
    * the palette, and keeps its shortcut from running it, for a note it
-   * doesn't apply to (absent in apps older than 0.12.1, where every command
+   * doesn't apply to (absent in apps older than 0.12.0, where every command
    * shows for every note).
    *
    * A vault command (`scope: "vault"`) gets the open vault (`CommandVault`)
@@ -247,13 +247,24 @@ export interface MahfouzPluginHost {
    * and no key, even where the first can't run (a note command in a vault
    * with no note open); users can rebind either in `## Shortcuts`. */
   registerCommand(command: PluginCommand): Disposable;
+  /** The app's command surfaces. Absent in apps 0.12.0 and older. */
+  commands?: {
+    /** Says this plugin's commands' `when` may answer differently now,
+     * because state the app doesn't see changed. The note menu, toolbar
+     * and palette call `when` each time they open, so they need nothing;
+     * the desktop OS menu's Note submenu caches it, and evaluates it again
+     * for the active note. Cheap: calls in the same task coalesce into one
+     * evaluation, and a menu that didn't change isn't pushed. Does nothing
+     * where there's no OS menu (the web). */
+    refresh(): void;
+  };
   /** A page in Settings, listed under `label` after the app's own, only
    * while the vault has this plugin on (a plugin loaded only as a
    * dependency gets a no-op). `render(container)` draws the page (use the
    * app's classes: `.section-title`, `.btn`, `.text-caption`…) and returns
-   * its cleanup, run when the page closes. Absent in apps older than 0.12.1. */
+   * its cleanup, run when the page closes. Absent in apps older than 0.12.0. */
   registerSettingsTab?(tab: SettingsTab): Disposable;
-  /** Opens Settings on this plugin's tab `id`. Throws when it isn't registered. Absent in apps older than 0.12.1. */
+  /** Opens Settings on this plugin's tab `id`. Throws when it isn't registered. Absent in apps older than 0.12.0. */
   openSettingsTab?(id: string): void;
   /** A button on the locked-vault notice in the sidebar (a vault git-crypt
    * keeps locked on this device), labelled `label`, beside Learn more, for
@@ -263,9 +274,9 @@ export interface MahfouzPluginHost {
    * open vault is locked, its settings can't say which plugins are on, so
    * the app loads `mahfouz/encryption` for it when it's installed on this
    * machine. Desktop only, while the vault has this plugin on: absent on
-   * the web and in apps older than 0.12.1. */
+   * the web and in apps older than 0.12.0. */
   registerVaultUnlocker?(unlocker: VaultUnlocker): Disposable;
-  /** The plugins installed on this machine. Absent in apps older than 0.12.1. */
+  /** The plugins installed on this machine. Absent in apps older than 0.12.0. */
   plugins?: { list(): Promise<PluginListing[]> };
   /** A format in the Export dialog. The app collects the dialog's options,
    * passes the content to render, and offers to save the file you return. */
@@ -401,7 +412,7 @@ export interface MahfouzPluginHost {
      * Empty while the vault is git-crypt locked.
      *
      * Desktop only, and only while the vault has this plugin on: absent on
-     * the web and in apps older than 0.12.1.
+     * the web and in apps older than 0.12.0.
      */
     listEncrypted?(group?: string): Promise<NoteRef[]>;
     /**
@@ -420,13 +431,13 @@ export interface MahfouzPluginHost {
      * decrypt (no cache) if other plugins are installed.
      *
      * Desktop only, and only while the vault has this plugin on: absent on
-     * the web and in apps older than 0.12.1.
+     * the web and in apps older than 0.12.0.
      */
     decrypt?(note: NoteRef): Promise<{ plaintext: string; armored: string }>;
   };
   /**
    * The open vault. Desktop only: absent on the web and in older apps.
-   * `commitFiles` only while the vault has this plugin on.
+   * `commitFiles` and `unlock` only while the vault has this plugin on.
    */
   vault?: {
     /** The open vault's id and absolute path, or null when none is open. */
@@ -446,6 +457,18 @@ export interface MahfouzPluginHost {
      * is listed in `skipped`. Resolves with whether anything was committed.
      */
     commitFiles(paths: string[], message: string): Promise<CommitFilesResult>;
+    /**
+     * Unlocks the open vault with this plugin's own vault unlocker
+     * (`registerVaultUnlocker`), through the same steps as the locked-vault
+     * notice's button: once `unlock()` resolves, the app reads the vault's
+     * lock again, syncs it in full and stops loading `mahfouz/encryption`
+     * for it unless its settings turn it on. A command of the plugin's that
+     * unlocks the vault should call this rather than its unlock directly,
+     * falling back to that on apps without it. Rejects with the unlocker's
+     * error, and when this plugin registered none. Only while the vault has
+     * this plugin on. Absent in apps older than 0.12.0.
+     */
+    unlock?(): Promise<void>;
   };
   /**
    * This plugin's own config file in the open vault: `.config/<configFile>`,
@@ -503,7 +526,7 @@ export interface MahfouzPluginHost {
      * remote, nothing uncommitted (pending edits are committed first) and no
      * Git LFS. When the push fails the branch is put back as it was.
      * `message` is the branch's reflog entry. Absent in apps older than
-     * 0.12.1.
+     * 0.12.0.
      */
     rewriteHistory?(message: string): Promise<void>;
   };
@@ -521,7 +544,7 @@ export interface MahfouzPluginHost {
      * changed, unless the vault is git-crypt encrypted and unlocked, has a
      * GitHub remote and nothing uncommitted (pending edits are committed
      * first). When the push fails the old remote is put back (the new,
-     * empty repository stays). Absent in apps older than 0.12.1.
+     * empty repository stays). Absent in apps older than 0.12.0.
      */
     moveToNewPrivate?(name: string): Promise<MovedRepo>;
   };
@@ -529,7 +552,7 @@ export interface MahfouzPluginHost {
    * The open vault's naming preferences in `.config/settings.md`, written
    * like an edit (the auto-commit commits them). Refused in a vault
    * git-crypt has locked. Desktop only, only while the vault has this
-   * plugin on, and absent in apps older than 0.12.1.
+   * plugin on, and absent in apps older than 0.12.0.
    */
   settings?: {
     /** `id`: new notes are named by their id alone (`<id>.md`, no title), and titles never rename files; existing notes keep their names. `title`: the prefix and the title (the default). Writes `new_note_naming`. */
@@ -634,13 +657,13 @@ export interface MahfouzPluginHost {
     saveFile?(options: SaveFileOptions): Promise<string | null>;
     /** The app's yes/no question: `title`, `body`, Cancel and `confirmLabel`
      * (red, with focus on Cancel, when `danger`). Resolves true for the
-     * confirm button. Absent in apps older than 0.12.1. */
+     * confirm button. Absent in apps older than 0.12.0. */
     confirm?(options: PluginConfirmOptions): Promise<boolean>;
     /** A dialog with the app's look: `title` on top, and `render(container)`
      * draws the rest (use `.dialog-row`, `.dialog-input`, `.dialog-actions`
      * with `.dialog-cancel` and `.dialog-submit`…) and returns its cleanup.
      * Escape and a click outside close it, as does `close()`, and the
-     * plugin unloading. Absent in apps older than 0.12.1. */
+     * plugin unloading. Absent in apps older than 0.12.0. */
     openDialog?(spec: DialogSpec): { close(): void };
   };
 }
