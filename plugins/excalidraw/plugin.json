@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "excalidraw",
+  "version": "1.0.0",
+  "label": "Excalidraw drawings",
+  "description": "Embed and edit Excalidraw drawings",
+  "mahfouz": ">=0.8.0",
+  "apiVersion": 1,
+  "icon": "icon.svg",
+  "install": [
+    {
+      "type": "download",
+      "extract": "tar.gz",
+      "to": "vendor",
+      "artifacts": {
+        "any": {
+          "url": "https://github.com/mahfouz-app/plugins/releases/download/excalidraw-v1.0.0/excalidraw-bundle.tar.gz",
+          "sha256": "c559362ea5b0f0e74d358a2fd92e843eca92b53dfb90d2b9cd3713d141acb5ed"
+        }
+      }
+    }
+  ],
+  "frontend": "index.js"
+}

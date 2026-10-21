@@ -14,6 +14,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 |---|---|---|
 | `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams (sized by a `%% size: fit` or `fit-height` line, or the editor's **Size** menu), edits one in a split editor tab, and draws them as images on published pages | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
 | `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, edits one in a draw.io tab, and draws them as images on published pages | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
+| `mahfouz/excalidraw` | Renders ```` ```excalidraw ```` blocks, edits one in an Excalidraw tab (**New drawing** on the toolbar adds one), and draws them as images on published pages | This repo's Excalidraw 0.18.1 bundle (Excalidraw, React 19 and its fonts, ~15 MB), built from `plugins/excalidraw/bundle/` (see below) |
 | `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Node.js 24.21.0 (~50 MB), then Slidev, its default theme and playwright-chromium with `npm ci` from the committed lockfile. No Node.js needed. macOS, Linux and Windows (x64 and Apple Silicon/arm64) |
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
@@ -133,6 +134,36 @@ that order: raise `version` (plugin.json and `Cargo.toml`) and the artifact URLs
 then copy the two checksums from the workflow's summary into `plugin.json`. CI's artifact check
 fails until they match. CI also runs the crate's `cargo fmt --check`, clippy and tests, with gpg
 and git-crypt installed, so the tests against the real gpg and git-crypt run there.
+
+## Excalidraw plugin
+
+`mahfouz/excalidraw` keeps each drawing in the note, as the scene's JSON (Excalidraw's own
+`.excalidraw` format) in a ```` ```excalidraw ```` block. Clicking the preview or its edit button
+opens the block in an editor tab, which saves the scene back into that block as you draw, and
+never rewrites a block you only opened. A backtick in a text element is written as `\u0060`, so
+the text can't close the fence. Pasted images are kept in the scene as data URLs, which grow the
+note, and a drawing with an image is published as code: the publishing service accepts no
+`<image>`. Published drawings are SVG text in Excalidraw's font families, without the fonts, so
+the page draws their text in its fallback font.
+
+Excalidraw 0.18 ships only ES modules that import their dependencies by package name, which the
+app's webview can't resolve, so this repo bundles it. `plugins/excalidraw/bundle/` holds the
+sources (`entry.js`, what the plugin imports), their lockfile and `build.mjs`, which builds
+`excalidraw.js` and its chunks with esbuild, copies Excalidraw's fonts beside it (the plugin
+points `window.EXCALIDRAW_ASSET_PATH` there, so nothing comes from a CDN), and packs them as
+`excalidraw-bundle.tar.gz`. The archive is byte-reproducible on Node 22 (`build.mjs` refuses
+another major, since gzip's output changes between zlib versions):
+
+```bash
+cd plugins/excalidraw/bundle && npm ci && npx -y node@22 build.mjs
+```
+
+`.github/workflows/excalidraw-release.yml` builds it when a tag `excalidraw-v<version>` is
+pushed and attaches it to that release; `plugin.json` downloads it pinned by sha256, and CI's
+`excalidraw-bundle` job rebuilds it on every PR and fails when the sha256 differs from the pinned
+one. To update Excalidraw or React: change `bundle/package.json` and its lockfile, rebuild, put
+the new sha256 and the next version's URL in `plugin.json`, raise `version`, and push the tag
+`excalidraw-v<version>` on that commit before merging, so the artifact check finds the asset.
 
 ## Releasing
 

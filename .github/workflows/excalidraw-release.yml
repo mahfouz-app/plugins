@@ -1,0 +1,62 @@
+# Builds the mahfouz/excalidraw plugin's bundle (Excalidraw, React and
+# Excalidraw's fonts as one ES module with its chunks; see
+# plugins/excalidraw/bundle/build.mjs) and attaches it to a GitHub release,
+# from which plugins/excalidraw/plugin.json downloads it (pinned by sha256).
+#
+# To cut one:
+#   1. Raise `version` in plugins/excalidraw/plugin.json and point the
+#      artifact URL at excalidraw-v<version>.
+#   2. Push the tag `excalidraw-v<version>` on that commit.
+#   3. Copy the sha256 from this run's summary (or the .sha256 asset) into
+#      plugin.json, in a PR. CI's artifact check fails until it matches.
+#      The build is reproducible, so `npm ci && node build.mjs` in
+#      plugins/excalidraw/bundle gives the same sha256 locally.
+name: Excalidraw release
+
+on:
+  push:
+    tags: ["excalidraw-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/excalidraw/bundle
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Tag matches the plugin version
+        working-directory: .
+        run: |
+          tag="${GITHUB_REF_NAME#excalidraw-v}"
+          plugin=$(node -p 'require("./plugins/excalidraw/plugin.json").version')
+          if [ "$tag" != "$plugin" ]; then
+            echo "::error::tag $GITHUB_REF_NAME and plugin.json $plugin must agree"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          npm ci --no-audit --no-fund
+          node build.mjs
+          shasum -a 256 excalidraw-bundle.tar.gz | tee excalidraw-bundle.tar.gz.sha256
+          echo "\`any\`: \`$(cut -d' ' -f1 excalidraw-bundle.tar.gz.sha256)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "Excalidraw plugin ${GITHUB_REF_NAME#excalidraw-v}" \
+              --notes "The Excalidraw bundle for the mahfouz/excalidraw plugin. Its checksum is pinned in plugins/excalidraw/plugin.json."
+          gh release upload "$GITHUB_REF_NAME" excalidraw-bundle.tar.gz excalidraw-bundle.tar.gz.sha256 --clobber

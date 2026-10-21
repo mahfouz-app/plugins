@@ -100,3 +100,33 @@ jobs:
 
       - name: Tests
         run: cargo test --locked
+
+  # The mahfouz/excalidraw plugin's bundle. Its build is reproducible, so
+  # building it from the lockfile must give the sha256 plugin.json pins:
+  # the downloaded release asset is what this commit's sources build.
+  excalidraw-bundle:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/excalidraw/bundle
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build
+        run: |
+          npm ci --no-audit --no-fund
+          node build.mjs
+
+      - name: Matches plugin.json
+        run: |
+          built=$(shasum -a 256 excalidraw-bundle.tar.gz | cut -d' ' -f1)
+          pinned=$(node -p 'require("../plugin.json").install[0].artifacts.any.sha256')
+          echo "built $built, pinned $pinned"
+          if [ "$built" != "$pinned" ]; then
+            echo "::error::the bundle builds to $built but plugin.json pins $pinned"
+            exit 1
+          fi
