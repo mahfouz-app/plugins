@@ -7,7 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { layerHtml } from "./header-footer.js";
+import { deckLinksFor, deckRev, DECK_LINKS_FILE } from "./deck-links.js";
 import {
+  checkNote,
+  cleanDeckLinks,
   deckUrl,
   entryModuleSrc,
   ensureLink,
@@ -24,6 +27,7 @@ import {
   templateCss,
   templateHeadmatter,
   vaultLinkId,
+  writeDeck,
 } from "./sidecar.js";
 import * as sidecar from "./sidecar.js";
 import { entryVaultId, VAULT_KEY } from "./vault-files.js";
@@ -861,4 +865,115 @@ test("a failed render with no output still has a first line", async () => {
     assert.equal(e.message.split("\n")[0], "slidev export failed (1)");
     return true;
   });
+});
+
+// ---- the deck: parts and links ---------------------------------------------------
+
+test("a multi-part stub: one importer slide per part, each with its index and the links rev", () => {
+  const stub = stubContent(["./vaults/v/a.md", './vaults/v/a/b "c".md'], null, undefined, "v", "abc123");
+  assert.equal(
+    stub,
+    '---\nsrc: "./vaults/v/a.md"\nmahfouzVault: "v"\nmahfouzPart: 0\nmahfouzLinksRev: "abc123"\n---\n' +
+      '\n---\nsrc: "./vaults/v/a/b \\"c\\".md"\nmahfouzPart: 1\nmahfouzLinksRev: "abc123"\n---\n'
+  );
+  // Only the first importer (the headmatter) carries the template.
+  const branded = stubContent(["./a.md", "./b.md"], BRAND, undefined, null, "r");
+  assert.equal(branded.match(/mahfouz: /g).length, 1);
+  assert.ok(branded.indexOf("mahfouz: ") < branded.indexOf('src: "./b.md"'));
+  // A single source without a rev is today's stub, byte for byte.
+  assert.equal(stubContent(["./a.md"]), stubContent("./a.md"));
+  assert.doesNotMatch(stubContent([]), /src:/);
+});
+
+test("note paths with control characters are refused", () => {
+  const vault = tempDir("ctl");
+  for (const name of ["a\nb.md", "a\rb.md", "a\u0000b.md", "a\u007fb.md", "a\tb.md", "a\u0085b.md", "a\u2028b.md"]) {
+    assert.throws(() => checkNote(vault, name, "presented"), /control character/, JSON.stringify(name));
+  }
+  assert.throws(() => checkNote(vault, 42, "presented"), /non-empty string/);
+  fs.rmSync(vault, { recursive: true, force: true });
+});
+
+test("deck links keep only the app's shapes, and __proto__ stays a key", () => {
+  const links = JSON.parse('{"a":{"path":"a.md","title":"A"},"b":null,"c":{"path":"c.md","title":null},"d":{"path":1},"e":"x","__proto__":{"path":"p.md","title":"P"}}');
+  const clean = cleanDeckLinks(links);
+  assert.deepEqual({ ...clean }, { a: { path: "a.md", title: "A" }, b: null, c: { path: "c.md", title: null }, ["__proto__"]: { path: "p.md", title: "P" } });
+  assert.equal(Object.getPrototypeOf(clean), null);
+  assert.deepEqual({ ...cleanDeckLinks(["x"]) }, {});
+  assert.deepEqual({ ...cleanDeckLinks(null) }, {});
+});
+
+function deckFixture() {
+  const ws = tempDir("deck-ws");
+  const vault = tempDir("deck-vault");
+  fs.mkdirSync(path.join(vault, "talk"), { recursive: true });
+  for (const f of ["talk/talk.md", "talk/one.md", "talk/two.md", "talk/a#b.md"]) fs.writeFileSync(path.join(vault, f), "# x");
+  return { ws, vault, done: () => [ws, vault].forEach((d) => fs.rmSync(d, { recursive: true, force: true })) };
+}
+
+test("writeDeck writes the links file, then the stub, both naming the same parts and rev", () => {
+  const { ws, vault, done } = deckFixture();
+  const warn = console.warn;
+  const warnings = [];
+  console.warn = (m) => warnings.push(String(m));
+  try {
+    const links = { one: { path: "talk/one.md", title: "One" }, gone: null };
+    const parts = ["talk/talk.md", "talk/one.md", "talk/missing.md", "talk/a#b.md", "talk/x\ny.md", "../out.md", "talk/two.md", "talk/one.md"];
+    const { parts: used, rev } = writeDeck(ws, vault, "vid", { relPath: "talk/talk.md", parts, links });
+    assert.deepEqual(used, ["talk/talk.md", "talk/one.md", "talk/two.md"]);
+    assert.equal(warnings.length, 4, warnings.join("\n"));
+    const file = JSON.parse(fs.readFileSync(path.join(ws, DECK_LINKS_FILE), "utf8"));
+    assert.deepEqual(file, { rev, parts: used, links });
+    assert.equal(rev, deckRev(used, cleanDeckLinks(links)));
+    const stub = fs.readFileSync(path.join(ws, "deck.md"), "utf8");
+    assert.deepEqual([...stub.matchAll(/src: "([^"]*)"/g)].map((m) => m[1]), used.map((p) => `./vaults/vid/${p}`));
+    assert.deepEqual([...stub.matchAll(/mahfouzPart: (\d+)/g)].map((m) => Number(m[1])), [0, 1, 2]);
+    assert.equal([...stub.matchAll(new RegExp(`mahfouzLinksRev: "${rev}"`, "g"))].length, 3);
+    assert.deepEqual(fs.readdirSync(ws).sort(), [DECK_LINKS_FILE, "deck.md"]);
+    // The transformer reads back what was written, for the stub's runs only.
+    assert.deepEqual(deckLinksFor(path.join(ws, "deck.md"), rev), { parts: used, links });
+    assert.deepEqual(deckLinksFor(path.join(ws, "export-1.md"), rev), {});
+  } finally {
+    console.warn = warn;
+    done();
+  }
+});
+
+test("writeDeck: a new deck changes the rev; an older app's start presents the note alone", () => {
+  const { ws, vault, done } = deckFixture();
+  try {
+    const a = writeDeck(ws, vault, "v", { relPath: "talk/talk.md", parts: ["talk/talk.md", "talk/one.md"], links: {} });
+    const b = writeDeck(ws, vault, "v", { relPath: "talk/talk.md", parts: ["talk/talk.md", "talk/two.md"], links: {} });
+    const c = writeDeck(ws, vault, "v", { relPath: "talk/talk.md", parts: ["talk/talk.md", "talk/one.md"], links: { x: null } });
+    assert.equal(new Set([a.rev, b.rev, c.rev]).size, 3);
+    assert.deepEqual(deckLinksFor(path.join(ws, "deck.md"), c.rev).links, { x: null });
+    const old = writeDeck(ws, vault, "v", { relPath: "talk/talk.md" });
+    assert.deepEqual(old.parts, ["talk/talk.md"]);
+    assert.match(fs.readFileSync(path.join(ws, "deck.md"), "utf8"), /mahfouzPart: 0/);
+  } finally {
+    done();
+  }
+});
+
+test("writeDeck refuses a bad presented note and writes nothing", () => {
+  const { ws, vault, done } = deckFixture();
+  try {
+    assert.throws(() => writeDeck(ws, vault, "v", { relPath: "talk/a#b.md", parts: [] }), /can't be presented/);
+    assert.throws(() => writeDeck(ws, vault, "v", { relPath: "talk/\u0007.md", parts: [] }), /control character/);
+    assert.deepEqual(fs.readdirSync(ws), []);
+  } finally {
+    done();
+  }
+});
+
+test("writeDeck presents the note alone when the parts don't start with it", () => {
+  const { ws, vault, done } = deckFixture();
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.deepEqual(writeDeck(ws, vault, "v", { relPath: "talk/talk.md", parts: ["talk/one.md", "talk/two.md"] }).parts, ["talk/talk.md"]);
+  } finally {
+    console.warn = warn;
+    done();
+  }
 });

@@ -12,21 +12,26 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import zlib from "node:zlib";
-import { cliEntry, slidevExportFormat } from "./sidecar.js";
+import { DECK_LINKS_FILE, writeDeckLinks } from "./deck-links.js";
+import { cliEntry, slidevExportFormat, stubContent } from "./sidecar.js";
 
 const require = createRequire(import.meta.url);
 let client = null;
 let cli = null;
+let parser = null;
 try {
   client = path.dirname(require.resolve("@slidev/client/package.json"));
   cli = path.dirname(require.resolve("@slidev/cli/package.json"));
+  parser = path.dirname(require.resolve("@slidev/parser/package.json"));
 } catch (err) {
   if (process.env.CI) throw err;
 }
-const withSlidev = { skip: client && cli ? false : "@slidev/client or @slidev/cli isn't installed (npm ci in plugins/slidev)" };
+const withSlidev = {
+  skip: client && cli && parser ? false : "@slidev/client, @slidev/cli or @slidev/parser isn't installed (npm ci in plugins/slidev)",
+};
 
 /** The CLI's dist chunk named `<prefix>-<hash>.mjs`. */
 function dist(prefix) {
@@ -114,6 +119,112 @@ test("export waits for every .slidev-slide-loading to detach, and PDF and PowerP
   assert.match(exp, /else if \(format === "pptx-editable"\) await genPagePptxEditable\(\);/);
   assert.match(exp, /await exportPptxEditable\(\{[^}]*\bgo\b[^}]*\}, output\)/);
   assert.match(dist("pptx"), /async function exportPptxEditable\(ctx, output\) \{\s*await ctx\.go\("print"\);/);
+});
+
+// ---- a deck of several notes, and its wikilinks ------------------------------------
+
+test("each part's importer frontmatter reaches every slide of its note; a hidden slide is dropped", withSlidev, async () => {
+  const { load } = await import(pathToFileURL(path.join(parser, "dist", "fs.mjs")).href);
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-slidev-parts-")));
+  try {
+    fs.writeFileSync(path.join(root, "a.md"), "---\ntitle: A\n---\n\n# A1\n\n---\n\n# A2\n");
+    fs.writeFileSync(path.join(root, "b.md"), "# B1\n\n---\nhide: true\n---\n\n# hidden\n\n---\n\n# B3\n");
+    fs.writeFileSync(path.join(root, "deck.md"), stubContent(["./a.md", "./b.md"], null, undefined, "v", "r1"));
+    const data = await load({ userRoot: root, roots: [root], allowedRoots: [root] }, path.join(root, "deck.md"));
+    assert.deepEqual(
+      data.slides.map((s) => [s.content.trim(), s.frontmatter.mahfouzPart, s.frontmatter.mahfouzLinksRev]),
+      [
+        ["# A1", 0, "r1"],
+        ["# A2", 0, "r1"],
+        ["# B1", 1, "r1"],
+        ["# B3", 1, "r1"],
+      ]
+    );
+    // The headmatter is still the first part's importer: the vault rides there.
+    assert.equal(data.headmatter.mahfouzVault, "v");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup/transformers.ts is loaded from each root; a pre transformer gets the slide's content and frontmatter", withSlidev, () => {
+  const serve = dist("serve");
+  assert.match(serve, /const returns = await loadSetups\(roots, "transformers\.ts", \[\]\);/);
+  assert.match(serve, /if \(r\.pre\) result\.pre\.push\(\.\.\.r\.pre\);/);
+  assert.match(serve, /const extras = await setupTransformers\(options\.roots\);\s*const transformers = \[\s*\.\.\.extras\.pre,/);
+  assert.match(serve, /const s = new MagicString\(code\);[\s\S]{0,80}const ctx = \{\s*s,\s*slide: options\.data\.slides\[\+match\[1\] - 1\],\s*options\s*\};/);
+  // A slide's Markdown module is its content alone, without frontmatter.
+  assert.match(serve, /if \(type === "md"\) return \{\s*code: slide\.content,/);
+  assert.match(serve, /^import MagicString from "magic-string-stack";$/m);
+  // The project root (this plugin's directory, the entry's) is one of the roots.
+  assert.match(serve, /const roots = uniq\(\[\s*\.\.\.themeRoots,\s*\.\.\.addonRoots,\s*rootsInfo\.userRoot\s*\]\);/);
+});
+
+test("components/ in the project root is auto-registered, and useNav gives slides and isPrintMode", withSlidev, () => {
+  assert.match(dist("serve"), /dirs: \[join\(clientRoot, "builtin"\), \.\.\.roots\.map\(\(i\) => join\(i, "components"\)\)\]/);
+  assert.match(read(client, "index.ts"), /export \{ useNav \} from '\.\/composables\/useNav'/);
+  const nav = read(client, "composables", "useNav.ts");
+  assert.match(nav, /\n    slides,\n/);
+  assert.match(nav, /\n    isPrintMode,\n/);
+});
+
+test("the transformer, loaded as Slidev loads it, rewrites the Present stub's slides only", withSlidev, async () => {
+  const cliRequire = createRequire(path.join(cli, "package.json"));
+  const { createJiti } = await import(pathToFileURL(cliRequire.resolve("jiti")).href);
+  const { default: MagicString } = await import(pathToFileURL(cliRequire.resolve("magic-string-stack")).href);
+  const setup = fileURLToPath(new URL("./setup/transformers.ts", import.meta.url));
+  const { default: transformers } = await createJiti(import.meta.url, { moduleCache: false }).import(setup);
+  const [pre] = transformers().pre;
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-slidev-transform-"));
+  try {
+    writeDeckLinks(ws, { rev: "r1", parts: ["a.md", "b.md"], links: { b: { path: "b.md", title: "Bee" }, c: null } });
+    const run = (entry, code) => {
+      const ctx = { s: new MagicString(code), slide: { frontmatter: { mahfouzLinksRev: "r1" } }, options: { entry: path.join(ws, entry) } };
+      pre(ctx);
+      return ctx.s.toString();
+    };
+    const md = "See [[b]] and [[c]] `[[b]]`";
+    assert.equal(
+      run("deck.md", md),
+      'See <MahfouzLink :part="1"><span v-pre>Bee</span></MahfouzLink> and <span v-pre>c</span> `[[b]]`'
+    );
+    assert.equal(run("export-1.md", md), "See <span v-pre>b</span> and <span v-pre>c</span> `[[b]]`");
+    assert.ok(fs.existsSync(path.join(ws, DECK_LINKS_FILE)));
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+// The whole path, on a real dev server: the stub's parts, the links file, the
+// transformer and the component. Each slide's Markdown module is compiled to
+// a render function that calls MahfouzLink with the other part's index.
+test("Present serves a deck of two notes whose wikilinks jump between them", { ...withSlidev, timeout: 180_000 }, async () => {
+  const vault = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-slidev-deck-")));
+  fs.mkdirSync(path.join(vault, "talk"));
+  fs.writeFileSync(path.join(vault, "talk", "talk.md"), "---\ntitle: Talk\n---\n\n# Talk\n\nGo to [[Child]] or [[Nope]].\n");
+  fs.writeFileSync(path.join(vault, "talk", "child.md"), "# Child\n\nBack to [[Talk|the start]].\n");
+  const { methods } = await import("./sidecar.js");
+  const ws = path.dirname(fileURLToPath(import.meta.url));
+  try {
+    const { url } = await methods.start({
+      vaultPath: vault,
+      relPath: "talk/talk.md",
+      template: null,
+      parts: ["talk/talk.md", "talk/child.md"],
+      links: { Child: { path: "talk/child.md", title: "Child" }, Nope: null, "Talk|the start": { path: "talk/talk.md", title: "Talk" } },
+    });
+    const id = /vaults\/([0-9a-f]+)\//.exec(fs.readFileSync(path.join(ws, "deck.md"), "utf8"))[1];
+    const slide = async (file, n) => (await fetch(`${url}@fs${ws}/vaults/${id}/${file}__slidev_${n}.md?import`)).text();
+    const one = await slide("talk/talk.md", 1);
+    assert.match(one, /_createVNode\(_component_MahfouzLink, \{ part: 1 \}/);
+    assert.match(one, /_createElementVNode\("span", null, "Nope"/);
+    assert.match(await slide("talk/child.md", 2), /_createVNode\(_component_MahfouzLink, \{ part: 0 \}/);
+    assert.equal((await fetch(`${url}components/MahfouzLink.vue`)).status, 200);
+  } finally {
+    methods.stop();
+    for (const f of ["deck.md", DECK_LINKS_FILE, "vaults"]) fs.rmSync(path.join(ws, f), { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  }
 });
 
 // The template preview (sidecar.js `preview`) reads its PNGs back by name:
@@ -295,6 +406,7 @@ test("Present for one vault and a preview of another each resolve their own /fil
     methods.stop();
     const ws = path.dirname(fileURLToPath(import.meta.url));
     fs.rmSync(path.join(ws, "deck.md"), { force: true });
+    fs.rmSync(path.join(ws, DECK_LINKS_FILE), { force: true });
     fs.rmSync(path.join(ws, "vaults"), { recursive: true, force: true });
     for (const vault of Object.values(vaults)) fs.rmSync(vault, { recursive: true, force: true });
   }

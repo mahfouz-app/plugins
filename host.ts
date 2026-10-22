@@ -1,5 +1,5 @@
 // Vendored from mahfouz-app/app src/core/src/plugins/{bodyCodec,commands,dialogs,exportFormats,fencedBlocks,hostRepo,hostVault,notes,overlay,settingsTabs,vaultUnlockers}.ts,
-// src/core/src/db/slidesTemplates.ts, src/core/src/plugins/slidesPreview.ts and src/core/src/import/types.ts — keep in sync.
+// src/core/src/db/slidesTemplates.ts, src/core/src/plugins/slidesPreview.ts, src/core/src/plugins/slidesDeck.ts and src/core/src/import/types.ts — keep in sync.
 import type { NoteRef } from "./tabs";
 
 export interface CommandNote {
@@ -163,6 +163,21 @@ export interface ResolvedSlidesTemplate {
   colorSchema?: "light" | "dark";
   /** The font families `stylesheet` loads, to wait for before export. */
   fontFamilies?: string[];
+}
+
+// ---- slides deck (src/core/src/plugins/slidesDeck.ts)
+
+/** A wikilink's target as `host.slides.deck` resolves it; `title` is null for an encrypted note. */
+export interface DeckLink {
+  path: string;
+  title: string | null;
+}
+
+export interface SlidesDeck {
+  /** Vault-relative `.md` paths: the note, then its descendants depth-first, in sidebar order. */
+  parts: string[];
+  /** Each wikilink's raw inner text (`target` or `target|alias`, as written in the file) to its note, or null when it's broken. */
+  links: Record<string, DeckLink | null>;
 }
 
 // ---- slides preview (src/core/src/plugins/slidesPreview.ts)

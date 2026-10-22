@@ -64,6 +64,16 @@
 //   PNG doesn't default to, and no `--per-slide`) empties `<dir>` and
 //   writes one `<n>.png` per slide, `n` its unpadded number from 1; the
 //   template preview reads them back by that name.
+// - An importer slide's frontmatter is spread over every slide of the file
+//   it imports (@slidev/parser `loadSlide`), so a part's `mahfouzPart` and
+//   `mahfouzLinksRev` reach each of its slides; a hidden or disabled
+//   importer imports nothing.
+// - Slidev re-transforms a slide only when its content or frontmatter
+//   changes, so the wikilink transformer (setup/transformers.ts, a `pre`
+//   transformer over each slide's content as a MagicString) never bakes in a
+//   slide number: a new links file changes every part's `mahfouzLinksRev`,
+//   and MahfouzLink.vue (auto-registered from `components/` in the project
+//   root) finds a part's first slide at runtime.
 // - The dev server listens on `localhost`, which on modern Node resolves to
 //   `::1` first; readiness polling goes through `localhost` too.
 
@@ -75,6 +85,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { PRESENT_ENTRY, deckRev, writeDeckLinks } from "./deck-links.js";
 import { escapeHtml } from "./header-footer.js";
 import { VAULT_KEY } from "./vault-files.js";
 
@@ -289,11 +300,19 @@ function vaultLine(vaultId) {
 
 /** The stub entry deck: imports `src` (relative to the workspace, through
  * the vault symlink), or without one, the placeholder an idle server shows.
- * `vaultId` is the vault's link id, for its `/files/`. */
-export function stubContent(src, template = null, renderInline = escapeHtml, vaultId = null) {
-  return src
-    ? `---\nsrc: ${quote(src)}\n${vaultLine(vaultId)}${templateHeadmatter(template, renderInline)}---\n`
-    : "---\ntitle: Mahfouz\n---\n\n# Mahfouz\n\nOpen a note and choose Present.\n";
+ * `vaultId` is the vault's link id, for its `/files/`. `src` may be a list,
+ * the deck's parts: each is an importer slide of its own, and with `rev`
+ * (the links file's, deckRev) each carries `mahfouzPart: <k>` and
+ * `mahfouzLinksRev`, which Slidev spreads to every slide of that part
+ * (MahfouzLink.vue finds a part's first slide by it). The first part's
+ * importer is the headmatter, so it alone carries the vault and template. */
+export function stubContent(src, template = null, renderInline = escapeHtml, vaultId = null, rev = null) {
+  const sources = Array.isArray(src) ? src : src ? [src] : [];
+  if (sources.length === 0) return "---\ntitle: Mahfouz\n---\n\n# Mahfouz\n\nOpen a note and choose Present.\n";
+  const part = (k) => (rev === null ? "" : `mahfouzPart: ${k}\nmahfouzLinksRev: ${quote(rev)}\n`);
+  let out = `---\nsrc: ${quote(sources[0])}\n${vaultLine(vaultId)}${templateHeadmatter(template, renderInline)}${part(0)}---\n`;
+  for (let k = 1; k < sources.length; k++) out += `\n---\nsrc: ${quote(sources[k])}\n${part(k)}---\n`;
+  return out;
 }
 
 /** Headmatter for the one-shot export entry. The deck's `aspectRatio`
@@ -451,11 +470,74 @@ function linkedIds() {
   return ids;
 }
 
-function checkNote(vaultPath, relPath, verb) {
+export function checkNote(vaultPath, relPath, verb) {
+  if (typeof relPath !== "string" || relPath === "") throw new Error("the note path must be a non-empty string");
+  // A line break would end the `src:` line it's quoted into (a YAML 1.1
+  // reader also breaks lines at U+0085, U+2028 and U+2029); no vault file
+  // name needs any of them.
+  if (/[\x00-\x1f\x7f\x85\u2028\u2029]/.test(relPath)) throw new Error(`notes whose path contains a control character can't be ${verb}`);
   const full = safeJoin(vaultPath, relPath);
   if (!fs.statSync(full, { throwIfNoEntry: false })?.isFile()) throw new Error(`note file not found: ${full}`);
   // Slidev splits `src` on '#' for slide ranges; such paths can't be imported.
   if (relPath.includes("#")) throw new Error(`notes whose path contains '#' can't be ${verb}`);
+}
+
+/** The most files a presented deck imports (the app sends at most this many). */
+export const DECK_PARTS_MAX = 200;
+
+/** `links` as the app sends them (`host.slides.deck`): each raw wikilink
+ * key to `{ path, title }` (title a string or null) or null; anything else
+ * is dropped. A null-prototype copy, so a key like `__proto__` is data. */
+export function cleanDeckLinks(links) {
+  const out = Object.create(null);
+  if (!links || typeof links !== "object" || Array.isArray(links)) return out;
+  for (const [key, v] of Object.entries(links)) {
+    if (v === null) out[key] = null;
+    else if (v && typeof v === "object" && typeof v.path === "string" && (v.title === null || typeof v.title === "string")) {
+      out[key] = { path: v.path, title: v.title };
+    }
+  }
+  return out;
+}
+
+/**
+ * Writes the Present stub for `relPath` and its deck's other `parts` (vault-
+ * relative paths, the presented note's first, from `host.slides.deck`; an
+ * older app sends none) into `workspace`: first the links file
+ * (`deck-links.json`, `{ rev, parts, links }`), then `deck.md`, back to back
+ * with nothing awaited in between, so a run never reads a stub with another
+ * stub's links. Every part goes through checkNote: the presented note
+ * failing is an error, any other part failing is left out with a warning.
+ * Paths reach the stub only as quoted `src:` values; the links file and the
+ * transformer name parts by index. Returns the parts used and the rev.
+ */
+export function writeDeck(workspace, vaultPath, id, { relPath, parts, links }, template = null, renderInline = escapeHtml) {
+  checkNote(vaultPath, relPath, "presented");
+  const used = [relPath];
+  if (Array.isArray(parts) && parts.length > 0) {
+    if (parts[0] !== relPath) console.warn("the deck's parts don't start with the presented note; presenting it alone");
+    else {
+      for (const part of parts.slice(1)) {
+        if (used.length >= DECK_PARTS_MAX) {
+          console.warn(`the deck has over ${DECK_PARTS_MAX} notes; the rest are left out`);
+          break;
+        }
+        if (used.includes(part)) continue;
+        try {
+          checkNote(vaultPath, part, "presented");
+          used.push(part);
+        } catch (err) {
+          console.warn(`left out of the deck: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+  }
+  const clean = cleanDeckLinks(links);
+  const rev = deckRev(used, clean);
+  writeDeckLinks(workspace, { rev, parts: used, links: clean });
+  const sources = used.map((p) => `./vaults/${id}/${p}`);
+  fs.writeFileSync(path.join(workspace, PRESENT_ENTRY), stubContent(sources, template, renderInline, id, rev));
+  return { parts: used, rev };
 }
 
 // ---- the server --------------------------------------------------------------
@@ -510,7 +592,7 @@ function assertInstalled() {
 
 async function spawnServer() {
   assertInstalled();
-  const stub = path.join(WORKSPACE, "deck.md");
+  const stub = path.join(WORKSPACE, PRESENT_ENTRY);
   if (!fs.existsSync(stub)) fs.writeFileSync(stub, stubContent(null));
   const port = await freePort();
   const output = tail();
@@ -587,16 +669,16 @@ export const methods = {
     return deckUrl(await ensureServer());
   },
 
-  /** Points the server at a note; returns where to load it. */
-  async start({ vaultPath, relPath, template }) {
+  /** Points the server at a note and, with `parts` and `links` (the app's
+   * `host.slides.deck`), its descendants and resolved wikilinks; returns
+   * where to load it. */
+  async start({ vaultPath, relPath, template, parts, links }) {
     checkNote(vaultPath, relPath, "presented");
+    const renderInline = template ? await markdownInline() : undefined;
     const id = linkVault(WORKSPACE, vaultPath);
     linked.present = id;
     pruneVaultLinks(WORKSPACE, linkedIds());
-    fs.writeFileSync(
-      path.join(WORKSPACE, "deck.md"),
-      stubContent(`./vaults/${id}/${relPath}`, template ?? null, template ? await markdownInline() : undefined, id)
-    );
+    writeDeck(WORKSPACE, vaultPath, id, { relPath, parts, links }, template ?? null, renderInline);
     const port = await ensureServer();
     const fresh = server.cold;
     server.cold = false;

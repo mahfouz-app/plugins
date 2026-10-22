@@ -15,7 +15,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/mermaid` | Renders ```` ```mermaid ```` blocks as diagrams (sized by a `%% size: fit` or `fit-height` line, or the editor's **Size** menu), edits one in a split editor tab, and draws them as images on published pages | The pinned `mermaid` npm package (only its self-contained ESM build, ~25 MB). No Node.js needed |
 | `mahfouz/drawio` | Renders ```` ```drawio ```` blocks, edits one in a draw.io tab, and draws them as images on published pages | The pinned jgraph/drawio v31.4.6 web app (~154 MB) |
 | `mahfouz/excalidraw` | Renders ```` ```excalidraw ```` blocks, edits one in an Excalidraw tab (**New drawing** on the toolbar adds one), and draws them as images on published pages | This repo's Excalidraw 0.18.1 bundle (Excalidraw, React 19 and its fonts, ~15 MB), built from `plugins/excalidraw/bundle/` (see below) |
-| `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Node.js 24.21.0 (~50 MB), then Slidev, its default theme and playwright-chromium with `npm ci` from the committed lockfile. No Node.js needed. macOS, Linux and Windows (x64 and Apple Silicon/arm64) |
+| `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Shift+P`), followed by its child notes (unless it has `no_slides_children: true`), with each wikilink to a note in the deck jumping to that note's first slide, styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Node.js 24.21.0 (~50 MB), then Slidev, its default theme and playwright-chromium with `npm ci` from the committed lockfile. No Node.js needed. macOS, Linux and Windows (x64 and Apple Silicon/arm64) |
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 | `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.12.0 |
@@ -423,6 +423,12 @@ note editor is open.
     (`host.commands?.refresh()`).
   - `host.registerImporter(importer)` and `host.http` (see Importers). Absent before Mahfouz 0.12.0
     and on the web.
+  - `host.slides.deck(note)` (Mahfouz 0.14.0) is what Present shows for a note: `{ parts, links }`,
+    the vault-relative `.md` paths of the note and then its descendants in sidebar order (the
+    note alone with `no_slides_children: true`), and each wikilink in them, keyed by its raw inner
+    text as written (`target` or `target|alias`), resolved to `{ path, title }` or null. Paths are
+    vault content: never put one into markup. `host.slides.resolveTemplate(note)` gives the
+    note's slides template.
   - `host.registerPublishRenderer(languages, publishRender)` draws a fence language to an SVG
     when a note is published, so the page shows the diagram instead of its code.
     `publishRender(lang, source)` resolves to the SVG or null (publish the fence as code). It must
