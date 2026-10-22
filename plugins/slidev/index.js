@@ -34,7 +34,8 @@ export function sidecarEngine(host) {
   return {
     ready: () => call("ready"),
     warm: () => call("warm"),
-    start: (vaultPath, relPath, template = null) => call("start", { vaultPath, relPath, template }),
+    start: (vaultPath, relPath, template = null, deck = null) =>
+      call("start", { vaultPath, relPath, template, ...(deck ? { parts: deck.parts, links: deck.links } : {}) }),
     exportDeck: (vaultPath, relPath, { orientation, content, format, template = null }) =>
       call("export", { vaultPath, relPath, orientation, content, format, template }),
     previewDeck: (vaultPath, markdown, template = null) => call("preview", { vaultPath, markdown, template }),
@@ -85,6 +86,23 @@ export async function slidesTemplate(host, note) {
   }
 }
 
+// ---- what to render --------------------------------------------------------------
+
+/** A note's file and slides template, for an export. */
+export async function noteTarget(host, note) {
+  const [info, template] = await Promise.all([host.notes.get(note), slidesTemplate(host, note)]);
+  return { vaultPath: info.vaultPath, relPath: info.path, template };
+}
+
+/** Present's target: the note's, with what its deck holds — its file, then
+ * its descendants', and its wikilinks resolved (`host.slides.deck`; the app
+ * refuses an encrypted note, and that error is Present's). An app without
+ * `deck` presents the note alone, every link as its label. */
+export async function presentDeckTarget(host, note) {
+  const [base, deck] = await Promise.all([noteTarget(host, note), host.slides?.deck?.(note)]);
+  return { ...base, deck: deck ?? { parts: [base.relPath], links: {} } };
+}
+
 // ---- getting a note on screen ------------------------------------------------
 
 /**
@@ -102,8 +120,8 @@ export function startDeck(engine, target, onPhase) {
       set({ kind: "checking" });
       await engine.ready();
       set({ kind: "starting" });
-      const { vaultPath, relPath, template } = await target();
-      const running = await engine.start(vaultPath, relPath, template ?? null);
+      const { vaultPath, relPath, template, deck } = await target();
+      const running = await engine.start(vaultPath, relPath, template ?? null, deck ?? null);
       set({ kind: "running", url: running.url, fresh: running.fresh });
     } catch (err) {
       console.error("slidev start failed", err);
@@ -351,10 +369,8 @@ function renderOverlay(engine, container, target) {
 // ---- activation ----------------------------------------------------------------
 
 export function activate(host, engine = sidecarEngine(host)) {
-  const target = (note) => async () => {
-    const [info, template] = await Promise.all([host.notes.get(note), slidesTemplate(host, note)]);
-    return { vaultPath: info.vaultPath, relPath: info.path, template };
-  };
+  const target = (note) => () => noteTarget(host, note);
+  const presentTarget = (note) => () => presentDeckTarget(host, note);
 
   /** `err` with the server's recent output appended, for a failed render. */
   const withLog = async (err) => {
@@ -416,7 +432,7 @@ export function activate(host, engine = sidecarEngine(host)) {
   host.registerTabType({
     id: "present",
     icon: "▶",
-    render: (container, ctx) => renderPresentTab(host, engine, container, ctx, target(ctx.note)),
+    render: (container, ctx) => renderPresentTab(host, engine, container, ctx, presentTarget(ctx.note)),
   });
 
   host.registerCommand({
@@ -445,7 +461,7 @@ export function activate(host, engine = sidecarEngine(host)) {
         .catch((err) => console.warn("marking the note as a presentation failed", err));
       host.ui.openOverlay({
         title: `Presenting ${note.title}`,
-        render: (container) => renderOverlay(engine, container, target(note)),
+        render: (container) => renderOverlay(engine, container, presentTarget(note)),
       });
     },
   });

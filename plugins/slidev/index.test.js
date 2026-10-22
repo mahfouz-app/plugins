@@ -5,7 +5,7 @@
 // tab's and overlay's DOM are exercised in the app, not here.)
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activate, deckFileName, sidecarEngine, startDeck, withPresentationType } from "./index.js";
+import { activate, deckFileName, presentDeckTarget, sidecarEngine, startDeck, withPresentationType } from "./index.js";
 
 function fakeEngine(over = {}) {
   const calls = [];
@@ -359,4 +359,45 @@ test("the engine's previewDeck is the sidecar's preview method", async () => {
   const template = { name: "Brand" };
   await sidecarEngine(host).previewDeck("/v", "# a", template);
   assert.deepEqual(reg.sidecarCalls, [["preview", { vaultPath: "/v", markdown: "# a", template }]]);
+});
+
+test("Present's target carries the app's deck: the note, its descendants and its links", async () => {
+  const deck = { parts: ["talks/deck.md", "talks/deck/child.md"], links: { child: { path: "talks/deck/child.md", title: "Child" } } };
+  const asked = [];
+  const { host } = fakeHost(true, { deck: async (n) => (asked.push(n), deck) });
+  assert.deepEqual(await presentDeckTarget(host, note), { vaultPath: "/vault", relPath: "talks/deck.md", template: null, deck });
+  assert.deepEqual(asked, [note]);
+});
+
+test("an app without host.slides.deck presents the note alone, with no links", async () => {
+  for (const slides of [undefined, { resolveTemplate: async () => null }]) {
+    const { host } = fakeHost(true, slides);
+    assert.deepEqual((await presentDeckTarget(host, note)).deck, { parts: ["talks/deck.md"], links: {} });
+  }
+});
+
+test("a refused deck (an encrypted note) is Present's error", async () => {
+  const { host } = fakeHost(true, { deck: async () => Promise.reject(new Error("Encrypted notes can't be presented.")) });
+  await assert.rejects(presentDeckTarget(host, note), /Encrypted notes/);
+});
+
+test("the engine sends the deck's parts and links with start, and nothing for an older call", async () => {
+  const { host, reg } = fakeHost(true);
+  const engine = sidecarEngine(host);
+  await engine.start("/v", "a.md", null, { parts: ["a.md", "a/b.md"], links: { b: null } });
+  await engine.start("/v", "a.md");
+  assert.deepEqual(reg.sidecarCalls, [
+    ["start", { vaultPath: "/v", relPath: "a.md", template: null, parts: ["a.md", "a/b.md"], links: { b: null } }],
+    ["start", { vaultPath: "/v", relPath: "a.md", template: null }],
+  ]);
+});
+
+test("the deck start sequence hands the target's deck to the engine", async () => {
+  const seen = [];
+  const { engine } = fakeEngine({ start: async (...args) => (seen.push(args), { url: "http://localhost:3030/", fresh: false }) });
+  const deck = { parts: ["a.md"], links: {} };
+  startDeck(engine, async () => ({ vaultPath: "/v", relPath: "a.md", deck }), () => {});
+  await flush();
+  await flush();
+  assert.deepEqual(seen, [["/v", "a.md", null, deck]]);
 });

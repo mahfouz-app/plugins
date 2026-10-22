@@ -1,0 +1,15 @@
+[
+  { "text": "See [[Plain]] here.", "keys": ["Plain"] },
+  { "text": "[[a|b]] and [[a|b]]", "keys": ["a|b", "a|b"] },
+  { "text": "| [[x\\|y]] | z |", "keys": ["x\\|y"] },
+  { "text": "[[n#h]] and [[n#h|Heading]]", "keys": ["n#h", "n#h|Heading"] },
+  { "text": "[[__proto__]] [[constructor]]", "keys": ["__proto__", "constructor"] },
+  { "text": "[[x|{{ evil }}]]", "keys": ["x|{{ evil }}"] },
+  { "text": "[[a|b|c]]", "keys": ["a|b|c"] },
+  { "text": "[[[x]]]", "keys": ["[x"] },
+  { "text": "[[ ]] [[]] [[x|]] [[x]", "keys": [" "] },
+  { "text": "[[multi\nline]]", "keys": ["multi\nline"] },
+  { "text": "[[[[[[ no close", "keys": [] },
+  { "text": "[[a]][[b]]", "keys": ["a", "b"] },
+  { "text": "[[x\\]]", "keys": ["x\\"] }
+]

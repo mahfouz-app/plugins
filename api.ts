@@ -45,8 +45,10 @@ import type {
   OverlaySpec,
   PluginCommand,
   PluginConfirmOptions,
+  DeckLink,
   ResolvedSlidesTemplate,
   SettingsTab,
+  SlidesDeck,
   SlidesPreviewRequest,
   SlidesPreviewResult,
   VaultCommand,
@@ -102,7 +104,9 @@ export type {
   PluginTabContext,
   PluginTabType,
   PublishRenderer,
+  DeckLink,
   ResolvedSlidesTemplate,
+  SlidesDeck,
   SlidesPreviewRequest,
   SettingsTab,
   SlidesPreviewResult,
@@ -601,6 +605,17 @@ export interface MahfouzPluginHost {
      * a plugin that predates `stylesheet` (empty `stylesheet` on a bare
      * template). */
     resolveTemplate(note: NoteRef): Promise<ResolvedSlidesTemplate | null>;
+    /** What Present shows for `note`, from its own vault. `parts`: vault-
+     * relative `.md` paths, the note's first, then its descendants depth-
+     * first in the sidebar's order (plain folders inside its folder
+     * included), leaving out an encrypted note and everything under it, at
+     * most 200; the note alone when it has `no_slides_children: true`.
+     * `links`: every wikilink in those files, keyed by its raw inner text as
+     * written (`target` or `target|alias`; in a table `target\|alias`), to
+     * the note it names (`title` null for an encrypted note), or null when
+     * it's broken; `[[note#heading]]` names the note. Refused for an
+     * encrypted note. Absent in apps older than 0.14.0. */
+    deck?(note: NoteRef): Promise<SlidesDeck>;
     /** Draws Settings → Slides' sample deck with Slidev, for its "Render
      * with Slidev" button (desktop only). `req.markdown` is the sample deck
      * as Slidev Markdown (headmatter for slide 1, then `---` blocks with
