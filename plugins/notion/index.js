@@ -62,7 +62,16 @@ export function createNotionImporter(deps = {}) {
       helpUrl: "https://docs.mahfouz.app/guide/import-notion/",
       secretName: SECRET,
     },
-    options: [{ id: "comments", label: "Include comments", hint: "Slower: one more request for every block", default: true }],
+    options: [
+      {
+        id: "page",
+        type: "text",
+        label: "Page link",
+        hint: "Paste a page's link to import just that page and its sub-pages. Leave it empty to choose from everything shared with the integration.",
+        placeholder: "https://www.notion.so/…",
+      },
+      { id: "comments", label: "Include comments", hint: "Slower: one more request for every block", default: true },
+    ],
     prepare: (ctx) => new NotionImport(ctx, deps).run(),
   };
 }
@@ -75,6 +84,30 @@ export function notionId(id) {
   if (/^[0-9a-f]{32}$/.test(s)) return s;
   // Not a UUID (never seen): still something the app's id pattern accepts.
   return s.replace(/[^a-z0-9-]/g, "").slice(0, 64) || "unknown";
+}
+
+/**
+ * The page or database id a Notion link names (`notionIdFromUrl`, a
+ * `notion.com` one, a peek view's `?p=`, a link pasted without `https://`
+ * or in angle brackets, a bare id), with dashes
+ * as Notion's API takes it; null when `link` isn't one.
+ */
+export function idFromLink(link) {
+  // As some apps paste a link: in angle brackets, or with a trailing slash.
+  const s = String(link ?? "")
+    .trim()
+    .replace(/^<(.*)>$/, "$1")
+    .replace(/\/+(?=$|[?#])/, "");
+  let id = null;
+  if (/^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(s)) id = notionId(s);
+  else {
+    const url = (/^https?:\/\//i.test(s) ? s : `https://${s}`).replace(/^(https?:\/\/(?:[\w-]+\.)?notion)\.com(?=[/?#]|$)/i, "$1.so");
+    id = notionIdFromUrl(url);
+    // A page opened as a peek over its database: the link names both, and `p` is the page.
+    const peek = /[?&]p=([0-9a-f]{32})(?:[&#]|$)/i.exec(url);
+    if (id && peek) id = notionId(peek[1]);
+  }
+  return id ? `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}` : null;
 }
 
 function abortError() {
@@ -367,6 +400,7 @@ class NotionImport {
     // Attachments resolve after `prepare` returned, once the user confirmed.
     this.resolveApi = createClient(ctx.http, common);
     this.includeComments = ctx.options?.comments !== false;
+    this.link = typeof ctx.options?.page === "string" ? ctx.options.page.trim() : "";
     this.warnings = new Set();
     this.people = new Map();
     this.attachments = [];
@@ -414,6 +448,12 @@ class NotionImport {
       );
     } else for (const u of users) this.person(u);
 
+    const pages = [];
+    if (this.link) {
+      pages.push(...(await this.importLinked(this.link)));
+      return this.planOf(pages);
+    }
+
     this.progress("Finding the pages shared with the integration…");
     const found = await this.api.listAll("POST", "/search", {});
     for (const o of found) {
@@ -431,7 +471,6 @@ class NotionImport {
     }
     this.estimate = this.searchedPages.size;
 
-    const pages = [];
     const roots = await this.findRoots();
     for (const root of roots) pages.push(...(await this.importRoot(root)));
     // Anything shared that the walk didn't reach (a parent's block that
@@ -441,6 +480,11 @@ class NotionImport {
       if (!this.visited.has(id)) pages.push(...(await this.importRoot({ kind: "database", id: source.parent?.database_id ?? source.id, source })));
     }
 
+    return this.planOf(pages);
+  }
+
+  /** The plan of `pages`, the import's roots. */
+  planOf(pages) {
     if (this.includeComments && this.commentsReadable) {
       this.warn(
         "Notion's API only gives unresolved comments, and anchors each one to a whole block: resolved threads aren't imported, and a comment on part of a block covers the whole block."
@@ -454,6 +498,33 @@ class NotionImport {
       people: [...this.people.values()],
       warnings: [...this.warnings],
     };
+  }
+
+  /** The page or database `link` names and everything under it, as the import's one root. */
+  async importLinked(link) {
+    const id = idFromLink(link);
+    if (!id) throw new Error("That isn't a Notion page link. Copy it from the page's ••• menu → Copy link.");
+    this.progress("Reading the linked page…");
+    this.estimate = 1;
+    const page = await this.api.call("GET", `/pages/${id}`, { allow: [400, 403, 404] });
+    let found = page;
+    if (page?.object === "page" && !page.in_trash && !page.archived) {
+      const parent = page.parent?.type;
+      if (parent === "data_source_id" || parent === "database_id") {
+        this.warn("The link is to a row of a database: its properties aren't imported. Link the database to import its rows with their properties.");
+      }
+      return this.importRoot({ kind: "page", object: page });
+    }
+    if (!page) {
+      const db = await this.api.call("GET", `/databases/${id}`, { allow: [400, 403, 404] });
+      if (db?.object === "database" && !db.in_trash && !db.archived) return this.importRoot({ kind: "database", id });
+      found = db;
+    }
+    throw new Error(
+      found
+        ? "The linked page is in Notion's trash."
+        : "Notion hasn't shared this page with the integration. In Notion, open the page, then ••• → Connections → add the integration."
+    );
   }
 
   // ---- the tree

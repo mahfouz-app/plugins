@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  idFromLink,
   activate,
   API_BASE,
   createClient,
@@ -147,7 +148,11 @@ function parseTaskLine(line) {
 }
 
 /** The app's `checkPlan` (src/core/src/import/write.ts), mirrored, plus the reference invariants. */
-function assertValidPlan(plan) {
+/**
+ * `outside`: a partial import (a page link), whose page references may name
+ * pages it didn't import; the app writes those as plain text.
+ */
+function assertValidPlan(plan, { outside = false } = {}) {
   assert.equal(plan.version, 1);
   for (const list of [plan.pages, plan.attachments, plan.people, plan.warnings]) assert.ok(Array.isArray(list));
   assert.ok(plan.pages.length > 0);
@@ -195,7 +200,7 @@ function assertValidPlan(plan) {
     for (const m of t.matchAll(REF_RE)) {
       const [, , , kind, id] = m;
       assert.match(id, REF_ID_RE);
-      if (kind === "page") assert.ok(sourceIds.has(id), `page ref ${id} is imported`);
+      if (kind === "page") assert.ok(outside || sourceIds.has(id), `page ref ${id} is imported`);
       else if (kind === "file") assert.ok(files.has(id), `file ref ${id} is listed`);
       else if (kind === "person") assert.ok(people.has(id), `person ref ${id} is listed`);
       else assert.fail(`unknown reference kind ${kind}`);
@@ -213,7 +218,10 @@ test("activate registers the Notion importer, or explains why it can't", () => {
   assert.equal(imp.id, "notion");
   assert.equal(imp.label, "Notion");
   assert.deepEqual(imp.credential, { label: "Notion integration token", helpUrl: "https://docs.mahfouz.app/guide/import-notion/", secretName: "token" });
-  assert.deepEqual(imp.options.map((o) => [o.id, o.default]), [["comments", true]]);
+  assert.deepEqual(imp.options.map((o) => [o.id, o.type ?? "switch", o.default]), [
+    ["page", "text", undefined],
+    ["comments", "switch", true],
+  ]);
   assert.equal(typeof imp.prepare, "function");
 
   const toasts = [];
@@ -260,6 +268,90 @@ test("a 401 on the token check is a clear error", async () => {
 
 test("nothing shared with the integration says how to share", async () => {
   await assert.rejects(runImport({ overrides: { "POST /search": ok(emptyList) } }), /Connections/);
+});
+
+test("idFromLink reads a page or database id from Notion's links, or a bare id", () => {
+  const id = "1f3a9c0d-2b7e-4a51-9f3a-9c0d2b7e4a51";
+  const hex = id.replace(/-/g, "");
+  for (const link of [
+    `https://www.notion.so/acme/Q4-planning-offsite-${hex}`,
+    `https://www.notion.so/Q4-${hex}?pvs=4`,
+    `https://www.notion.so/acme/${hex}?v=0000000000000000000000000000000a`,
+    `https://www.notion.so/acme/Board-${"0".repeat(32)}?p=${hex}&pm=s`,
+    `https://acme.notion.site/Q4-${hex}`,
+    `notion.so/${hex}`,
+    `  ${hex.toUpperCase()}  `,
+    `https://www.notion.so/acme/Q4-${hex}/`,
+    `<https://www.notion.so/acme/Q4-${hex}>`,
+    `https://www.notion.com/acme/Q4-${hex}`,
+    id,
+  ]) {
+    assert.equal(idFromLink(link), id, link);
+  }
+  for (const link of ["", "hello", `https://example.com/${hex}`, "https://www.notion.so/acme/No-id-here", "https://notion.so.evil.test/" + hex]) {
+    assert.equal(idFromLink(link), null, link);
+  }
+});
+
+/** Without a search, a link's import reads each data source and page directly: served from the recorded search results. */
+const searched = () =>
+  ["POST /search", "POST /search?start_cursor=cursor-2"].flatMap((k) => FIXTURE.routes[k].body.results);
+const directReads = () =>
+  Object.fromEntries(searched().map((o) => [`GET /${o.object === "data_source" ? "data_sources" : `${o.object}s`}/${o.id}`, ok(o)]));
+
+test("a page link imports that page and what's under it, without searching the workspace", async () => {
+  const root = searched().find((o) => notionId(o.id) === ids.root);
+  const { plan, http, progress } = await runImport({
+    options: { comments: true, page: `https://www.notion.so/acme/Team-Wiki-${ids.root}` },
+    overrides: { ...directReads(), [`GET /pages/${FIXTURE.ids.root}`]: ok(root) },
+  });
+  assertValidPlan(plan);
+  assert.deepEqual(plan.pages.map((p) => p.title), ["Team Wiki"]);
+  assert.deepEqual(plan.pages[0].children.map((p) => p.title), ["In a column", "Guide", "Open", "Archive"]);
+  assert.ok(!http.keys().some((k) => k.startsWith("POST /search")));
+  assert.ok(progress.includes("Reading the linked page…"));
+});
+
+test("a link to a database row imports it as a page, and warns that its properties aren't", async () => {
+  const root = searched().find((o) => notionId(o.id) === ids.root);
+  const row = { ...root, parent: { type: "data_source_id", data_source_id: FIXTURE.ids.ds1 } };
+  const { plan } = await runImport({
+    options: { page: FIXTURE.ids.root },
+    overrides: { ...directReads(), [`GET /pages/${FIXTURE.ids.root}`]: ok(row) },
+  });
+  assert.deepEqual(plan.pages.map((p) => p.title), ["Team Wiki"]);
+  assert.ok(plan.warnings.some((w) => /row of a database: its properties aren't imported/.test(w)));
+});
+
+test("a database link imports that database: one per data source, as a full import does", async () => {
+  const notFound = { status: 404, headers: json, body: { object: "error", code: "object_not_found" } };
+  const { plan } = await runImport({
+    options: { page: FIXTURE.ids.db },
+    overrides: { ...directReads(), [`GET /pages/${FIXTURE.ids.db}`]: notFound },
+  });
+  assertValidPlan(plan, { outside: true });
+  assert.deepEqual(plan.pages.map((p) => p.title), ["Open", "Archive"]);
+  assert.ok(plan.pages.every((p) => p.database));
+});
+
+test("a link to a page the integration can't see says how to share it; a link that isn't Notion's says so", async () => {
+  const notFound = { status: 404, headers: json, body: { object: "error", code: "object_not_found" } };
+  const other = "2f3a9c0d-2b7e-4a51-9f3a-9c0d2b7e4a51";
+  await assert.rejects(
+    runImport({
+      options: { page: `https://www.notion.so/x-${other.replace(/-/g, "")}` },
+      overrides: { [`GET /pages/${other}`]: notFound, [`GET /databases/${other}`]: notFound },
+    }),
+    /hasn't shared this page with the integration.*Connections/
+  );
+  await assert.rejects(runImport({ options: { page: "https://example.com/page" } }), /isn't a Notion page link/);
+  await assert.rejects(
+    runImport({
+      options: { page: other },
+      overrides: { [`GET /pages/${other}`]: notFound, [`GET /databases/${other}`]: ok({ object: "database", id: other, in_trash: true }) },
+    }),
+    /in Notion's trash/
+  );
 });
 
 test("429 waits for Retry-After, and 502/503/504 back off, then the request is retried", async () => {

@@ -335,18 +335,34 @@ export interface ImportContext {
   signal: AbortSignal;
   /** Requests through Rust under the importer's plugin's allowlist; a `secret` names the session secret Rust attaches. */
   http: { request(spec: HttpRequestSpec): Promise<HttpResponse> };
-  /** The dialog's value for each of `Importer.options`, by id. */
-  options: Record<string, boolean>;
+  /** The dialog's value for each of `Importer.options`, by id: a switch's boolean, a text field's trimmed text (`""` when empty). */
+  options: Record<string, boolean | string>;
 }
 
-/** A checkbox the Import dialog shows for an importer. */
-export interface ImporterOption {
+/**
+ * An on/off switch the Import dialog shows for an importer (`hint` is a
+ * line under it).
+ */
+export interface ImporterSwitchOption {
   id: string;
+  type?: "switch";
   label: string;
   /** A line under the label. */
   hint?: string;
   default: boolean;
 }
+
+/** A one-line text field the Import dialog shows for an importer, empty to start; marked optional. */
+export interface ImporterTextOption {
+  id: string;
+  type: "text";
+  label: string;
+  /** A line under the field. */
+  hint?: string;
+  placeholder?: string;
+}
+
+export type ImporterOption = ImporterSwitchOption | ImporterTextOption;
 
 export interface Importer {
   id: string;
