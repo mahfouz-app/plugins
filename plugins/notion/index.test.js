@@ -281,6 +281,9 @@ test("idFromLink reads a page or database id from Notion's links, or a bare id",
     `https://acme.notion.site/Q4-${hex}`,
     `notion.so/${hex}`,
     `  ${hex.toUpperCase()}  `,
+    `https://www.notion.so/acme/Q4-${hex}/`,
+    `<https://www.notion.so/acme/Q4-${hex}>`,
+    `https://www.notion.com/acme/Q4-${hex}`,
     id,
   ]) {
     assert.equal(idFromLink(link), id, link);
@@ -309,6 +312,17 @@ test("a page link imports that page and what's under it, without searching the w
   assert.ok(progress.includes("Reading the linked page…"));
 });
 
+test("a link to a database row imports it as a page, and warns that its properties aren't", async () => {
+  const root = searched().find((o) => notionId(o.id) === ids.root);
+  const row = { ...root, parent: { type: "data_source_id", data_source_id: FIXTURE.ids.ds1 } };
+  const { plan } = await runImport({
+    options: { page: FIXTURE.ids.root },
+    overrides: { ...directReads(), [`GET /pages/${FIXTURE.ids.root}`]: ok(row) },
+  });
+  assert.deepEqual(plan.pages.map((p) => p.title), ["Team Wiki"]);
+  assert.ok(plan.warnings.some((w) => /row of a database: its properties aren't imported/.test(w)));
+});
+
 test("a database link imports that database: one per data source, as a full import does", async () => {
   const notFound = { status: 404, headers: json, body: { object: "error", code: "object_not_found" } };
   const { plan } = await runImport({
@@ -331,6 +345,13 @@ test("a link to a page the integration can't see says how to share it; a link th
     /hasn't shared this page with the integration.*Connections/
   );
   await assert.rejects(runImport({ options: { page: "https://example.com/page" } }), /isn't a Notion page link/);
+  await assert.rejects(
+    runImport({
+      options: { page: other },
+      overrides: { [`GET /pages/${other}`]: notFound, [`GET /databases/${other}`]: ok({ object: "database", id: other, in_trash: true }) },
+    }),
+    /in Notion's trash/
+  );
 });
 
 test("429 waits for Retry-After, and 502/503/504 back off, then the request is retried", async () => {
