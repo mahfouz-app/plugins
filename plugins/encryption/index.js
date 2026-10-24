@@ -35,7 +35,7 @@
 
 export const CONFIG_PATH = ".config/encryption.md";
 export const STORAGE_KEY = "mahfouz.encryption.keys";
-export const GUIDE_URL = "https://docs.mahfouz.app/guide/encryption/";
+export const GUIDE_URL = "https://mahfouz.app/guide/encryption/";
 export const GROUP_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 export const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 const FPR_RE = /^(?:[0-9A-F]{40}|[0-9A-F]{64})$/;
