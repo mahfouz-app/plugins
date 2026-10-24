@@ -217,7 +217,7 @@ test("activate registers the Notion importer, or explains why it can't", () => {
   const [imp] = registered;
   assert.equal(imp.id, "notion");
   assert.equal(imp.label, "Notion");
-  assert.deepEqual(imp.credential, { label: "Notion integration token", helpUrl: "https://docs.mahfouz.app/guide/import-notion/", secretName: "token" });
+  assert.deepEqual(imp.credential, { label: "Notion integration token", helpUrl: "https://mahfouz.app/guide/import-notion/", secretName: "token" });
   assert.deepEqual(imp.options.map((o) => [o.id, o.type ?? "switch", o.default]), [
     ["page", "text", undefined],
     ["comments", "switch", true],

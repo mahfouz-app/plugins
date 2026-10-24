@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "encryption",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "label": "Encryption",
   "description": "Encrypt notes end to end with GPG, readable only by you and the people you choose",
   "mahfouz": ">=0.12.0",
