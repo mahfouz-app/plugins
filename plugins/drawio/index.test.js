@@ -10,8 +10,15 @@ import {
   createEditorSession,
   createPublishRenderer,
   drawDiagram,
+  drawImagePlaceholder,
+  droppedImagesCaption,
+  DROPPED_IMAGE_ATTR,
+  DROPPED_IMAGE_TITLE,
   exportDiagramSvg,
+  hardenImages,
   hardenLabelSanitizer,
+  localImageSrc,
+  viewerPaths,
   isInlineImageSrc,
   LABEL_PURIFY_CONFIG,
   extractDrawioBlockAt,
@@ -579,4 +586,142 @@ test("a viewer without draw.io's sanitizer or a working DOMPurify fails instead 
   const original = win.Graph.sanitizeHtml;
   assert.throws(() => hardenLabelSanitizer(win), /isn't supported/);
   assert.equal(win.Graph.sanitizeHtml, original);
+});
+
+// ---- images in shapes -------------------------------------------------------
+
+const WEBAPP_BASE = "http://127.0.0.1:4100/mahfouz/drawio/webapp/drawio-31.4.6/src/main/webapp/";
+
+test("an image keeps an inline source or one of the plugin's own draw.io files", () => {
+  assert.equal(localImageSrc("data:image/png;base64,AAAA", WEBAPP_BASE), "data:image/png;base64,AAAA");
+  assert.equal(localImageSrc(" data:image/svg+xml;base64,PHN2Zz4= ", WEBAPP_BASE), "data:image/svg+xml;base64,PHN2Zz4=");
+  // Library clip art is written relative; it resolves to the web app.
+  assert.equal(localImageSrc("img/lib/clip_art/computers/Server_Tower_128x128.png", WEBAPP_BASE), `${WEBAPP_BASE}img/lib/clip_art/computers/Server_Tower_128x128.png`);
+  assert.equal(localImageSrc(`${WEBAPP_BASE}images/x.svg`, WEBAPP_BASE), `${WEBAPP_BASE}images/x.svg`);
+});
+
+test("any other image source is never requested", () => {
+  const refused = [
+    "https://example.com/pixel.png",
+    "http://example.com/pixel.png",
+    "//example.com/pixel.png",
+    "/files/x.png",
+    "../../../x.png",
+    "img/../../../../x.png",
+    "http://127.0.0.1:4100/mahfouz/drawio/webapp/other.png",
+    "http://127.0.0.1:4100.evil.example/mahfouz/drawio/webapp/drawio-31.4.6/src/main/webapp/x.png",
+    "javascript:alert(1)",
+    "data:text/html,<b>",
+    "data:image/png",
+    "blob:http://127.0.0.1:4100/abc",
+    "file:///etc/passwd",
+    "",
+    "   ",
+    null,
+    undefined,
+  ];
+  for (const src of refused) assert.equal(localImageSrc(src, WEBAPP_BASE), null, String(src));
+});
+
+// Just enough of an mxSvgCanvas2D and its SVG root for the placeholder: each
+// primitive that draws appends a node, as the real canvas's addNode does.
+function fakeCanvas() {
+  const calls = [];
+  const el = (name) => ({ name, attrs: {}, children: [], textContent: "", setAttribute(k, v) { this.attrs[k] = v; }, appendChild(c) {
+    if (c.parent) c.parent.children.splice(c.parent.children.indexOf(c), 1);
+    c.parent = this;
+    this.children.push(c);
+  } });
+  const root = el("g");
+  root.ownerDocument = { createElementNS: (_ns, name) => el(name) };
+  Object.defineProperty(root, "childNodes", { get: () => root.children });
+  root.appendChild(el("rect-before"));
+  const canvas = { root, calls };
+  for (const name of ["save", "restore", "setStrokeColor", "setStrokeWidth", "setFillColor", "setDashed", "setDashPattern", "rect", "ellipse", "begin", "moveTo", "lineTo"]) {
+    canvas[name] = (...args) => calls.push([name, ...args]);
+  }
+  for (const name of ["stroke", "fill"]) {
+    canvas[name] = () => {
+      calls.push([name]);
+      root.appendChild(el(name));
+    };
+  }
+  return canvas;
+}
+
+test("a dropped image draws a dashed outline its size, with an icon, grouped under a title", () => {
+  const canvas = fakeCanvas();
+  drawImagePlaceholder(canvas, 10, 20, 80, 70);
+  assert.deepEqual(canvas.calls.find((c) => c[0] === "rect"), ["rect", 10, 20, 80, 70]);
+  assert.ok(canvas.calls.some((c) => c[0] === "setDashed" && c[1] === true));
+  assert.ok(canvas.calls.some((c) => c[0] === "ellipse"), "the icon is drawn");
+  assert.equal(canvas.calls[0][0], "save");
+  assert.equal(canvas.calls.at(-1)[0], "restore");
+  // What was there before stays; everything the placeholder drew is grouped.
+  const [before, group] = canvas.root.children;
+  assert.equal(canvas.root.children.length, 2);
+  assert.equal(before.name, "rect-before");
+  assert.equal(group.name, "g");
+  assert.equal(group.attrs[DROPPED_IMAGE_ATTR], "");
+  assert.equal(group.children[0].name, "title");
+  assert.equal(group.children[0].textContent, DROPPED_IMAGE_TITLE);
+  assert.deepEqual(group.children.slice(1).map((c) => c.name), ["stroke", "stroke", "stroke", "fill"]);
+});
+
+test("a dropped image too small for the icon keeps just its outline", () => {
+  const canvas = fakeCanvas();
+  drawImagePlaceholder(canvas, 0, 0, 6, 40);
+  assert.equal(canvas.calls.filter((c) => c[0] === "rect").length, 1);
+  assert.ok(!canvas.calls.some((c) => c[0] === "ellipse"));
+});
+
+function fakeImageWindow() {
+  const drawn = [];
+  function Canvas() {
+    Object.assign(this, fakeCanvas());
+  }
+  Canvas.prototype.image = function (...args) {
+    drawn.push(args);
+  };
+  return { win: { mxSvgCanvas2D: Canvas }, drawn };
+}
+
+test("the canvas draws an allowed image resolved, and a placeholder for any other", () => {
+  const { win, drawn } = fakeImageWindow();
+  hardenImages(win, WEBAPP_BASE);
+  const canvas = new win.mxSvgCanvas2D();
+  canvas.image(1, 2, 3, 4, "img/lib/a.png", true, false, true, "inset(1px)", "x");
+  assert.deepEqual(drawn, [[1, 2, 3, 4, `${WEBAPP_BASE}img/lib/a.png`, true, false, true, "inset(1px)", "x"]]);
+  canvas.image(5, 6, 70, 80, "https://tracker.example/p.png");
+  assert.equal(drawn.length, 1, "the remote image is never handed to draw.io");
+  assert.equal(canvas.root.children.at(-1).attrs[DROPPED_IMAGE_ATTR], "");
+});
+
+test("images are hardened once, and a viewer without the canvas fails instead of drawing", () => {
+  const { win, drawn } = fakeImageWindow();
+  hardenImages(win, WEBAPP_BASE);
+  const local = win.mxSvgCanvas2D.prototype.image;
+  hardenImages(win, WEBAPP_BASE);
+  assert.equal(win.mxSvgCanvas2D.prototype.image, local);
+  new win.mxSvgCanvas2D().image(0, 0, 1, 1, "data:image/gif,x");
+  assert.equal(drawn.length, 1);
+  assert.throws(() => hardenImages({}, WEBAPP_BASE), /image drawing didn't load/);
+  assert.throws(() => hardenImages({ mxSvgCanvas2D: function () {} }, WEBAPP_BASE), /image drawing didn't load/);
+});
+
+test("the viewer looks for its own files in the plugin, never on draw.io's servers", () => {
+  const paths = viewerPaths(WEBAPP_BASE);
+  // The viewer resolves library images as DRAWIO_BASE_URL + "/" + path.
+  assert.equal(`${paths.DRAWIO_BASE_URL}/img/lib/a.png`, `${WEBAPP_BASE}img/lib/a.png`);
+  for (const [name, value] of Object.entries(paths)) {
+    assert.ok(`${value}/`.startsWith(WEBAPP_BASE), name);
+    assert.doesNotMatch(value, /diagrams\.net|draw\.io/, name);
+  }
+  for (const name of ["GRAPH_IMAGE_PATH", "STENCIL_PATH", "SHAPES_PATH", "DRAW_MATH_URL", "PROXY_URL"]) assert.ok(name in paths, name);
+});
+
+test("the preview's caption counts the images it left out", () => {
+  assert.equal(droppedImagesCaption(0), null);
+  assert.equal(droppedImagesCaption(1), "1 image from the web isn’t shown in previews.");
+  assert.equal(droppedImagesCaption(2), "2 images from the web aren’t shown in previews.");
 });
