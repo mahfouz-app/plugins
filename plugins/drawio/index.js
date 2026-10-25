@@ -214,6 +214,64 @@ function createDiagramViewer(holder, source, viewer, parseXml) {
   return drawn;
 }
 
+// ---- label sanitizing -----------------------------------------------------
+//
+// A diagram's HTML labels are vault content, drawn as HTML in the app's page.
+// draw.io's viewer already cleans each one (`Graph.sanitizeHtml`, its
+// bundled DOMPurify with hooks against script, event handlers,
+// `javascript:` and external CSS), but lets remote images and media (a
+// request every time the note renders) and clickable links through. A
+// second pass, on a fresh instance of that same DOMPurify (pinned with the
+// release, none of draw.io's hooks), keeps only formatting.
+
+/** The second pass's DOMPurify config. `style` was already checked by
+ * draw.io's hook in the first pass. */
+export const LABEL_PURIFY_CONFIG = {
+  ALLOWED_TAGS: [
+    "b", "strong", "i", "em", "u", "s", "strike", "del", "ins", "mark", "sub", "sup", "small", "big",
+    "br", "hr", "p", "div", "span", "font", "center", "blockquote", "pre", "code",
+    "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+    "table", "caption", "colgroup", "col", "thead", "tbody", "tfoot", "tr", "td", "th", "img",
+  ],
+  ALLOWED_ATTR: [
+    "style", "color", "face", "size", "align", "valign", "dir", "width", "height",
+    "colspan", "rowspan", "span", "border", "cellpadding", "cellspacing", "src", "alt",
+  ],
+  ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false,
+};
+
+/** Whether an <img> in a label may keep `src`: an inline raster or SVG
+ * image only, never anything fetched. */
+export function isInlineImageSrc(src) {
+  return /^data:image\/(?:png|gif|jpe?g|webp|svg\+xml)[;,]/i.test(String(src ?? "").trim());
+}
+
+/**
+ * Wraps `win.Graph.sanitizeHtml` (once) so its output gets the second pass.
+ * Every label, tooltip and the publish export go through it. Throws when
+ * draw.io's sanitizer or DOMPurify is missing or unsupported, so a viewer
+ * that can't clean labels never draws.
+ */
+export function hardenLabelSanitizer(win) {
+  const Graph = win.Graph;
+  const original = Graph?.sanitizeHtml;
+  if (typeof original !== "function") throw new Error("draw.io's label sanitizer didn't load");
+  if (original.mahfouzStrict) return;
+  const purify = typeof win.DOMPurify === "function" ? win.DOMPurify(win) : null;
+  if (!purify?.isSupported || typeof purify.sanitize !== "function") {
+    throw new Error("draw.io's label sanitizer isn't supported here");
+  }
+  purify.addHook("afterSanitizeAttributes", (node) => {
+    if (node.nodeName?.toUpperCase() === "IMG" && !isInlineImageSrc(node.getAttribute("src"))) node.remove();
+  });
+  const strict = function (value, editing) {
+    return purify.sanitize(original.call(this, value, editing), LABEL_PURIFY_CONFIG);
+  };
+  strict.mahfouzStrict = true;
+  Graph.sanitizeHtml = strict;
+}
+
 // ---- the app's side: embed + tab -------------------------------------------
 
 let viewerScript = null;
@@ -225,7 +283,16 @@ function loadViewerScript(baseUrl) {
   viewerScript = new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = `${baseUrl}${WEBAPP}js/viewer.min.js`;
-    script.onload = () => resolve();
+    // Nothing draws until labels get the second pass. A viewer that can't
+    // have it stays failed: loading the same script again wouldn't help.
+    script.onload = () => {
+      try {
+        hardenLabelSanitizer(window);
+        resolve();
+      } catch (err) {
+        reject(err);
+      }
+    };
     script.onerror = () => {
       viewerScript = null;
       reject(new Error("failed to load draw.io's viewer"));
