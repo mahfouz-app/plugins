@@ -11,6 +11,9 @@ import {
   createPublishRenderer,
   drawDiagram,
   exportDiagramSvg,
+  hardenLabelSanitizer,
+  isInlineImageSrc,
+  LABEL_PURIFY_CONFIG,
   extractDrawioBlockAt,
   isPublishableSvg,
   replaceDrawioBlockAt,
@@ -487,4 +490,93 @@ test("real publish renders (HTML labels, a linked cell) pass the publishing serv
     assert.equal(isPublishableSvg(svg), true, name);
     assert.deepEqual(checkSvg(svg), { ok: true }, name);
   }
+});
+
+// ---- label sanitizing -----------------------------------------------------
+
+// A window with draw.io's sanitizer and a DOMPurify factory that records
+// what the second pass is given.
+function fakeLabelWindow({ supported = true } = {}) {
+  const calls = { factory: [], hooks: [], sanitize: [] };
+  const win = {
+    Graph: { sanitizeHtml: (value) => `drawio(${value})` },
+    DOMPurify(w) {
+      calls.factory.push(w);
+      return {
+        isSupported: supported,
+        addHook: (name, fn) => calls.hooks.push({ name, fn }),
+        sanitize: (value, config) => {
+          calls.sanitize.push({ value, config });
+          return `strict(${value})`;
+        },
+      };
+    },
+  };
+  return { win, calls };
+}
+
+function fakeImg(src) {
+  const node = { nodeName: "IMG", removed: false, getAttribute: (n) => (n === "src" ? src : null) };
+  node.remove = () => (node.removed = true);
+  return node;
+}
+
+test("labels get draw.io's sanitizer, then the strict second pass on a fresh DOMPurify", () => {
+  const { win, calls } = fakeLabelWindow();
+  hardenLabelSanitizer(win);
+  assert.equal(win.Graph.sanitizeHtml("<b>x</b>"), "strict(drawio(<b>x</b>))");
+  assert.deepEqual(calls.factory, [win]);
+  assert.equal(calls.sanitize[0].config, LABEL_PURIFY_CONFIG);
+});
+
+test("the second pass keeps formatting but no links, media or data attributes", () => {
+  const { ALLOWED_TAGS, ALLOWED_ATTR } = LABEL_PURIFY_CONFIG;
+  for (const tag of ["b", "i", "u", "br", "font", "span", "div", "ul", "li", "table", "img"]) assert.ok(ALLOWED_TAGS.includes(tag), tag);
+  for (const tag of ["a", "video", "audio", "source", "iframe", "object", "svg", "style", "form", "input", "link", "meta", "base"]) {
+    assert.ok(!ALLOWED_TAGS.includes(tag), tag);
+  }
+  for (const attr of ["href", "xlink:href", "srcset", "poster", "action", "formaction", "target", "class", "id"]) assert.ok(!ALLOWED_ATTR.includes(attr), attr);
+  assert.ok(!ALLOWED_ATTR.some((a) => /^on/i.test(a)));
+  assert.equal(LABEL_PURIFY_CONFIG.ALLOW_DATA_ATTR, false);
+});
+
+test("an image in a label keeps only an inline data: source", () => {
+  const { win, calls } = fakeLabelWindow();
+  hardenLabelSanitizer(win);
+  const hook = calls.hooks.find((h) => h.name === "afterSanitizeAttributes").fn;
+  const kept = ["data:image/png;base64,AAAA", "data:image/svg+xml;base64,PHN2Zz4=", " DATA:image/gif,x", "data:image/jpeg;base64,x"];
+  for (const src of kept) {
+    const img = fakeImg(src);
+    hook(img);
+    assert.equal(img.removed, false, src);
+  }
+  const removed = ["https://example.com/p.png", "//example.com/p.png", "/files/x.png", "x", "", null, "data:text/html,<b>", "data:image/png", "javascript:alert(1)"];
+  for (const src of removed) {
+    const img = fakeImg(src);
+    hook(img);
+    assert.equal(img.removed, true, String(src));
+  }
+  const span = { nodeName: "SPAN", getAttribute: () => null, remove: () => assert.fail("only images are removed") };
+  hook(span);
+  assert.equal(isInlineImageSrc("data:image/webp;base64,x"), true);
+});
+
+test("hardening is applied once, however often the viewer loads", () => {
+  const { win, calls } = fakeLabelWindow();
+  hardenLabelSanitizer(win);
+  const strict = win.Graph.sanitizeHtml;
+  hardenLabelSanitizer(win);
+  assert.equal(win.Graph.sanitizeHtml, strict);
+  assert.equal(calls.factory.length, 1);
+  assert.equal(win.Graph.sanitizeHtml("x"), "strict(drawio(x))");
+});
+
+test("a viewer without draw.io's sanitizer or a working DOMPurify fails instead of drawing", () => {
+  assert.throws(() => hardenLabelSanitizer({}), /sanitizer didn't load/);
+  assert.throws(() => hardenLabelSanitizer({ Graph: {} }), /sanitizer didn't load/);
+  assert.throws(() => hardenLabelSanitizer({ Graph: { sanitizeHtml: (v) => v } }), /isn't supported/);
+  const { win } = fakeLabelWindow({ supported: false });
+  const original = win.Graph.sanitizeHtml;
+  assert.throws(() => hardenLabelSanitizer(win), /isn't supported/);
+  assert.equal(win.Graph.sanitizeHtml, original);
 });
