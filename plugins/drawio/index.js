@@ -272,6 +272,151 @@ export function hardenLabelSanitizer(win) {
   Graph.sanitizeHtml = strict;
 }
 
+// ---- images in shapes ------------------------------------------------------
+//
+// An image shape (`shape=image;image=…`), `image=` on any other shape, an
+// <image> inside a stencil and the page's background image are all drawn by
+// the SVG canvas's `image()`, which would request their URL every time the
+// note renders: a read beacon for whoever wrote the diagram. Only an inline
+// image or one of the plugin's own draw.io files is drawn; any other is
+// replaced by a placeholder, and the preview says how many it left out.
+
+/** Marks a placeholder group, so the preview can count them. */
+export const DROPPED_IMAGE_ATTR = "data-mahfouz-dropped-image";
+
+/** The placeholder's tooltip. */
+export const DROPPED_IMAGE_TITLE = "Image from the web not loaded";
+
+const PLACEHOLDER_COLOR = "#9a9a94";
+
+/**
+ * The URL to draw for an image `src`, or null when it mustn't be requested:
+ * an inline image as it is, or a URL that resolves (a relative one against
+ * the plugin's draw.io web app, as library clip art is written) to a file
+ * under `webappBase` (absolute, ending in "/"). Any other scheme is refused.
+ */
+export function localImageSrc(src, webappBase) {
+  const value = String(src ?? "").trim();
+  if (isInlineImageSrc(value)) return value;
+  if (!value) return null;
+  let url;
+  try {
+    url = new URL(value, webappBase);
+  } catch {
+    return null;
+  }
+  return url.href.startsWith(webappBase) ? url.href : null;
+}
+
+/**
+ * Draws the placeholder for an image left out at (x, y, w, h) on `canvas`
+ * (an mxSvgCanvas2D, so the canvas's scale, translation and rotation apply):
+ * a dashed outline the image's size with an image icon, grouped under a
+ * <title> and `DROPPED_IMAGE_ATTR`.
+ */
+export function drawImagePlaceholder(canvas, x, y, w, h) {
+  const root = canvas.root;
+  const first = root.childNodes.length;
+  canvas.save();
+  canvas.setStrokeColor(PLACEHOLDER_COLOR);
+  canvas.setStrokeWidth(1);
+  canvas.setDashed(true);
+  canvas.setDashPattern("4 3");
+  canvas.rect(x, y, w, h);
+  canvas.stroke();
+  canvas.setDashed(false);
+  const s = Math.min(w, h, 28) * 0.8;
+  if (s >= 8) {
+    // A picture frame with a sun and two hills.
+    const ix = x + (w - s) / 2;
+    const iy = y + (h - s * 0.8) / 2;
+    canvas.setStrokeWidth(1.5);
+    canvas.rect(ix, iy, s, s * 0.8);
+    canvas.stroke();
+    canvas.begin();
+    canvas.moveTo(ix + s * 0.08, iy + s * 0.72);
+    canvas.lineTo(ix + s * 0.38, iy + s * 0.42);
+    canvas.lineTo(ix + s * 0.6, iy + s * 0.62);
+    canvas.lineTo(ix + s * 0.74, iy + s * 0.5);
+    canvas.lineTo(ix + s * 0.92, iy + s * 0.72);
+    canvas.stroke();
+    canvas.setFillColor(PLACEHOLDER_COLOR);
+    canvas.ellipse(ix + s * 0.22, iy + s * 0.18, s * 0.16, s * 0.16);
+    canvas.fill();
+  }
+  canvas.restore();
+
+  const doc = root.ownerDocument;
+  const group = doc.createElementNS(SVG_NS, "g");
+  group.setAttribute(DROPPED_IMAGE_ATTR, "");
+  const title = doc.createElementNS(SVG_NS, "title");
+  title.textContent = DROPPED_IMAGE_TITLE;
+  group.appendChild(title);
+  for (const node of Array.prototype.slice.call(root.childNodes, first)) group.appendChild(node);
+  root.appendChild(group);
+}
+
+/**
+ * Wraps `win.mxSvgCanvas2D.prototype.image` (once) so it draws only what
+ * `localImageSrc` allows, and a placeholder for anything else. Throws when
+ * the canvas is missing, so a viewer that could fetch images never draws.
+ */
+export function hardenImages(win, webappBase) {
+  const proto = win.mxSvgCanvas2D?.prototype;
+  const original = proto?.image;
+  if (typeof original !== "function") throw new Error("draw.io's image drawing didn't load");
+  if (original.mahfouzLocal) return;
+  const local = function (x, y, w, h, src, ...rest) {
+    const allowed = localImageSrc(src, webappBase);
+    if (allowed !== null) return original.call(this, x, y, w, h, allowed, ...rest);
+    drawImagePlaceholder(this, x, y, w, h);
+  };
+  local.mahfouzLocal = true;
+  proto.image = local;
+}
+
+/**
+ * The globals that tell draw.io's viewer where its own files are, all under
+ * `webappBase` (absolute, ending in "/"), set before the viewer loads. Its
+ * defaults are draw.io's servers (`app.diagrams.net` for library images,
+ * `viewer.diagrams.net` for stencils, shapes, math and an image proxy), which
+ * a preview would otherwise contact, and which `hardenImages` would refuse.
+ */
+export function viewerPaths(webappBase) {
+  return {
+    DRAWIO_BASE_URL: webappBase.replace(/\/$/, ""),
+    GRAPH_IMAGE_PATH: `${webappBase}img`,
+    STENCIL_PATH: `${webappBase}stencils`,
+    SHAPES_PATH: `${webappBase}shapes`,
+    DRAW_MATH_URL: `${webappBase}math4/es5`,
+    // Fetches `http:` images and fonts through draw.io's server; here a path
+    // the plugin doesn't serve.
+    PROXY_URL: `${webappBase}proxy`,
+  };
+}
+
+/** The caption under a preview that left `count` images out, or null. */
+export function droppedImagesCaption(count) {
+  if (!count) return null;
+  return count === 1
+    ? "1 image from the web isn’t shown in previews."
+    : `${count} images from the web aren’t shown in previews.`;
+}
+
+/** Adds `droppedImagesCaption` for the placeholders in `holder` to
+ * `preview`, under the diagram; nothing when there are none. */
+function showDroppedImages(preview, holder) {
+  const text = droppedImagesCaption(holder.querySelectorAll(`[${DROPPED_IMAGE_ATTR}]`).length);
+  if (!text) return;
+  const caption = document.createElement("p");
+  caption.className = "cm-drawio-dropped";
+  caption.setAttribute("style", "display:flex;align-items:center;gap:6px;margin:4px 0 0;font-size:12.5px;color:var(--cm-muted);");
+  caption.innerHTML =
+    '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 11l3.5-3.5 2.5 2.5 1.5-1.5 2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+  caption.append(text);
+  preview.appendChild(caption);
+}
+
 // ---- the app's side: embed + tab -------------------------------------------
 
 let viewerScript = null;
@@ -280,14 +425,17 @@ function loadViewerScript(baseUrl) {
   // Once loaded, the viewer draws every `.mxgraph` element on the page
   // unless this hook is set; each preview draws its own (`drawDiagram`).
   window.onDrawioViewerLoad ??= () => {};
+  Object.assign(window, viewerPaths(new URL(`${baseUrl}${WEBAPP}`, document.baseURI).href));
   viewerScript = new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = `${baseUrl}${WEBAPP}js/viewer.min.js`;
-    // Nothing draws until labels get the second pass. A viewer that can't
-    // have it stays failed: loading the same script again wouldn't help.
+    // Nothing draws until labels get the second pass and images are kept
+    // local. A viewer that can't have them stays failed: loading the same
+    // script again wouldn't help.
     script.onload = () => {
       try {
         hardenLabelSanitizer(window);
+        hardenImages(window, new URL(`${baseUrl}${WEBAPP}`, document.baseURI).href);
         resolve();
       } catch (err) {
         reject(err);
@@ -453,6 +601,7 @@ function createRenderer(host) {
         await loadViewerScript(host.plugin.baseUrl);
         const parse = (xml) => new DOMParser().parseFromString(xml, "text/xml");
         if (!drawDiagram(holder, source, window.GraphViewer, parse)) preview.textContent = EMPTY;
+        else showDroppedImages(preview, holder);
       } catch (err) {
         host.ui.showError(preview, `Draw.io preview failed: ${err instanceof Error ? err.message : String(err)}`);
       }
