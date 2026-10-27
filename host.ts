@@ -498,12 +498,91 @@ export interface SettingsTab {
   render(container: HTMLElement): void | (() => void);
 }
 
+/**
+ * The app icons a plugin dialog may name, for its title and its buttons
+ * (plugin code is JS: names, never markup or React). A name this app
+ * doesn't know falls back to the slot's default, so a plugin naming one
+ * added later still opens on an older app (the app's `src/core/src/plugins/dialogs.ts`).
+ */
+export const PLUGIN_DIALOG_ICONS = [
+  "check",
+  "checks",
+  "x",
+  "plus",
+  "trash",
+  "undo",
+  "refresh",
+  "download",
+  "upload",
+  "external",
+  "link",
+  "unlink",
+  "settings",
+  "log-out",
+  "user-minus",
+  "world",
+  "world-off",
+] as const;
+
+export type PluginDialogIcon = (typeof PLUGIN_DIALOG_ICONS)[number];
+
+/** One footer button of a plugin dialog. */
+export interface PluginDialogAction {
+  label: string;
+  /**
+   * One of `PLUGIN_DIALOG_ICONS`. Required for `secondary` and `start`
+   * (their labels vary too much for a default to fit); left out, `primary`
+   * shows a check and `cancel` an ×. A name this app doesn't know falls
+   * back, with a warning, to the slot's default: a check (for a `start`
+   * that's a `link`, an external-link arrow; for `cancel`, an ×).
+   */
+  icon?: string;
+  /** Red (`primary` only). A destructive primary never runs on Enter. */
+  danger?: boolean;
+  disabled?: boolean;
+  /**
+   * Runs on a click (a non-`danger` primary's also on Enter in a one-line
+   * field). While a returned promise is pending that button is disabled
+   * (the action itself, wherever `setActions` moves it); a rejection is
+   * logged and enables it again. `cancel` closes the dialog: left out, at
+   * once; given, once it returns or its promise resolves (a throw or a
+   * rejection keeps the dialog open).
+   */
+  onClick?: () => void | Promise<void>;
+}
+
+/**
+ * A plugin dialog's footer. The app lays it out, in a fixed order:
+ * `start` (pinned left; `link` makes it a text link) · `secondary` ·
+ * `cancel` · `primary` (rightmost). `cancel` needs a `primary`. Left out,
+ * the dialog has no footer.
+ */
+export interface PluginDialogActions {
+  primary?: PluginDialogAction;
+  cancel?: PluginDialogAction;
+  secondary?: PluginDialogAction[];
+  start?: PluginDialogAction & { link?: boolean };
+}
+
 /** A dialog a plugin opens with `host.ui.openDialog` (the app's `src/core/src/plugins/dialogs.ts`). */
 export interface DialogSpec {
   /** The dialog's title, and its accessible name. */
   title: string;
+  /** A muted line under the title: what the dialog is about. */
+  subtitle?: string;
+  /** The title's icon, one of `PLUGIN_DIALOG_ICONS`; left out, the plugin's own icon. */
+  icon?: string;
+  /** The footer's buttons, laid out by the app. Change them later with the handle's `setActions`. */
+  actions?: PluginDialogActions;
   /** Renders the dialog's content into `container`; the returned function runs when it closes. */
   render(container: HTMLElement): void | (() => void);
+}
+
+/** What `host.ui.openDialog` returns. */
+export interface PluginDialogHandle {
+  close(): void;
+  /** Replaces the footer's buttons (to enable Submit once the input is valid); `undefined` removes the footer. The plugin's content stays, and a button still busy stays busy where its action object now sits. Throws as `openDialog` does on actions it can't lay out; once the dialog is closed, a no-op that checks nothing. */
+  setActions(actions: PluginDialogActions | undefined): void;
 }
 
 /** `host.ui.confirm`'s question (the app's `src/core/src/plugins/dialogs.ts`). */

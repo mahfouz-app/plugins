@@ -20,6 +20,9 @@ import type {
   CommitFilesResult,
   CreatedRepo,
   DialogSpec,
+  PluginDialogAction,
+  PluginDialogActions,
+  PluginDialogHandle,
   EncryptionSwitch,
   ExportFormat,
   ExportRequest,
@@ -72,6 +75,9 @@ export type {
   CommitFilesResult,
   CreatedRepo,
   DialogSpec,
+  PluginDialogAction,
+  PluginDialogActions,
+  PluginDialogHandle,
   EncryptionSwitch,
   EmbedContext,
   EmbedRenderer,
@@ -678,12 +684,50 @@ export interface MahfouzPluginHost {
      * (red, with focus on Cancel, when `danger`). Resolves true for the
      * confirm button. Absent in apps older than 0.12.0. */
     confirm?(options: PluginConfirmOptions): Promise<boolean>;
-    /** A dialog with the app's look: `title` on top, and `render(container)`
-     * draws the rest (use `.dialog-row`, `.dialog-input`, `.dialog-actions`
-     * with `.dialog-cancel` and `.dialog-submit`…) and returns its cleanup.
-     * Escape and a click outside close it, as does `close()`, and the
-     * plugin unloading. Absent in apps older than 0.12.0. */
-    openDialog?(spec: DialogSpec): { close(): void };
+    /** A dialog with the app's look: `title` (with `icon`, else the
+     * plugin's icon, and an optional `subtitle`) on top, `render(container)`
+     * drawing the body (use `.dialog-row`, `.dialog-input` (a full-width
+     * `.field`, the app's text field; `.field` alone doesn't set a width)…)
+     * and returning its cleanup, and the footer from `actions`: `start`
+     * (pinned left, `link: true` for a text link), `secondary`, `cancel`
+     * and `primary` (rightmost), always in that order, each a label, an
+     * icon name (`check`, `checks`, `x`, `plus`, `trash`, `undo`,
+     * `refresh`, `download`, `upload`, `external`, `link`, `unlink`,
+     * `settings`, `log-out`, `user-minus`, `world`, `world-off`),
+     * `danger` (primary), `disabled` and `onClick`.
+     * Icons: `primary` defaults to a check and `cancel` to an ×;
+     * `secondary` and `start` must name one (left out, it throws); an
+     * unknown name falls back to the slot's default (a check; an
+     * external-link arrow for a `link` start) with a warning.
+     * `cancel` without `primary` throws.
+     * The body isn't wrapped in a form: its own buttons and `<form>`s
+     * behave as anywhere else. Enter in a one-line field (text, search,
+     * email, url, tel, password, number; not a textarea, select or
+     * checkbox, not inside the plugin's own form, not while an IME is
+     * composing) runs the primary, unless it's `danger` (a destructive
+     * primary never runs on Enter), disabled or busy.
+     * `cancel` closes the dialog: with no `onClick`, at once; with one,
+     * once it returns or its promise resolves (a throw or a rejection
+     * keeps the dialog open).
+     * A button is disabled while its `onClick`'s promise is pending; a
+     * rejection is logged and enables it again. The busy state belongs to
+     * the action object, so `setActions` moving or replacing buttons never
+     * marks another one busy.
+     * The handle's `setActions(actions)` replaces the buttons (enable
+     * Submit once the input is valid) and keeps the body; `undefined`
+     * removes the footer; once the dialog is closed it's a no-op, checking
+     * nothing.
+     * Use `actions`, and never build a footer by hand: `.dialog-actions`
+     * with `.dialog-cancel` and `.dialog-submit` stay styled for plugins
+     * that already draw them, but are deprecated for new code, and the app
+     * logs a warning once per dialog whose body holds one (or a
+     * `button[type=submit]`).
+     * Escape, the × and a click outside close it, as does `close()`, and
+     * the plugin unloading. Absent in apps older than 0.12.0; `actions`,
+     * `subtitle`, `icon` and `setActions` were added later without a new
+     * `apiVersion` (adding is not breaking), so check
+     * `typeof handle.setActions === "function"` before relying on them. */
+    openDialog?(spec: DialogSpec): PluginDialogHandle;
   };
 }
 

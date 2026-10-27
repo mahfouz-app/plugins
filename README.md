@@ -408,6 +408,24 @@ note editor is open.
     and a click outside close it; returns `{ close }`), and `host.ui.confirm({ title, body,
     confirmLabel, danger? })` asks the app's yes/no question; `host.plugins.list()` lists the
     installed plugins (`{ id, label, enabled, networked }`).
+  - After Mahfouz 0.18.0 (absent in 0.18.0 and older, with no new `apiVersion`): `openDialog`
+    takes `subtitle` (a muted line under the title), `icon` (the title's icon, one of
+    `PLUGIN_DIALOG_ICONS`; left out, the plugin's own) and `actions`, the footer the app lays out
+    in a fixed order: `start` (pinned left, `link: true` for a text link) · `secondary[]` ·
+    `cancel` · `primary` (Submit, rightmost; Cancel to its left). Each is `{ label, icon?, danger?,
+    disabled?, onClick? }`, `danger` for `primary` only. `primary` defaults to a check icon and
+    `cancel` to an ×; `secondary` and `start` must name one (left out, it throws); an unknown
+    icon name falls back to the slot's default with a warning. `cancel` without `primary` throws.
+    `cancel` closes the dialog: at once with no `onClick`, else once it returns or its promise
+    resolves (a throw or a rejection keeps it open). A button is disabled while its `onClick`'s
+    promise is pending. The body isn't wrapped in a form: Enter in a one-line field (not a
+    textarea, select or checkbox, not inside the plugin's own form) runs the primary unless it's
+    `danger`, disabled or busy. The handle gains `setActions(actions)`, which replaces the
+    buttons and keeps the body (`undefined` removes the footer; a no-op once closed): enable
+    Submit with it once the input is valid. Check `typeof handle.setActions === "function"`
+    before relying on any of it. A hand-built footer (`.dialog-actions` with `.dialog-cancel` and
+    `.dialog-submit`) stays styled for older apps but is deprecated for new code, and the app
+    warns once per dialog whose body still holds one (or a `button[type=submit]`).
   - From Mahfouz 0.12.0: `host.vault.unlock()` unlocks the open vault with this plugin's own
     vault unlocker (`host.registerVaultUnlocker`), through the same steps as the locked-vault
     notice's **Unlock** button: once the unlocker resolves, the app reads the vault's git-crypt
