@@ -1,6 +1,7 @@
 // Run with `npm test` (node --test) from the repo root. No DOM, no gpg and
-// no network: the host and its sidecar are fakes, and the config fixtures
-// are the app's own (src/core/src/crypto/decrypt.test.ts).
+// no network: the host, its sidecar and the few DOM nodes a dialog draws are
+// fakes, and the config fixtures are the app's own
+// (src/core/src/crypto/decrypt.test.ts).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -18,6 +19,7 @@ import {
   loadKeys,
   normalizeFpr,
   onlyMeGroup,
+  openDialog,
   parseConfig,
   removeMember,
   saveKeys,
@@ -575,7 +577,7 @@ function activatedHost(extra = {}) {
     registerSettingsTab: (tab) => (registered.settingsTabs.push(tab), { dispose() {} }),
     openSettingsTab: (id) => registered.opened.push(id),
     registerVaultUnlocker: (u) => (registered.unlockers.push(u), { dispose() {} }),
-    ui: { openDialog: () => ({ close() {} }), confirm: async () => false },
+    ui: { openDialog: () => ({ close() {}, setActions() {} }), confirm: async () => false },
     ...extra,
   };
   activate(host);
@@ -902,3 +904,159 @@ test("loadTerms reads the file plugin.json declares, next to the module, uncache
   files["plugin.json"] = JSON.stringify({ terms: "gone.md" });
   await assert.rejects(loadTerms(base, fetchFn), /gone\.md: HTTP 404/);
 });
+
+/** Just enough `document` for a dialog's body and its hand-built footer. */
+function fakeDocument() {
+  const el = (tag) => {
+    const node = {
+      tagName: tag.toUpperCase(),
+      className: "",
+      attrs: {},
+      children: [],
+      parent: null,
+      listeners: {},
+      focused: false,
+      get childNodes() {
+        return [...this.children];
+      },
+      setAttribute(k, v) {
+        this.attrs[k] = v;
+      },
+      addEventListener(type, fn) {
+        (this.listeners[type] ??= []).push(fn);
+      },
+      dispatch(type, event = {}) {
+        const e = { preventDefault() {}, currentTarget: this, target: this, ...event };
+        return Promise.all((this.listeners[type] ?? []).map((fn) => fn(e)));
+      },
+      append(...nodes) {
+        for (const n of nodes) {
+          if (typeof n === "object") {
+            if (n.parent) n.parent.children = n.parent.children.filter((c) => c !== n);
+            n.parent = this;
+          }
+          this.children.push(n);
+        }
+      },
+      focus() {
+        this.focused = true;
+      },
+      matches(sel) {
+        return sel.split(",").some((one) => {
+          const m = one.trim().match(/^([a-z]*)(?:\.([\w-]+))?(?:\[type=(\w+)\])?$/);
+          if (!m) throw new Error(`fake selector ${one}`);
+          const [, t, cls, type] = m;
+          return (!t || this.tagName === t.toUpperCase()) && (!cls || this.className.split(" ").includes(cls)) && (!type || this.type === type);
+        });
+      },
+      querySelector(sel) {
+        for (const c of this.children) {
+          if (typeof c !== "object") continue;
+          if (c.matches(sel)) return c;
+          const inner = c.querySelector(sel);
+          if (inner) return inner;
+        }
+        return null;
+      },
+    };
+    Object.defineProperty(node, "type", { get: () => node.attrs.type, enumerable: true });
+    return node;
+  };
+  return { createElement: el };
+}
+
+/** A host whose `openDialog` records the dialog and renders it after returning, as the app does; `slots` is whether it has `setActions`. */
+function dialogHost({ slots, renderEarly = false }) {
+  const seen = { spec: null, container: null, closed: 0, actions: [] };
+  const host = {
+    ui: {
+      openDialog(spec) {
+        seen.spec = spec;
+        seen.container = document.createElement("div");
+        const handle = { close: () => seen.closed++ };
+        if (slots) handle.setActions = (a) => seen.actions.push({ ...a, primary: { ...a.primary }, same: a.primary === spec.actions.primary });
+        if (renderEarly) spec.render(seen.container);
+        else queueMicrotask(() => spec.render(seen.container));
+        return handle;
+      },
+    },
+  };
+  return { host, seen };
+}
+
+/** A body with one field; Submit records its runs and closes on the second. */
+function oneFieldDialog(host, ready) {
+  const runs = [];
+  let api;
+  openDialog(host, { title: "New group", submit: { label: "Create", icon: "plus" }, ready }, (card, dialog) => {
+    api = dialog;
+    card.append(document.createElement("input"));
+    return async () => {
+      runs.push(runs.length);
+      if (runs.length === 2) dialog.close();
+    };
+  });
+  return { runs, api: () => api };
+}
+
+test("on an app with footer slots, a dialog's Cancel and Submit are actions, with no footer drawn and setReady going through setActions", async (t) => {
+  globalThis.document = fakeDocument();
+  t.after(() => delete globalThis.document);
+  const { host, seen } = dialogHost({ slots: true });
+  const { runs, api } = oneFieldDialog(host, false);
+  await Promise.resolve();
+  const { primary, cancel } = seen.spec.actions;
+  assert.deepEqual([primary.label, primary.icon, primary.disabled, cancel.label, cancel.onClick], ["Create", "plus", true, "Cancel", undefined]);
+  assert.equal(seen.spec.title, "New group");
+  // The body only: no form, no hand-built footer, focus left to the app.
+  assert.equal(seen.container.children.length, 1);
+  assert.equal(seen.container.querySelector("form, .dialog-actions, .dialog-submit, .dialog-cancel, button[type=submit]"), null);
+  assert.equal(seen.container.querySelector("input").focused, false);
+  api().setReady(true);
+  // The same primary object, so a busy Submit stays busy across setActions.
+  assert.deepEqual(seen.actions.map((a) => [a.primary.disabled, a.same, a.cancel.label]), [[false, true, "Cancel"]]);
+  await primary.onClick();
+  assert.deepEqual(runs, [0]);
+  await primary.onClick();
+  assert.equal(seen.closed, 1);
+  api().setReady(false);
+  assert.equal(seen.actions.length, 1, "no setActions once closed");
+});
+
+test("an app that renders before openDialog returns still gets Submit's state", (t) => {
+  globalThis.document = fakeDocument();
+  t.after(() => delete globalThis.document);
+  const { host, seen } = dialogHost({ slots: true, renderEarly: true });
+  openDialog(host, { title: "T", submit: { label: "Go", icon: "check" }, ready: false }, (card, { setReady }) => {
+    setReady(true);
+    return () => {};
+  });
+  assert.deepEqual(seen.actions.map((a) => a.primary.disabled), [false]);
+});
+
+for (const renderEarly of [false, true]) {
+  test(`on an app without footer slots, the dialog draws its own Cancel and Submit in a form, as before${renderEarly ? " (rendered before openDialog returns)" : ""}`, async (t) => {
+    globalThis.document = fakeDocument();
+    t.after(() => delete globalThis.document);
+    const { host, seen } = dialogHost({ slots: false, renderEarly });
+    const { runs, api } = oneFieldDialog(host, false);
+    await Promise.resolve();
+    const form = seen.container.querySelector("form");
+    assert.ok(form);
+    assert.equal(seen.container.children.length, 1, "the body moved into the form");
+    const submit = form.querySelector(".dialog-submit");
+    const cancel = form.querySelector(".dialog-cancel");
+    assert.deepEqual([submit.type, submit.disabled, submit.children, cancel.children], ["submit", true, ["Create"], ["Cancel"]]);
+    assert.equal(form.querySelector("input").focused, true);
+    // Disabled: Enter does nothing.
+    await form.dispatch("submit");
+    assert.deepEqual(runs, []);
+    api().setReady(true);
+    assert.equal(submit.disabled, false);
+    await form.dispatch("submit");
+    assert.deepEqual(runs, [0]);
+    assert.equal(submit.disabled, false);
+    await cancel.dispatch("click");
+    assert.equal(seen.closed, 1);
+  });
+}

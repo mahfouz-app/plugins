@@ -821,22 +821,74 @@ function h(tag, props = {}, ...children) {
   return node;
 }
 
-/** The app's dialog titled `title`; `build(container, close)` draws the rest. Escape and a click outside close it. */
-function openDialog(host, title, build) {
+/**
+ * The app's dialog titled `title`, its footer Cancel and Submit (`submit`: a
+ * label, and an icon from the app's `PLUGIN_DIALOG_ICONS`). `build(container,
+ * dialog)` draws the body and returns what Submit runs; `dialog.close()`
+ * closes it and `dialog.setReady(ok)` enables Submit (`ready` to start).
+ * Submit is disabled while what it runs is pending. Escape and a click
+ * outside close it. Where the app lays the footer out (`setActions`), it's
+ * `actions`; an older app gets it drawn here as before, in a form so Enter
+ * submits.
+ */
+export function openDialog(host, { title, submit, ready = true }, build) {
   let handle = null;
+  let container = null;
+  let run = null;
   let closed = false;
+  let legacy = null; // the hand-built Submit, on an app without footer slots
+  let busy = false;
+  // One primary object throughout: the app keeps a busy button busy by it.
+  const startDisabled = !ready;
+  const primary = { label: submit.label, icon: submit.icon, disabled: startDisabled, onClick: () => run?.() };
+  const cancel = { label: "Cancel" };
   const close = () => {
     closed = true;
     handle?.close();
   };
+  const setReady = (ok) => {
+    ready = ok;
+    primary.disabled = !ok;
+    if (legacy) legacy.disabled = !ok || busy;
+    else if (!closed && typeof handle?.setActions === "function") handle.setActions({ primary, cancel });
+  };
+  // Runs once both the handle and the rendered body are there (an app may render before openDialog returns).
+  const finish = () => {
+    if (!handle || !container || closed || legacy || typeof handle.setActions === "function") return;
+    legacy = h("button", { type: "submit", className: "dialog-submit", disabled: !ready }, submit.label);
+    const form = h("form", {
+      onSubmit: async (e) => {
+        e.preventDefault();
+        if (!ready || busy) return;
+        busy = true;
+        legacy.disabled = true;
+        try {
+          await run?.();
+        } finally {
+          busy = false;
+          legacy.disabled = !ready;
+        }
+      },
+    });
+    form.append(...container.childNodes);
+    form.append(h("div", { className: "dialog-actions" }, h("button", { type: "button", className: "dialog-cancel", onClick: close }, "Cancel"), legacy));
+    container.append(form);
+    container.querySelector("input, select, .dialog-submit")?.focus();
+  };
   handle = host.ui.openDialog({
     title,
-    render(container) {
-      build(container, close);
-      container.querySelector("input, select, .dialog-submit")?.focus();
+    actions: { primary, cancel },
+    render(node) {
+      container = node;
+      run = build(node, { close, setReady });
+      finish();
     },
   });
   if (closed) handle.close();
+  else if (typeof handle.setActions === "function") {
+    // Rendered before openDialog returned, with Submit's state changed since: lay it out again.
+    if (primary.disabled !== startDisabled) handle.setActions({ primary, cancel });
+  } else finish();
   return close;
 }
 
@@ -857,16 +909,13 @@ function keyLabel(key) {
   return name ? `${name} · ${shortFpr(key.fpr)}` : shortFpr(key.fpr);
 }
 
-const actions = (close, submit) =>
-  h("div", { className: "dialog-actions" }, h("button", { type: "button", className: "dialog-cancel", onClick: close }, "Cancel"), submit);
-
 /** The Encrypt dialog for `note`. */
 async function openEncryptDialog(c, host, note) {
   const info = await c.plainNote(note);
   const { md, keys, own } = await c.context();
   const groups = c.yourGroups(md, own, keys.login);
   const title = `Encrypt “${info.title}”`;
-  openDialog(host, title, (card, close) => {
+  openDialog(host, { title, submit: { label: "Encrypt", icon: "check" }, ready: !!keys.signing }, (card, { close }) => {
     const select = h(
       "select",
       { className: "dialog-select", id: "enc-group" },
@@ -878,36 +927,25 @@ async function openEncryptDialog(c, host, note) {
     const sync = () => (loginRow.hidden = !(select.value === "" && !keys.login));
     select.addEventListener("change", sync);
     const error = errorLine();
-    const submit = h("button", { type: "submit", className: "dialog-submit", disabled: !keys.signing }, "Encrypt");
     card.append(
-      h(
-        "form",
-        {
-          onSubmit: async (e) => {
-            e.preventDefault();
-            submit.disabled = true;
-            error.show(null);
-            try {
-              const choice =
-                select.value === "" ? { onlyMe: true, login: keys.login ?? login.value.trim().replace(/^@/, "") } : { group: select.value };
-              await c.encryptNote(note, choice);
-              close();
-            } catch (err) {
-              error.show(err);
-              submit.disabled = false;
-            }
-          },
-        },
-        h("div", { className: "dialog-row" }, h("label", { className: "dialog-label", for: "enc-group" }, "Group"), select),
-        loginRow,
-        h("p", { className: "dialog-hint" }, ENCRYPT_TEXT),
-        keys.signing ? null : h("p", { className: "dialog-error" }, NO_SIGNING_KEY),
-        keys.backup ? null : h("p", { className: "dialog-error" }, NO_BACKUP_TEXT),
-        error.node,
-        actions(close, submit)
-      )
+      h("div", { className: "dialog-row" }, h("label", { className: "dialog-label", for: "enc-group" }, "Group"), select),
+      loginRow,
+      h("p", { className: "dialog-hint" }, ENCRYPT_TEXT),
+      keys.signing ? null : h("p", { className: "dialog-error" }, NO_SIGNING_KEY),
+      keys.backup ? null : h("p", { className: "dialog-error" }, NO_BACKUP_TEXT),
+      error.node
     );
     sync();
+    return async () => {
+      error.show(null);
+      try {
+        const choice = select.value === "" ? { onlyMe: true, login: keys.login ?? login.value.trim().replace(/^@/, "") } : { group: select.value };
+        await c.encryptNote(note, choice);
+        close();
+      } catch (err) {
+        error.show(err);
+      }
+    };
   });
 }
 
@@ -944,16 +982,15 @@ function openAddVaultMemberDialog(c, host, name, done) {
  * fingerprint outside Mahfouz, then runs `add({login, fpr})`.
  */
 function openKeyLookupDialog(c, host, { title, submitLabel, add, done }) {
-  openDialog(host, title, (card, close) => {
+  openDialog(host, { title, submit: { label: submitLabel, icon: "plus" }, ready: false }, (card, { close, setReady }) => {
     const login = h("input", { className: "dialog-input", autocomplete: "off", spellcheck: "false", placeholder: "GitHub login", "aria-label": "GitHub login" });
     const find = h("button", { type: "button", className: "btn" }, "Find keys");
     const keysBox = h("div");
     const error = errorLine();
-    const submit = h("button", { type: "submit", className: "dialog-submit", disabled: true }, submitLabel);
     let found = null;
     let chosen = null;
     let confirmed = false;
-    const refresh = () => (submit.disabled = !(found && chosen && confirmed));
+    const refresh = () => setReady(!!(found && chosen && confirmed));
     const lookUp = async () => {
       error.show(null);
       keysBox.replaceChildren();
@@ -1002,63 +1039,43 @@ function openKeyLookupDialog(c, host, { title, submitLabel, add, done }) {
         void lookUp();
       }
     });
-    card.append(
-      h(
-        "form",
-        {
-          onSubmit: async (e) => {
-            e.preventDefault();
-            if (submit.disabled) return;
-            submit.disabled = true;
-            error.show(null);
-            try {
-              await add({ login: found.login, fpr: chosen });
-              close();
-              done?.();
-            } catch (err) {
-              error.show(err);
-              refresh();
-            }
-          },
-        },
-        h("div", { className: "dialog-row" }, login, find),
-        keysBox,
-        error.node,
-        actions(close, submit)
-      )
-    );
+    card.append(h("div", { className: "dialog-row" }, login, find), keysBox, error.node);
+    return async () => {
+      if (!(found && chosen && confirmed)) return;
+      error.show(null);
+      try {
+        await add({ login: found.login, fpr: chosen });
+        close();
+        done?.();
+      } catch (err) {
+        error.show(err);
+      }
+    };
   });
 }
 
 function openNewGroupDialog(c, host, keys, done) {
-  openDialog(host, "New group", (card, close) => {
+  openDialog(host, { title: "New group", submit: { label: "Create", icon: "plus" } }, (card, { close }) => {
     const name = h("input", { className: "dialog-input", id: "enc-group-name", autocomplete: "off", spellcheck: "false" });
     const login = h("input", { className: "dialog-input", id: "enc-self-login", autocomplete: "off", spellcheck: "false" });
     const error = errorLine();
     card.append(
-      h(
-        "form",
-        {
-          onSubmit: async (e) => {
-            e.preventDefault();
-            error.show(null);
-            try {
-              await c.newGroup(name.value.trim(), keys.login ?? login.value.trim().replace(/^@/, ""));
-              close();
-              done?.();
-            } catch (err) {
-              error.show(err);
-            }
-          },
-        },
-        h("div", { className: "dialog-row" }, h("label", { className: "dialog-label", for: "enc-group-name" }, "Name"), name),
-        keys.login
-          ? null
-          : h("div", { className: "dialog-row" }, h("label", { className: "dialog-label", for: "enc-self-login" }, "Your GitHub login"), login),
-        error.node,
-        actions(close, h("button", { type: "submit", className: "dialog-submit" }, "Create"))
-      )
+      h("div", { className: "dialog-row" }, h("label", { className: "dialog-label", for: "enc-group-name" }, "Name"), name),
+      keys.login
+        ? null
+        : h("div", { className: "dialog-row" }, h("label", { className: "dialog-label", for: "enc-self-login" }, "Your GitHub login"), login),
+      error.node
     );
+    return async () => {
+      error.show(null);
+      try {
+        await c.newGroup(name.value.trim(), keys.login ?? login.value.trim().replace(/^@/, ""));
+        close();
+        done?.();
+      } catch (err) {
+        error.show(err);
+      }
+    };
   });
 }
 
@@ -1083,11 +1100,11 @@ async function openEncryptVaultDialog(c, host, done) {
   const renameCount = features.renameExisting ? await host.notes.countRenamableById() : null;
   const terms = await loadTerms().catch(() => null);
   const title = `Encrypt “${vaultName(host.vault?.current()?.path)}”`;
-  openDialog(host, title, (card, close) => {
+  openDialog(host, { title, submit: { label: "Encrypt vault", icon: "check" }, ready: false }, (card, { close, setReady }) => {
     const error = errorLine();
     let accepted = false;
-    const submit = h("button", { type: "submit", className: "dialog-submit", disabled: true }, "Encrypt vault");
-    const sync = () => (submit.disabled = !!st.usesLfs || !terms || !accepted);
+    const canSubmit = () => !st.usesLfs && !!terms && accepted;
+    const sync = () => setReady(canSubmit());
     // Only the options this app can do; the recommended one first.
     const options = HISTORY_OPTIONS.filter((o) => features[o.id]);
     let history = st.hasRemote ? options[0].id : "now";
@@ -1135,59 +1152,50 @@ async function openEncryptVaultDialog(c, host, done) {
         )
       : null;
     card.append(
-      h(
-        "form",
-        {
-          onSubmit: async (e) => {
-            e.preventDefault();
-            if (submit.disabled) return;
-            submit.disabled = true;
-            error.show(null);
-            host.progress("Encrypting the vault");
-            try {
-              await c.encryptVault({ history, renameExisting: rename });
-              close();
-              done?.();
-            } catch (err) {
-              error.show(err);
-              sync();
-            } finally {
-              host.progress("");
-            }
-          },
-        },
-        h("p", { className: "dialog-hint" }, VAULT_DIALOG_TEXT),
-        question,
-        terms ? termsNodes(terms) : h("p", { className: "dialog-error", role: "alert" }, TERMS_LOAD_ERROR),
-        // The naming sentence only where the app can keep it true.
-        features.nameById || renameLink
-          ? h(
-              "p",
-              { className: "dialog-hint" },
-              features.nameById ? NAMES_BY_ID_TEXT : null,
-              features.nameById && renameLink ? " " : null,
-              renameLink
-            )
-          : null,
-        st.usesLfs ? h("p", { className: "dialog-error", role: "alert" }, LFS_TEXT) : null,
-        terms && !st.usesLfs
-          ? h(
-              "label",
-              { className: "dialog-checkbox-row" },
-              h("input", {
-                type: "checkbox",
-                onChange: (e) => {
-                  accepted = e.currentTarget.checked;
-                  sync();
-                },
-              }),
-              h("span", {}, TERMS_ACCEPT)
-            )
-          : null,
-        error.node,
-        actions(close, submit)
-      )
+      h("p", { className: "dialog-hint" }, VAULT_DIALOG_TEXT),
+      question,
+      terms ? termsNodes(terms) : h("p", { className: "dialog-error", role: "alert" }, TERMS_LOAD_ERROR),
+      // The naming sentence only where the app can keep it true.
+      features.nameById || renameLink
+        ? h(
+            "p",
+            { className: "dialog-hint" },
+            features.nameById ? NAMES_BY_ID_TEXT : null,
+            features.nameById && renameLink ? " " : null,
+            renameLink
+          )
+        : null,
+      st.usesLfs ? h("p", { className: "dialog-error", role: "alert" }, LFS_TEXT) : null,
+      terms && !st.usesLfs
+        ? h(
+            "label",
+            { className: "dialog-checkbox-row" },
+            h("input", {
+              type: "checkbox",
+              onChange: (e) => {
+                accepted = e.currentTarget.checked;
+                sync();
+              },
+            }),
+            h("span", {}, TERMS_ACCEPT)
+          )
+        : null,
+      error.node
     );
+    return async () => {
+      if (!canSubmit()) return;
+      error.show(null);
+      host.progress("Encrypting the vault");
+      try {
+        await c.encryptVault({ history, renameExisting: rename });
+        close();
+        done?.();
+      } catch (err) {
+        error.show(err);
+      } finally {
+        host.progress("");
+      }
+    };
   });
 }
 
