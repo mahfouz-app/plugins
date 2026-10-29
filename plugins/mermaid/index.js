@@ -1334,8 +1334,8 @@ export function activate(host) {
       void host.openTab("editor", note, String(ordinal));
     };
     host.registerTabType(createEditorTab(host, runtime));
-    // Only the edit button opens the tab; a plain click on the diagram
-    // still reveals its source in the note.
+    // Edit opens the tab. On an app with the click model (0.20.0) a plain
+    // click opens the viewer; before it, a click reveals the source.
     renderer.edit = (context) => openEditor(context.note, context.ordinal);
     // A block inserted from the toolbar opens in the editor. Its ordinal
     // counts the blocks whose content starts before its fence.

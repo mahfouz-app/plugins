@@ -36,4 +36,10 @@ export interface EmbedRenderer {
   // source, for an embed edited somewhere else (e.g. drawio's editor tab).
   // The source stays reachable by moving the cursor into the block.
   edit?(context: EmbedContext): void;
+  // The block's content for the viewer a click opens (ui/BlockViewer.tsx),
+  // shown at full size with pan and zoom: a fresh SVG, say, when the
+  // rendered block is a scaled-down copy. Null, a throw, or no hook shows a
+  // copy of what the block drew. Never called in an unlocked encrypted note
+  // or under a share's gate: the viewer only shows what's already drawn.
+  view?(context: EmbedContext): Node | null;
 }

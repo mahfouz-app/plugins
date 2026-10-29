@@ -579,8 +579,8 @@ function createRenderer(host) {
       const preview = document.createElement("div");
       preview.className = "cm-drawio-preview";
       container.appendChild(preview);
-      // The app owns the click: it opens the viewer, or `edit` below when
-      // the diagram is empty.
+      // The app owns the click: it opens the viewer, or runs `edit` below
+      // while nothing is drawn (empty, failed or still loading).
 
       const EMPTY = "Empty diagram — click to open the editor";
       if (!source.trim()) {
@@ -603,8 +603,9 @@ function createRenderer(host) {
       }
     },
 
-    // The embed's edit button opens the editor too, rather than revealing
-    // the raw XML. (Older apps ignore this and still reveal the XML.)
+    // Edit (in the viewer, on the hover toolbar, and a click on an empty,
+    // failed or loading diagram) opens the editor tab rather than revealing
+    // the raw XML.
     edit(context) {
       openEditor(context.note, context.ordinal);
     },
