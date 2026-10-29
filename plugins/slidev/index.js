@@ -1,7 +1,7 @@
 // Slidev presentations for Mahfouz (mahfouz/slidev).
 //
 // - "Present" in a note's menu opens a presentation tab.
-// - "Present full screen" (Mod+Shift+P by default) shows the note over the
+// - "Present full screen" (Mod+Alt+Enter by default) shows the note over the
 //   whole app.
 // - "PowerPoint / Google Slides" in the Export dialog.
 // - Settings → Slides' "Render with Slidev": a template's sample deck as PNGs.
@@ -454,7 +454,7 @@ export function activate(host, engine = sidecarEngine(host)) {
   host.registerCommand({
     id: "present-fullscreen",
     label: "Present full screen",
-    shortcut: "Mod+Shift+P",
+    shortcut: "Mod+Alt+Enter",
     run(note) {
       void host.notes
         .updateAttributes(note, withPresentationType)

@@ -62,7 +62,7 @@ test("enabled: warms the server and adds the Present tab and commands", async ()
     reg.commands.map((c) => [c.id, !!c.noteMenu, c.shortcut]),
     [
       ["present", true, undefined],
-      ["present-fullscreen", false, "Mod+Shift+P"],
+      ["present-fullscreen", false, "Mod+Alt+Enter"],
     ]
   );
   await reg.commands[0].run(note);
