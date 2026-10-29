@@ -295,18 +295,13 @@ function createRenderer(host) {
     label: "Excalidraw drawing",
     snippet: STARTER_JSON,
 
-    async render(container, source, theme, context) {
+    async render(container, source, theme, _context) {
       container.innerHTML = "";
       const preview = document.createElement("div");
       preview.className = "cm-excalidraw-preview";
-      preview.setAttribute("style", "cursor:pointer;");
       container.appendChild(preview);
-      // Clicking a preview opens the editor tab for this block (rather
-      // than revealing the raw JSON, which nobody edits by hand).
-      preview.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openEditor(context?.note ?? null, context?.ordinal ?? -1);
-      });
+      // The app owns the click: it opens the viewer, or runs `edit` below
+      // while nothing is drawn (empty, failed or still loading).
 
       const EMPTY = "Empty drawing — click to open the editor";
       try {
@@ -330,8 +325,9 @@ function createRenderer(host) {
       }
     },
 
-    // The embed's edit button opens the editor too, rather than revealing
-    // the raw JSON. (Older apps ignore this and still reveal the JSON.)
+    // Edit (in the viewer, on the hover toolbar, and a click on an empty,
+    // failed or loading diagram) opens the editor tab rather than revealing
+    // the raw JSON.
     edit(context) {
       openEditor(context.note, context.ordinal);
     },

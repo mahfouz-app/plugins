@@ -138,8 +138,9 @@ and git-crypt installed, so the tests against the real gpg and git-crypt run the
 ## Excalidraw plugin
 
 `mahfouz/excalidraw` keeps each drawing in the note, as the scene's JSON (Excalidraw's own
-`.excalidraw` format) in a ```` ```excalidraw ```` block. Clicking the preview or its edit button
-opens the block in an editor tab, which saves the scene back into that block as you draw, and
+`.excalidraw` format) in a ```` ```excalidraw ```` block. Clicking a drawing opens it in the viewer;
+Edit, there and on the block's hover toolbar, opens the block in an editor tab (clicking an empty
+drawing goes straight there), which saves the scene back into that block as you draw, and
 never rewrites a block you only opened. A backtick in a text element is written as `\u0060`, so
 the text can't close the fence. Pasted images are kept in the scene as data URLs, which grow the
 note, and a drawing with an image is published as code: the publishing service accepts no
@@ -303,11 +304,16 @@ to a vault that doesn't use it, updates it, or uninstalls it. `host.plugin.baseU
 of the plugin's installed directory. Load assets relative to it.
 
 Embed renderers also get a fourth `render` argument, `{ ordinal, note }`: which block of their
-language this is in the note, and the note itself. Read `note` when the user acts (e.g. on
-click), not while rendering. `onInsertedAt(view, from, note)` runs right after the toolbar
-inserts your snippet. An optional `edit({ ordinal, note })` takes over the block's edit button
-(which otherwise reveals the raw source) for an embed edited somewhere else, like draw.io's
-editor tab; apps before it existed ignore it.
+language this is in the note, and the note itself. Read `note` when the user acts, not while
+rendering. From Mahfouz 0.20.0 the app owns a block's clicks, so a listener on your preview
+never gets them: a click on a drawn block opens a full-size viewer with pan and zoom, and a
+click on an empty, failed or still-loading one runs Edit. `onInsertedAt(view, from, note)` runs right after the toolbar
+inserts your snippet. An optional `edit({ ordinal, note })` replaces Edit
+(in the viewer, on the hover toolbar and on Enter), which otherwise reveals the raw source, for
+an embed edited somewhere else, like draw.io's editor tab. An optional `view({ ordinal, note })`
+returns the node the viewer shows, such as a fresh full-size SVG; null, a throw or no hook shows
+a copy of what `render` drew, and it's never called in an unlocked encrypted note or under a
+share's gate. Apps before them ignore both.
 
 ### Tabs
 
