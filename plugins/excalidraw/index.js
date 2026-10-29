@@ -295,18 +295,14 @@ function createRenderer(host) {
     label: "Excalidraw drawing",
     snippet: STARTER_JSON,
 
-    async render(container, source, theme, context) {
+    async render(container, source, theme, _context) {
       container.innerHTML = "";
       const preview = document.createElement("div");
       preview.className = "cm-excalidraw-preview";
       preview.setAttribute("style", "cursor:pointer;");
       container.appendChild(preview);
-      // Clicking a preview opens the editor tab for this block (rather
-      // than revealing the raw JSON, which nobody edits by hand).
-      preview.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openEditor(context?.note ?? null, context?.ordinal ?? -1);
-      });
+      // The app owns the click: it opens the viewer, or `edit` below when
+      // the diagram is empty.
 
       const EMPTY = "Empty drawing — click to open the editor";
       try {

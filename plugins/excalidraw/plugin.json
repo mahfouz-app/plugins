@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "id": "excalidraw",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "label": "Excalidraw drawings",
   "description": "Embed and edit Excalidraw drawings",
-  "mahfouz": ">=0.8.0",
+  "mahfouz": ">=0.20.0",
   "apiVersion": 1,
   "icon": "icon.svg",
   "install": [
