@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { check, compareVersions, isContained, isHostPattern, isVersionRange, rangeFloor, RESERVED_EXPORT_FORMATS, RESERVED_LANGUAGES, validateManifest, versionBumpError } from "./check.mjs";
+import { check, compareVersions, FIELD_SINCE, FLOOR_BUMP, LENIENT_SINCE, requiredFloor, isContained, isHostPattern, isVersionRange, rangeFloor, RESERVED_EXPORT_FORMATS, RESERVED_LANGUAGES, validateManifest, versionBumpError } from "./check.mjs";
 
 const quiet = () => {};
 
@@ -488,4 +488,23 @@ test("contributes: the reserved names are the app's", () => {
   // Kept in step with the app's fixtures/plugin-manifests/reserved-contributes.json.
   assert.deepEqual(RESERVED_LANGUAGES, ["database", "database-view", "day-tasks"]);
   assert.deepEqual(RESERVED_EXPORT_FORMATS, ["docx", "markdown"]);
+});
+
+test("floor bumps: a field that grants or changes behaviour needs its own release as the floor; a declarative one only the lenient release", () => {
+  // Everything up to the lenient release keeps its own floor: earlier apps reject any unknown key.
+  for (const [field, since] of Object.entries(FIELD_SINCE)) {
+    if (compareVersions(since, LENIENT_SINCE) <= 0) assert.equal(requiredFloor(field, since), since, field);
+  }
+  assert.equal(requiredFloor("contributes", FIELD_SINCE.contributes), "0.21.0");
+  assert.equal(FLOOR_BUMP.has("contributes"), false);
+  for (const field of ["network", "secrets", "roles", "extract", "node", "configFile", "terms"]) assert.ok(FLOOR_BUMP.has(field), field);
+  assert.equal(FIELD_SINCE.roles, "0.21.0");
+  // A later field: declarative ones are ignored from the lenient release on, a floor-bump one isn't safe to ignore.
+  assert.equal(requiredFloor("someDeclarativeField", "0.24.0"), LENIENT_SINCE);
+  assert.equal(requiredFloor("roles", "0.24.0"), "0.24.0");
+  assert.equal(requiredFloor("extract", "0.9.0"), "0.9.0");
+  // Through validateManifest: a floor-bump field still names its own release.
+  const errs = (over, mahfouz) => validate({ ...minimal("p", { mahfouz }), ...over }).join("\n");
+  assert.match(errs({ network: { hosts: ["api.example.com"] } }, ">=0.11.0"), /"network" needs Mahfouz 0\.12\.0.*would ignore or refuse it/);
+  assert.match(errs({ contributes: { languages: ["x"] } }, ">=0.20.0"), /"contributes" needs Mahfouz 0\.21\.0.*older apps reject the manifest/);
 });

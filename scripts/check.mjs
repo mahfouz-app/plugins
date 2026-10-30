@@ -63,7 +63,31 @@ export const FIELD_SINCE = {
   // manifest.rs): the fence languages it draws, the notes it's for, the
   // export formats it adds, the programs it provides.
   contributes: "0.21.0",
+  // The registry's grant of a role (a plugin acting for the app, such as
+  // encryption). Its shape isn't checked here yet, so a manifest naming it
+  // still fails as an unknown field; this records the floor it will need.
+  roles: "0.21.0",
 };
+// From this app version on, a key the app doesn't know is ignored in a
+// manifest's declarative parts (the top level, `contributes`, `detect`,
+// `exportFormats`), where every earlier app rejects the manifest. A newer
+// declarative field therefore needs only this floor: an older app that
+// ignores it is fine, and the strict ones are excluded.
+export const LENIENT_SINCE = "0.21.0";
+// Fields that grant, restrict or change what a plugin does (a permission, an
+// integrity check, what runs the plugin's code, a role): an app that ignored
+// one would do the wrong thing, so a plugin using one needs that field's own
+// `FIELD_SINCE` (or `ARTIFACT_FIELD_SINCE`) as its floor, past
+// `LENIENT_SINCE` too. Not `contributes`, `icon` or `logo`, which only
+// describe the plugin.
+export const FLOOR_BUMP = new Set(["node", "network", "secrets", "configFile", "terms", "roles", "extract"]);
+
+/** The lowest app version a plugin using `field` (first understood in
+ * `since`) must require. */
+export function requiredFloor(field, since) {
+  if (FLOOR_BUMP.has(field)) return since;
+  return compareVersions(since, LENIENT_SINCE) > 0 ? LENIENT_SINCE : since;
+}
 // A file directly under the vault's `.config/`: a lowercase name ending in
 // `.md`, no directory part, so a plugin can only name its own file there.
 const CONFIG_FILE = /^[a-z0-9][a-z0-9-]{0,63}\.md$/;
@@ -520,8 +544,10 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
   if ((m.contributes ?? null) !== null) validateContributes(m.contributes, Array.isArray(m.gitPath) && m.gitPath.length > 0, where, errors);
 
   for (const [at, field, since] of newer) {
-    if (isVersionRange(m.mahfouz) && compareVersions(rangeFloor(m.mahfouz), since) < 0) {
-      errors.push(`${at}: "${field}" needs Mahfouz ${since} or later, so mahfouz must start there (e.g. ">=${since}"); older apps reject the manifest`);
+    const floor = requiredFloor(field, since);
+    if (isVersionRange(m.mahfouz) && compareVersions(rangeFloor(m.mahfouz), floor) < 0) {
+      const why = FLOOR_BUMP.has(field) ? "an app that doesn't know it would ignore or refuse it" : "older apps reject the manifest";
+      errors.push(`${at}: "${field}" needs Mahfouz ${floor} or later, so mahfouz must start there (e.g. ">=${floor}"); ${why}`);
     }
   }
 
