@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { check, compareVersions, isContained, isHostPattern, isVersionRange, rangeFloor, validateManifest, versionBumpError } from "./check.mjs";
+import { check, compareVersions, isContained, isHostPattern, isVersionRange, rangeFloor, RESERVED_EXPORT_FORMATS, RESERVED_LANGUAGES, validateManifest, versionBumpError } from "./check.mjs";
 
 const quiet = () => {};
 
@@ -414,4 +414,78 @@ test("configFile: a .md file name under the vault's .config/, from Mahfouz 0.12.
   }
   // Older apps reject the unknown field: the range must start at 0.12.0.
   assert.match(errs({ configFile: "encryption.md" }, ">=0.11.0"), /"configFile" needs Mahfouz 0\.12\.0/);
+});
+
+test("contributes: checked as manifest.rs's Contributes::validate does, from Mahfouz 0.21.0", () => {
+  const errs = (contributes, over = {}, mahfouz = ">=0.21.0") => validate({ ...minimal("p", { mahfouz }), ...over, contributes }).join("\n");
+  const lfs = { gitPath: ["bin"] };
+  // Every field, as the app's contributes.json fixture has it.
+  assert.equal(
+    errs(
+      {
+        languages: ["excalidraw", "drawio-2"],
+        detect: { attributes: [{ key: "type", includes: "presentation" }, { key: "slides" }], attachments: { totalOverBytes: 1048576 } },
+        exportFormats: [{ id: "pdf", label: "PDF", description: "The note's slides as a PDF" }],
+        programs: ["git-lfs", "node_1.2"],
+      },
+      lfs
+    ),
+    ""
+  );
+  assert.equal(errs({}), "");
+  assert.equal(errs(null), "");
+  assert.equal(errs({ detect: null, languages: ["mermaid"] }), "");
+  assert.equal(errs({ detect: { attachments: { largestOverBytes: Number.MAX_SAFE_INTEGER, totalOverBytes: null } } }), "");
+  assert.equal(errs({ exportFormats: [{ id: "p", label: "L".repeat(64), description: "d".repeat(200) }] }), "");
+
+  const many = (n, f) => Array.from({ length: n }, (_, i) => f(i));
+  for (const [contributes, want, over] of [
+    [[], /contributes must be an object/],
+    [{ themes: ["dark"] }, /contributes: unknown field "themes"/],
+    [{ languages: "mermaid" }, /languages must be an array/],
+    [{ languages: null }, /languages must be an array/],
+    [{ languages: ["Excalidraw"] }, /languages "Excalidraw" must be lowercase/],
+    [{ languages: ["mermaid", "mermaid"] }, /languages lists "mermaid" twice/],
+    [{ languages: many(17, (i) => `l${i}`) }, /languages lists more than 16/],
+    [{ languages: ["day-tasks"] }, /languages "day-tasks" is the app's own/],
+    [{ detect: {} }, /detect must name attributes or attachments/],
+    [{ detect: { attributes: [] } }, /detect must name attributes or attachments/],
+    [{ detect: { x: 1, attributes: [{ key: "t" }] } }, /detect: unknown field "x"/],
+    [{ detect: { attributes: [{ key: "" }] } }, /attributes key "" must be 1 to 64/],
+    [{ detect: { attributes: [{ key: "k".repeat(65) }] } }, /attributes key "k+" must be 1 to 64/],
+    [{ detect: { attributes: [{ key: "t", includes: "" }] } }, /"t" includes must be 1 to 64/],
+    [{ detect: { attributes: [{ key: "t" }, { key: "t", includes: null }] } }, /attributes lists "t" twice/],
+    [{ detect: { attributes: [{ key: "t", x: 1 }] } }, /attributes: unknown field "x"/],
+    [{ detect: { attributes: many(9, (i) => ({ key: `k${i}` })) } }, /attributes lists more than 8/],
+    [{ detect: { attachments: {} } }, /must name totalOverBytes or largestOverBytes/],
+    [{ detect: { attachments: { totalOverBytes: 0 } } }, /totalOverBytes 0 must be an integer from 1/],
+    [{ detect: { attachments: { largestOverBytes: -1 } } }, /largestOverBytes -1 must be an integer/],
+    [{ detect: { attachments: { totalOverBytes: 1.5 } } }, /totalOverBytes 1\.5 must be an integer/],
+    [{ detect: { attachments: { totalOverBytes: 2 ** 53 } } }, /must be an integer from 1 to 9007199254740991/],
+    [{ detect: { attachments: { totalOverBytes: "1" } } }, /must be an integer/],
+    [{ exportFormats: [{ id: "PDF", label: "P", description: "d" }] }, /exportFormats id "PDF" must be lowercase/],
+    [{ exportFormats: [{ id: "docx", label: "P", description: "d" }] }, /exportFormats id "docx" is the app's own/],
+    [{ exportFormats: [{ id: "p", label: "", description: "d" }] }, /"p" label must be 1 to 64/],
+    [{ exportFormats: [{ id: "p", label: "L".repeat(65), description: "d" }] }, /"p" label must be 1 to 64/],
+    [{ exportFormats: [{ id: "p", label: "P", description: "d".repeat(201) }] }, /"p" description must be 1 to 200/],
+    [{ exportFormats: [{ id: "p", label: "P" }] }, /"p" description must be 1 to 200/],
+    [{ exportFormats: [{ id: "p", label: "P", description: "d", icon: "x" }] }, /exportFormats: unknown field "icon"/],
+    [{ exportFormats: many(2, () => ({ id: "p", label: "P", description: "d" })) }, /exportFormats lists "p" twice/],
+    [{ exportFormats: many(9, (i) => ({ id: `f${i}`, label: "P", description: "d" })) }, /exportFormats lists more than 8/],
+    [{ programs: ["Git LFS"] }, /programs "Git LFS" must be lowercase/, lfs],
+    [{ programs: ["-x"] }, /programs "-x" must be lowercase/, lfs],
+    [{ programs: many(9, (i) => `p${i}`) }, /programs lists more than 8/, lfs],
+    [{ programs: ["git-lfs"] }, /programs needs a gitPath/],
+    [{ programs: ["git-lfs"] }, /programs needs a gitPath/, { gitPath: [] }],
+  ]) {
+    assert.match(errs(contributes, over), want, JSON.stringify(contributes));
+  }
+  // Older apps reject the unknown field: the range must start at 0.21.0.
+  assert.match(errs({ languages: ["mermaid"] }, {}, ">=0.20.0"), /"contributes" needs Mahfouz 0\.21\.0/);
+});
+
+test("contributes: the reserved names are the app's", () => {
+  // Kept in step with the app's fixtures/plugin-manifests/reserved-contributes.json.
+  assert.deepEqual(RESERVED_LANGUAGES, ["database", "database-view", "day-tasks"]);
+  assert.deepEqual(RESERVED_EXPORT_FORMATS, ["docx", "markdown"]);
 });

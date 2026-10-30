@@ -248,7 +248,13 @@ approve the update.
   "network": { "hosts": ["api.example.com", "*.files.example.com"] },
   "secrets": { "token": { "hosts": ["api.example.com"] } },
   "configFile": "example.md",
-  "terms": "terms.md"
+  "terms": "terms.md",
+  "contributes": {
+    "languages": ["example"],
+    "detect": { "attributes": [{ "key": "type", "includes": "example" }] },
+    "exportFormats": [{ "id": "example", "label": "Example", "description": "The note as an example file" }],
+    "programs": ["example-tool"]
+  }
 }
 ```
 
@@ -275,6 +281,7 @@ relative and stay inside the plugin's directory.
 | `sidecar` | Background process. `{ "runtime": "node", "entry": "sidecar.js" }` runs it with the plugin's `node` for the user's platform, or the user's Node when there isn't one. `{ "runtime": "native", "entry": { "<platform>": "bin/tool" } }` runs a binary your `download` step produced. |
 | `configFile` | The one file under the vault's `.config/` the plugin may read and write through the host (`encryption.md` → `.config/encryption.md`): a lowercase name of letters, digits and dashes ending in `.md`. Needs `"mahfouz": ">=0.12.0"`. |
 | `terms` | A Markdown file in the plugin the user has to accept before installing or enabling it: what the plugin can't do or protect, in plain words. The app shows it in its install and enable dialogs, and the plugin may show the same file in its own dialogs by reading `plugin.json`'s `terms` next to its module. `## ` headings, `- ` bullets and paragraphs only. Needs `"mahfouz": ">=0.12.0"`. |
+| `contributes` | What the plugin does, so the app can find it by that instead of by its name. A declaration, never a permission. `languages`: fence languages it draws (up to 16 distinct ids, each lowercase letters, digits and dashes, max 32; never the app's own `database`, `database-view` or `day-tasks`), which the editor's Turn on card offers it for. `detect`: the notes it's for, which the app suggests it on when ANY rule matches: `attributes` (up to 8 `{ "key", "includes"? }`, each at most 64 characters: a note with that attribute, whose value or any list item equals `includes` when given) and `attachments` (`totalOverBytes` and/or `largestOverBytes`, whole numbers from 1 to 2^53 − 1). `exportFormats`: up to 8 `{ "id", "label", "description" }` it adds to the Export dialog (the id as `registerExportFormat` registers it, never `docx` or `markdown`; label up to 64 characters, description up to 200). `programs`: up to 8 programs its `gitPath` provides (`git-lfs`), so it needs a `gitPath`. Every list is optional. Needs `"mahfouz": ">=0.21.0"`. |
 
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
 installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).

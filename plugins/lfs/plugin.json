@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "id": "lfs",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "label": "Git LFS",
   "description": "Store dropped media as Git LFS pointers instead of full binaries",
-  "mahfouz": ">=0.8.0",
+  "mahfouz": ">=0.21.0",
   "apiVersion": 1,
   "icon": "icon.svg",
   "install": [
@@ -25,5 +25,16 @@
       }
     }
   ],
-  "gitPath": ["bin/git-lfs-3.8.0"]
+  "gitPath": ["bin/git-lfs-3.8.0"],
+  "contributes": {
+    "detect": {
+      "attachments": {
+        "totalOverBytes": 20971520,
+        "largestOverBytes": 5242880
+      }
+    },
+    "programs": [
+      "git-lfs"
+    ]
+  }
 }

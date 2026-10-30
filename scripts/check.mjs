@@ -59,6 +59,10 @@ export const FIELD_SINCE = {
   // A Markdown file in the plugin the user accepts before installing or
   // enabling it (the app's install and enable dialogs show it).
   terms: "0.12.0",
+  // What the plugin does, for the app to find it by (`Contributes` in
+  // manifest.rs): the fence languages it draws, the notes it's for, the
+  // export formats it adds, the programs it provides.
+  contributes: "0.21.0",
 };
 // A file directly under the vault's `.config/`: a lowercase name ending in
 // `.md`, no directory part, so a plugin can only name its own file there.
@@ -66,6 +70,21 @@ const CONFIG_FILE = /^[a-z0-9][a-z0-9-]{0,63}\.md$/;
 // The same for fields of a download step's artifact.
 export const ARTIFACT_FIELD_SINCE = { extract: "0.9.0" };
 const EXTRACTS = ["none", "tar.gz", "zip"];
+
+// `contributes`' limits, as manifest.rs has them.
+export const MAX_CONTRIBUTED_LANGUAGES = 16;
+export const MAX_DETECT_ATTRIBUTES = 8;
+export const MAX_EXPORT_FORMATS = 8;
+export const MAX_PROGRAMS = 8;
+const MAX_DETECT_TEXT = 64;
+const MAX_EXPORT_LABEL = 64;
+const MAX_EXPORT_DESCRIPTION = 200;
+// What no plugin may claim: the fence languages the app draws itself, and
+// the Export dialog's built-in formats (the app's
+// fixtures/plugin-manifests/reserved-contributes.json).
+export const RESERVED_LANGUAGES = ["database", "database-view", "day-tasks"];
+export const RESERVED_EXPORT_FORMATS = ["docx", "markdown"];
+const PROGRAM = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 // ---- helpers --------------------------------------------------------------------
 
@@ -143,6 +162,109 @@ function onlyKeys(obj, allowed, where, errors) {
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
+/** Non-empty and at most `max` characters (code points, as Rust counts). */
+const textFits = (s, max) => typeof s === "string" && s.length > 0 && [...s].length <= max;
+
+/** A list of at most `max` distinct strings, each matching `pattern`:
+ * `check_names` in manifest.rs. */
+function checkNames(field, names, max, pattern, rule, at, errors) {
+  if (!Array.isArray(names)) return errors.push(`${at}: ${field} must be an array`);
+  if (names.length > max) errors.push(`${at}: ${field} lists more than ${max}`);
+  names.forEach((name, i) => {
+    if (typeof name !== "string" || !pattern.test(name)) errors.push(`${at}: ${field} ${JSON.stringify(name)} must be ${rule}`);
+    else if (names.slice(0, i).includes(name)) errors.push(`${at}: ${field} lists ${JSON.stringify(name)} twice`);
+  });
+}
+
+// A list may be left out, never null: serde's `default` covers only a missing
+// field. An optional object or value (`detect`, `includes`, a threshold) may
+// be null.
+
+/** `contributes.detect`: `Detect::validate` in manifest.rs. Any rule
+ * matching suggests the plugin, so it must have at least one. */
+function validateDetect(d, at, errors) {
+  if (!isObject(d)) return errors.push(`${at}: contributes.detect must be an object`);
+  onlyKeys(d, ["attributes", "attachments"], `${at}: contributes.detect`, errors);
+  const attributes = d.attributes === undefined ? [] : d.attributes;
+  const attachments = d.attachments ?? null;
+  if (!Array.isArray(attributes)) return errors.push(`${at}: contributes.detect.attributes must be an array`);
+  if (!attributes.length && attachments === null) errors.push(`${at}: contributes.detect must name attributes or attachments`);
+  if (attributes.length > MAX_DETECT_ATTRIBUTES) errors.push(`${at}: contributes.detect.attributes lists more than ${MAX_DETECT_ATTRIBUTES}`);
+  const seen = [];
+  for (const rule of attributes) {
+    if (!isObject(rule)) {
+      errors.push(`${at}: contributes.detect.attributes must be { key, includes? }`);
+      continue;
+    }
+    onlyKeys(rule, ["key", "includes"], `${at}: contributes.detect.attributes`, errors);
+    if (!textFits(rule.key, MAX_DETECT_TEXT)) {
+      errors.push(`${at}: contributes.detect.attributes key ${JSON.stringify(rule.key)} must be 1 to ${MAX_DETECT_TEXT} characters`);
+    }
+    const includes = rule.includes ?? null;
+    if (includes !== null && !textFits(includes, MAX_DETECT_TEXT)) {
+      errors.push(`${at}: contributes.detect.attributes ${JSON.stringify(rule.key)} includes must be 1 to ${MAX_DETECT_TEXT} characters`);
+    }
+    const sig = JSON.stringify([rule.key, includes]);
+    if (seen.includes(sig)) errors.push(`${at}: contributes.detect.attributes lists ${JSON.stringify(rule.key)} twice`);
+    seen.push(sig);
+  }
+  if (attachments !== null) {
+    if (!isObject(attachments)) return errors.push(`${at}: contributes.detect.attachments must be an object`);
+    onlyKeys(attachments, ["totalOverBytes", "largestOverBytes"], `${at}: contributes.detect.attachments`, errors);
+    const fields = ["totalOverBytes", "largestOverBytes"].filter((f) => (attachments[f] ?? null) !== null);
+    if (!fields.length) errors.push(`${at}: contributes.detect.attachments must name totalOverBytes or largestOverBytes`);
+    for (const f of fields) {
+      // The web reads JSON numbers as doubles, so the app caps both at 2^53 - 1.
+      const n = attachments[f];
+      if (!Number.isSafeInteger(n) || n < 1) {
+        errors.push(`${at}: contributes.detect.attachments.${f} ${JSON.stringify(n)} must be an integer from 1 to ${Number.MAX_SAFE_INTEGER}`);
+      }
+    }
+  }
+}
+
+/** `contributes`: `Contributes::validate` in manifest.rs. A declaration the
+ * app looks the plugin up by, never a permission. `hasGitPath`: `programs`
+ * are what the plugin's `gitPath` puts on git's PATH, so they need one. */
+function validateContributes(c, hasGitPath, at, errors) {
+  if (!isObject(c)) return errors.push(`${at}: contributes must be an object`);
+  onlyKeys(c, ["languages", "detect", "exportFormats", "programs"], `${at}: contributes`, errors);
+  const languages = c.languages === undefined ? [] : c.languages;
+  checkNames("contributes.languages", languages, MAX_CONTRIBUTED_LANGUAGES, SLUG, "lowercase letters, digits and dashes (max 32)", at, errors);
+  if (Array.isArray(languages)) {
+    for (const lang of languages.filter((l) => RESERVED_LANGUAGES.includes(l))) {
+      errors.push(`${at}: contributes.languages ${JSON.stringify(lang)} is the app's own`);
+    }
+  }
+  if ((c.detect ?? null) !== null) validateDetect(c.detect, at, errors);
+  const formats = c.exportFormats === undefined ? [] : c.exportFormats;
+  if (!Array.isArray(formats)) errors.push(`${at}: contributes.exportFormats must be an array`);
+  else {
+    if (formats.length > MAX_EXPORT_FORMATS) errors.push(`${at}: contributes.exportFormats lists more than ${MAX_EXPORT_FORMATS}`);
+    formats.forEach((f, i) => {
+      if (!isObject(f)) return errors.push(`${at}: contributes.exportFormats must be { id, label, description }`);
+      onlyKeys(f, ["id", "label", "description"], `${at}: contributes.exportFormats`, errors);
+      const id = JSON.stringify(f.id);
+      if (typeof f.id !== "string" || !SLUG.test(f.id)) {
+        errors.push(`${at}: contributes.exportFormats id ${id} must be lowercase letters, digits and dashes (max 32)`);
+      } else if (RESERVED_EXPORT_FORMATS.includes(f.id)) {
+        errors.push(`${at}: contributes.exportFormats id ${id} is the app's own`);
+      } else if (formats.slice(0, i).some((g) => g?.id === f.id)) {
+        errors.push(`${at}: contributes.exportFormats lists ${id} twice`);
+      }
+      if (!textFits(f.label, MAX_EXPORT_LABEL)) errors.push(`${at}: contributes.exportFormats ${id} label must be 1 to ${MAX_EXPORT_LABEL} characters`);
+      if (!textFits(f.description, MAX_EXPORT_DESCRIPTION)) {
+        errors.push(`${at}: contributes.exportFormats ${id} description must be 1 to ${MAX_EXPORT_DESCRIPTION} characters`);
+      }
+    });
+  }
+  const programs = c.programs === undefined ? [] : c.programs;
+  checkNames("contributes.programs", programs, MAX_PROGRAMS, PROGRAM, "lowercase letters, digits, dots, underscores and dashes (max 64)", at, errors);
+  if (Array.isArray(programs) && programs.length && !hasGitPath) {
+    errors.push(`${at}: contributes.programs needs a gitPath: a program is what the plugin's gitPath puts on git's PATH`);
+  }
+}
+
 // ---- manifests --------------------------------------------------------------------
 
 /**
@@ -161,7 +283,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
 
   onlyKeys(
     m,
-    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets", "configFile", "terms"],
+    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets", "configFile", "terms", "contributes"],
     where,
     errors
   );
@@ -394,6 +516,8 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
         }
       }
   }
+
+  if ((m.contributes ?? null) !== null) validateContributes(m.contributes, Array.isArray(m.gitPath) && m.gitPath.length > 0, where, errors);
 
   for (const [at, field, since] of newer) {
     if (isVersionRange(m.mahfouz) && compareVersions(rangeFloor(m.mahfouz), since) < 0) {
