@@ -63,9 +63,8 @@ export const FIELD_SINCE = {
   // manifest.rs): the fence languages it draws, the notes it's for, the
   // export formats it adds, the programs it provides.
   contributes: "0.21.0",
-  // The registry's grant of a role (a plugin acting for the app, such as
-  // encryption). Its shape isn't checked here yet, so a manifest naming it
-  // still fails as an unknown field; this records the floor it will need.
+  // The privileged roles the plugin is built to hold (`note-decryptor`). A
+  // declaration alone grants nothing: the registry's `roles` grants one.
   roles: "0.21.0",
 };
 // From this app version on, a key the app doesn't know is ignored in a
@@ -91,6 +90,12 @@ export function requiredFloor(field, since) {
 // A file directly under the vault's `.config/`: a lowercase name ending in
 // `.md`, no directory part, so a plugin can only name its own file there.
 const CONFIG_FILE = /^[a-z0-9][a-z0-9-]{0,63}\.md$/;
+// The app's own files there, which no plugin may name (manifest.rs).
+export const RESERVED_CONFIG_FILES = ["settings.md", "bookmarks.md", "fields.md", "attributes.md", "slides.md", "dictionary.md", "navigation.md", "commands.md"];
+const isConfigFileName = (s) => typeof s === "string" && CONFIG_FILE.test(s) && !RESERVED_CONFIG_FILES.includes(s);
+// A role name (`is_role_name` in manifest.rs), and how many one manifest may declare.
+const ROLE = /^[a-z][a-z0-9-]{0,31}$/;
+export const MAX_ROLES = 4;
 // The same for fields of a download step's artifact.
 export const ARTIFACT_FIELD_SINCE = { extract: "0.9.0" };
 const EXTRACTS = ["none", "tar.gz", "zip"];
@@ -307,7 +312,7 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
 
   onlyKeys(
     m,
-    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets", "configFile", "terms", "contributes"],
+    ["schema", "id", "version", "label", "description", "mahfouz", "apiVersion", "dependencies", "install", "gitPath", "frontend", "sidecar", "node", "icon", "logo", "network", "secrets", "configFile", "terms", "contributes", "roles"],
     where,
     errors
   );
@@ -498,8 +503,12 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
     }
   }
 
-  if ("configFile" in m && (typeof m.configFile !== "string" || !CONFIG_FILE.test(m.configFile))) {
-    errors.push(`${where}: configFile must be a file name under the vault's .config/ (lowercase letters, digits and dashes, ending in .md)`);
+  if ("configFile" in m && !isConfigFileName(m.configFile)) {
+    errors.push(`${where}: configFile must be a file name under the vault's .config/ (lowercase letters, digits and dashes, ending in .md), and not one of the app's own`);
+  }
+
+  if ("roles" in m) {
+    checkNames("roles", m.roles, MAX_ROLES, ROLE, "a lowercase letter, then lowercase letters, digits and dashes (max 32)", where, errors);
   }
 
   // `network` and `secrets`, as `validate_network` in manifest.rs reads them.
@@ -557,13 +566,60 @@ export function validateManifest(m, { dir, id, registry, pluginIds }) {
   return errors;
 }
 
-/** The registry's own file. */
+/** The registry's own file. `roles` grants privileged roles, each to one of
+ * this registry's plugins, read strictly as roles.rs's `RoleGrant`; only the
+ * built-in registry's grants count in the app. Apps before 0.21.0 read the
+ * built-in registry's `registry.json` without parsing it, so the key is safe
+ * there. */
 export function validateRegistry(info) {
   const errors = [];
   if (!isObject(info)) return ["registry.json: not a JSON object"];
-  onlyKeys(info, ["schema", "name", "description"], "registry.json", errors);
+  onlyKeys(info, ["schema", "name", "description", "roles"], "registry.json", errors);
   if (info.schema !== SCHEMA) errors.push(`registry.json: schema must be ${SCHEMA}`);
   if (!SLUG.test(info.name ?? "")) errors.push("registry.json: name must be a slug");
+  if ("roles" in info) {
+    if (!isObject(info.roles)) errors.push("registry.json: roles must map role names to grants");
+    else
+      for (const [role, grant] of Object.entries(info.roles)) {
+        const at = `registry.json: roles["${role}"]`;
+        if (!ROLE.test(role)) errors.push(`${at}: a role name is a lowercase letter, then lowercase letters, digits and dashes (max 32)`);
+        if (!isObject(grant)) {
+          errors.push(`${at}: must be { plugin, method, configFile?, unlocksVault? }`);
+          continue;
+        }
+        onlyKeys(grant, ["plugin", "method", "configFile", "unlocksVault"], at, errors);
+        if (typeof grant.plugin !== "string" || !SLUG.test(grant.plugin)) errors.push(`${at}: plugin must be a plugin id in this registry`);
+        if (typeof grant.method !== "string" || !SLUG.test(grant.method)) errors.push(`${at}: method must be lowercase letters, digits and dashes (max 32)`);
+        if ((grant.configFile ?? null) !== null && !isConfigFileName(grant.configFile)) {
+          errors.push(`${at}: configFile must be a file name under the vault's .config/ ending in .md, and not one of the app's own`);
+        }
+        if ("unlocksVault" in grant && typeof grant.unlocksVault !== "boolean") errors.push(`${at}: unlocksVault must be true or false`);
+      }
+  }
+  return errors;
+}
+
+/** Each grant in `registry.json`'s `roles` against its plugin's manifest:
+ * the app gives the role only to a plugin that declares it and, when the
+ * grant names a config file, keeps that same `configFile` (roles.rs). */
+export function validateGrants(info, manifests) {
+  const errors = [];
+  if (!isObject(info?.roles)) return errors;
+  for (const [role, grant] of Object.entries(info.roles)) {
+    if (!isObject(grant) || typeof grant.plugin !== "string") continue;
+    const at = `registry.json: roles["${role}"]`;
+    const m = manifests.get(grant.plugin);
+    if (!m) {
+      errors.push(`${at}: plugin "${grant.plugin}" isn't in this registry`);
+      continue;
+    }
+    if (!Array.isArray(m.roles) || !m.roles.includes(role)) {
+      errors.push(`${at}: plugins/${grant.plugin}/plugin.json must declare "${role}" in its roles, or the app won't give it the role`);
+    }
+    if ((grant.configFile ?? null) !== null && m.configFile !== grant.configFile) {
+      errors.push(`${at}: plugins/${grant.plugin}/plugin.json must keep configFile "${grant.configFile}", as the grant names it`);
+    }
+  }
   return errors;
 }
 
@@ -665,6 +721,7 @@ export async function check(root, { base = null, artifacts = false, log = consol
     manifests.set(id, m);
     errors.push(...validateManifest(m, { dir: path.join(pluginsDir, id), id, registry, pluginIds: ids }));
   }
+  if (info) errors.push(...validateGrants(info, manifests));
   log(`checked registry "${registry}": ${manifests.size} plugin(s)`);
 
   let changed = null;

@@ -1,5 +1,8 @@
 {
   "schema": 1,
   "name": "mahfouz",
-  "description": "Official Mahfouz plugins"
+  "description": "Official Mahfouz plugins",
+  "roles": {
+    "note-decryptor": { "plugin": "encryption", "method": "decrypt", "configFile": "encryption.md", "unlocksVault": true }
+  }
 }

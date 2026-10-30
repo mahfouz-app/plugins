@@ -19,7 +19,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
 | `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.12.0 |
-| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.12.0 (the first release with the host APIs and the manifest `terms` it uses) |
+| `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.21.0 (the first release that gives it the `note-decryptor` role, which `registry.json` grants it) |
 
 `npm test` runs the plugins' tests and the registry checker's with `node --test` (no
 dependencies).
@@ -203,7 +203,7 @@ Run the same locally with `npm test && node scripts/check.mjs --base origin/main
 ## Layout
 
 ```
-registry.json               { "schema": 1, "name": "mahfouz", "description": "…" }
+registry.json               { "schema": 1, "name": "mahfouz", "description": "…", "roles": { … } }
 plugins/<id>/plugin.json    the plugin's manifest
 plugins/<id>/…              frontend module, sidecar script, package-lock.json, …
 api.ts, embed.ts, tabs.ts,  host API types (vendored from the app; keep in sync)
@@ -215,6 +215,13 @@ host.ts, toolbar.ts
 - **Plugin `id`:** follows the same rules. Everywhere outside its manifest, a plugin is referred
   to by its **qualified id**, `<registry>/<id>` (e.g. `mahfouz/mermaid`). That is also the key
   vaults use in `.config/settings.md` under `## Plugins`.
+- **Registry `roles`:** privileged roles this registry grants, each to one of its plugins:
+  `{ "<role>": { "plugin": "<id>", "method": "<sidecar method>", "configFile"?: "<name>.md", "unlocksVault"?: true } }`.
+  Only the built-in registry's grants count. The app gives the role only to a plugin whose
+  manifest declares it in `roles` and keeps the grant's `configFile`, and only the app may call
+  the grant's `method` on it. Here, `note-decryptor` goes to `encryption`, whose `decrypt` reads
+  notes, and `unlocksVault` loads it in a locked vault so it can unlock it. Apps before 0.21.0
+  don't read the built-in registry's `registry.json`, so the key doesn't break them.
 
 Mahfouz clones a registry with `git clone --depth 1` and refreshes it at every launch. An
 installed plugin is a **copy** of `plugins/<id>/` taken at install time. Pushing a new version
@@ -282,6 +289,7 @@ relative and stay inside the plugin's directory.
 | `configFile` | The one file under the vault's `.config/` the plugin may read and write through the host (`encryption.md` → `.config/encryption.md`): a lowercase name of letters, digits and dashes ending in `.md`. Needs `"mahfouz": ">=0.12.0"`. |
 | `terms` | A Markdown file in the plugin the user has to accept before installing or enabling it: what the plugin can't do or protect, in plain words. The app shows it in its install and enable dialogs, and the plugin may show the same file in its own dialogs by reading `plugin.json`'s `terms` next to its module. `## ` headings, `- ` bullets and paragraphs only. Needs `"mahfouz": ">=0.12.0"`. |
 | `contributes` | What the plugin does, so the app can find it by that instead of by its name. A declaration, never a permission. `languages`: fence languages it draws (up to 16 distinct ids, each lowercase letters, digits and dashes, max 32; never the app's own `database`, `database-view` or `day-tasks`), which the editor's Turn on card offers it for. `detect`: the notes it's for, which the app suggests it on when ANY rule matches: `attributes` (up to 8 `{ "key", "includes"? }`, each at most 64 characters: a note with that attribute, whose value or any list item equals `includes` when given) and `attachments` (`totalOverBytes` and/or `largestOverBytes`, whole numbers from 1 to 2^53 − 1). `exportFormats`: up to 8 `{ "id", "label", "description" }` it adds to the Export dialog (the id as `registerExportFormat` registers it, never `docx` or `markdown`; label up to 64 characters, description up to 200). `programs`: up to 8 programs its `gitPath` provides (`git-lfs`), so it needs a `gitPath`. Every list is optional. Needs `"mahfouz": ">=0.21.0"`. |
+| `roles` | Privileged roles the plugin is built to hold (`["note-decryptor"]`): up to 4 distinct names, each a lowercase letter, then lowercase letters, digits and dashes (max 32). A declaration alone grants nothing; the built-in registry's `registry.json` `roles` grants one. Needs `"mahfouz": ">=0.21.0"`. |
 
 Checksums live in this repo's git history, so a release asset swapped after the fact can't be
 installed silently. Pin artifacts to immutable URLs (release assets, not `latest`).

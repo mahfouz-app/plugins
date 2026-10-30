@@ -7,13 +7,13 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { check, compareVersions, FIELD_SINCE, FLOOR_BUMP, LENIENT_SINCE, requiredFloor, isContained, isHostPattern, isVersionRange, rangeFloor, RESERVED_EXPORT_FORMATS, RESERVED_LANGUAGES, validateManifest, versionBumpError } from "./check.mjs";
+import { check, compareVersions, FIELD_SINCE, MAX_ROLES, RESERVED_CONFIG_FILES, validateRegistry, FLOOR_BUMP, LENIENT_SINCE, requiredFloor, isContained, isHostPattern, isVersionRange, rangeFloor, RESERVED_EXPORT_FORMATS, RESERVED_LANGUAGES, validateManifest, versionBumpError } from "./check.mjs";
 
 const quiet = () => {};
 
-function tempRegistry(plugins, { name = "acme" } = {}) {
+function tempRegistry(plugins, { name = "acme", info = {} } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-check-"));
-  fs.writeFileSync(path.join(root, "registry.json"), JSON.stringify({ schema: 1, name }));
+  fs.writeFileSync(path.join(root, "registry.json"), JSON.stringify({ schema: 1, name, ...info }));
   for (const [id, { manifest, files = {} }] of Object.entries(plugins)) {
     const dir = path.join(root, "plugins", id);
     fs.mkdirSync(dir, { recursive: true });
@@ -507,4 +507,59 @@ test("floor bumps: a field that grants or changes behaviour needs its own releas
   const errs = (over, mahfouz) => validate({ ...minimal("p", { mahfouz }), ...over }).join("\n");
   assert.match(errs({ network: { hosts: ["api.example.com"] } }, ">=0.11.0"), /"network" needs Mahfouz 0\.12\.0.*would ignore or refuse it/);
   assert.match(errs({ contributes: { languages: ["x"] } }, ">=0.20.0"), /"contributes" needs Mahfouz 0\.21\.0.*older apps reject the manifest/);
+});
+
+test("roles: a manifest declares up to 4 distinct role names, from Mahfouz 0.21.0", () => {
+  const errs = (roles, mahfouz = ">=0.21.0") => validate({ ...minimal("p", { mahfouz }), roles }).join("\n");
+  assert.equal(MAX_ROLES, 4);
+  assert.equal(errs(["note-decryptor"]), "");
+  assert.equal(errs([]), "");
+  assert.match(errs("note-decryptor"), /roles must be an array/);
+  assert.match(errs(["Note Decryptor"]), /roles "Note Decryptor" must be a lowercase letter/);
+  assert.match(errs(["1-role"]), /roles "1-role" must be a lowercase letter/);
+  assert.match(errs(["r".repeat(33)]), /must be a lowercase letter/);
+  assert.match(errs(["a", "a"]), /roles lists "a" twice/);
+  assert.match(errs(["a", "b", "c", "d", "e"]), /roles lists more than 4/);
+  // A capability: an app that ignored it would hand out nothing, so it keeps its own floor.
+  assert.match(errs(["note-decryptor"], ">=0.20.0"), /"roles" needs Mahfouz 0\.21\.0/);
+});
+
+test("configFile: never one of the app's own .config/ files", () => {
+  for (const name of RESERVED_CONFIG_FILES) {
+    assert.match(validate({ ...minimal("p", { mahfouz: ">=0.12.0" }), configFile: name }).join("\n"), /not one of the app's own/, name);
+  }
+});
+
+test("registry roles: each grant read strictly, as roles.rs's RoleGrant", () => {
+  const errs = (roles) => validateRegistry({ schema: 1, name: "acme", roles }).join("\n");
+  const grant = { plugin: "encryption", method: "decrypt", configFile: "encryption.md", unlocksVault: true };
+  assert.equal(errs({ "note-decryptor": grant }), "");
+  assert.equal(errs({ "note-decryptor": { plugin: "keys", method: "open" } }), "");
+  assert.equal(errs({ "note-decryptor": { ...grant, configFile: null } }), "");
+  assert.match(errs([]), /roles must map role names to grants/);
+  assert.match(errs({ "Not A Role": grant }), /a role name is a lowercase letter/);
+  assert.match(errs({ r: 5 }), /must be \{ plugin, method/);
+  assert.match(errs({ r: { ...grant, surprise: true } }), /unknown field "surprise"/);
+  assert.match(errs({ r: { ...grant, plugin: "mahfouz/encryption" } }), /plugin must be a plugin id/);
+  assert.match(errs({ r: { ...grant, method: undefined } }), /method must be/);
+  assert.match(errs({ r: { ...grant, configFile: "settings.md" } }), /configFile must be/);
+  assert.match(errs({ r: { ...grant, unlocksVault: "yes" } }), /unlocksVault must be true or false/);
+  assert.match(errs({ r: { ...grant, unlocksVault: null } }), /unlocksVault must be true or false/);
+});
+
+test("registry roles: the granted plugin declares the role and keeps the grant's config file", async () => {
+  const run = async (manifest, roles) => {
+    const root = tempRegistry({ enc: { manifest } }, { info: { roles } });
+    try {
+      return (await check(root, { log: quiet })).join("\n");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const holder = minimal("enc", { mahfouz: ">=0.21.0", configFile: "enc.md", roles: ["note-decryptor"] });
+  const grant = { plugin: "enc", method: "decrypt", configFile: "enc.md", unlocksVault: true };
+  assert.equal(await run(holder, { "note-decryptor": grant }), "");
+  assert.match(await run(holder, { "note-decryptor": { ...grant, plugin: "keys" } }), /plugin "keys" isn't in this registry/);
+  assert.match(await run({ ...holder, roles: [] }, { "note-decryptor": grant }), /must declare "note-decryptor" in its roles/);
+  assert.match(await run({ ...holder, configFile: "other.md" }, { "note-decryptor": grant }), /must keep configFile "enc\.md"/);
 });
