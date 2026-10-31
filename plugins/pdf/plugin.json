@@ -1,12 +1,21 @@
 {
   "schema": 1,
   "id": "pdf",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "label": "PDF export",
   "description": "Export notes to PDF",
-  "mahfouz": ">=0.8.0",
+  "mahfouz": ">=0.21.0",
   "apiVersion": 1,
   "icon": "icon.svg",
   "dependencies": ["mahfouz/slidev"],
-  "frontend": "index.js"
+  "frontend": "index.js",
+  "contributes": {
+    "exportFormats": [
+      {
+        "id": "pdf",
+        "label": "PDF",
+        "description": "Needs the PDF export plugin"
+      }
+    ]
+  }
 }

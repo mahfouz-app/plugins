@@ -7,13 +7,13 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { check, compareVersions, isContained, isHostPattern, isVersionRange, rangeFloor, validateManifest, versionBumpError } from "./check.mjs";
+import { check, compareVersions, FIELD_SINCE, MAX_ROLES, RESERVED_CONFIG_FILES, validateRegistry, FLOOR_BUMP, LENIENT_SINCE, requiredFloor, isContained, isHostPattern, isVersionRange, rangeFloor, RESERVED_EXPORT_FORMATS, RESERVED_LANGUAGES, validateManifest, versionBumpError } from "./check.mjs";
 
 const quiet = () => {};
 
-function tempRegistry(plugins, { name = "acme" } = {}) {
+function tempRegistry(plugins, { name = "acme", info = {} } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mahfouz-check-"));
-  fs.writeFileSync(path.join(root, "registry.json"), JSON.stringify({ schema: 1, name }));
+  fs.writeFileSync(path.join(root, "registry.json"), JSON.stringify({ schema: 1, name, ...info }));
   for (const [id, { manifest, files = {} }] of Object.entries(plugins)) {
     const dir = path.join(root, "plugins", id);
     fs.mkdirSync(dir, { recursive: true });
@@ -414,4 +414,152 @@ test("configFile: a .md file name under the vault's .config/, from Mahfouz 0.12.
   }
   // Older apps reject the unknown field: the range must start at 0.12.0.
   assert.match(errs({ configFile: "encryption.md" }, ">=0.11.0"), /"configFile" needs Mahfouz 0\.12\.0/);
+});
+
+test("contributes: checked as manifest.rs's Contributes::validate does, from Mahfouz 0.21.0", () => {
+  const errs = (contributes, over = {}, mahfouz = ">=0.21.0") => validate({ ...minimal("p", { mahfouz }), ...over, contributes }).join("\n");
+  const lfs = { gitPath: ["bin"] };
+  // Every field, as the app's contributes.json fixture has it.
+  assert.equal(
+    errs(
+      {
+        languages: ["excalidraw", "drawio-2"],
+        detect: { attributes: [{ key: "type", includes: "presentation" }, { key: "slides" }], attachments: { totalOverBytes: 1048576 } },
+        exportFormats: [{ id: "pdf", label: "PDF", description: "The note's slides as a PDF" }],
+        programs: ["git-lfs", "node_1.2"],
+      },
+      lfs
+    ),
+    ""
+  );
+  assert.equal(errs({}), "");
+  assert.equal(errs(null), "");
+  assert.equal(errs({ detect: null, languages: ["mermaid"] }), "");
+  assert.equal(errs({ detect: { attachments: { largestOverBytes: Number.MAX_SAFE_INTEGER, totalOverBytes: null } } }), "");
+  assert.equal(errs({ exportFormats: [{ id: "p", label: "L".repeat(64), description: "d".repeat(200) }] }), "");
+
+  const many = (n, f) => Array.from({ length: n }, (_, i) => f(i));
+  for (const [contributes, want, over] of [
+    [[], /contributes must be an object/],
+    [{ themes: ["dark"] }, /contributes: unknown field "themes"/],
+    [{ languages: "mermaid" }, /languages must be an array/],
+    [{ languages: null }, /languages must be an array/],
+    [{ languages: ["Excalidraw"] }, /languages "Excalidraw" must be lowercase/],
+    [{ languages: ["mermaid", "mermaid"] }, /languages lists "mermaid" twice/],
+    [{ languages: many(17, (i) => `l${i}`) }, /languages lists more than 16/],
+    [{ languages: ["day-tasks"] }, /languages "day-tasks" is the app's own/],
+    [{ detect: {} }, /detect must name attributes or attachments/],
+    [{ detect: { attributes: [] } }, /detect must name attributes or attachments/],
+    [{ detect: { x: 1, attributes: [{ key: "t" }] } }, /detect: unknown field "x"/],
+    [{ detect: { attributes: [{ key: "" }] } }, /attributes key "" must be 1 to 64/],
+    [{ detect: { attributes: [{ key: "k".repeat(65) }] } }, /attributes key "k+" must be 1 to 64/],
+    [{ detect: { attributes: [{ key: "t", includes: "" }] } }, /"t" includes must be 1 to 64/],
+    [{ detect: { attributes: [{ key: "t" }, { key: "t", includes: null }] } }, /attributes lists "t" twice/],
+    [{ detect: { attributes: [{ key: "t", x: 1 }] } }, /attributes: unknown field "x"/],
+    [{ detect: { attributes: many(9, (i) => ({ key: `k${i}` })) } }, /attributes lists more than 8/],
+    [{ detect: { attachments: {} } }, /must name totalOverBytes or largestOverBytes/],
+    [{ detect: { attachments: { totalOverBytes: 0 } } }, /totalOverBytes 0 must be an integer from 1/],
+    [{ detect: { attachments: { largestOverBytes: -1 } } }, /largestOverBytes -1 must be an integer/],
+    [{ detect: { attachments: { totalOverBytes: 1.5 } } }, /totalOverBytes 1\.5 must be an integer/],
+    [{ detect: { attachments: { totalOverBytes: 2 ** 53 } } }, /must be an integer from 1 to 9007199254740991/],
+    [{ detect: { attachments: { totalOverBytes: "1" } } }, /must be an integer/],
+    [{ exportFormats: [{ id: "PDF", label: "P", description: "d" }] }, /exportFormats id "PDF" must be lowercase/],
+    [{ exportFormats: [{ id: "docx", label: "P", description: "d" }] }, /exportFormats id "docx" is the app's own/],
+    [{ exportFormats: [{ id: "p", label: "", description: "d" }] }, /"p" label must be 1 to 64/],
+    [{ exportFormats: [{ id: "p", label: "L".repeat(65), description: "d" }] }, /"p" label must be 1 to 64/],
+    [{ exportFormats: [{ id: "p", label: "P", description: "d".repeat(201) }] }, /"p" description must be 1 to 200/],
+    [{ exportFormats: [{ id: "p", label: "P" }] }, /"p" description must be 1 to 200/],
+    [{ exportFormats: [{ id: "p", label: "P", description: "d", icon: "x" }] }, /exportFormats: unknown field "icon"/],
+    [{ exportFormats: many(2, () => ({ id: "p", label: "P", description: "d" })) }, /exportFormats lists "p" twice/],
+    [{ exportFormats: many(9, (i) => ({ id: `f${i}`, label: "P", description: "d" })) }, /exportFormats lists more than 8/],
+    [{ programs: ["Git LFS"] }, /programs "Git LFS" must be lowercase/, lfs],
+    [{ programs: ["-x"] }, /programs "-x" must be lowercase/, lfs],
+    [{ programs: many(9, (i) => `p${i}`) }, /programs lists more than 8/, lfs],
+    [{ programs: ["git-lfs"] }, /programs needs a gitPath/],
+    [{ programs: ["git-lfs"] }, /programs needs a gitPath/, { gitPath: [] }],
+  ]) {
+    assert.match(errs(contributes, over), want, JSON.stringify(contributes));
+  }
+  // Older apps reject the unknown field: the range must start at 0.21.0.
+  assert.match(errs({ languages: ["mermaid"] }, {}, ">=0.20.0"), /"contributes" needs Mahfouz 0\.21\.0/);
+});
+
+test("contributes: the reserved names are the app's", () => {
+  // Kept in step with the app's fixtures/plugin-manifests/reserved-contributes.json.
+  assert.deepEqual(RESERVED_LANGUAGES, ["database", "database-view", "day-tasks"]);
+  assert.deepEqual(RESERVED_EXPORT_FORMATS, ["docx", "markdown"]);
+});
+
+test("floor bumps: a field that grants or changes behaviour needs its own release as the floor; a declarative one only the lenient release", () => {
+  // Everything up to the lenient release keeps its own floor: earlier apps reject any unknown key.
+  for (const [field, since] of Object.entries(FIELD_SINCE)) {
+    if (compareVersions(since, LENIENT_SINCE) <= 0) assert.equal(requiredFloor(field, since), since, field);
+  }
+  assert.equal(requiredFloor("contributes", FIELD_SINCE.contributes), "0.21.0");
+  assert.equal(FLOOR_BUMP.has("contributes"), false);
+  for (const field of ["network", "secrets", "roles", "extract", "node", "configFile", "terms"]) assert.ok(FLOOR_BUMP.has(field), field);
+  assert.equal(FIELD_SINCE.roles, "0.21.0");
+  // A later field: declarative ones are ignored from the lenient release on, a floor-bump one isn't safe to ignore.
+  assert.equal(requiredFloor("someDeclarativeField", "0.24.0"), LENIENT_SINCE);
+  assert.equal(requiredFloor("roles", "0.24.0"), "0.24.0");
+  assert.equal(requiredFloor("extract", "0.9.0"), "0.9.0");
+  // Through validateManifest: a floor-bump field still names its own release.
+  const errs = (over, mahfouz) => validate({ ...minimal("p", { mahfouz }), ...over }).join("\n");
+  assert.match(errs({ network: { hosts: ["api.example.com"] } }, ">=0.11.0"), /"network" needs Mahfouz 0\.12\.0.*would ignore or refuse it/);
+  assert.match(errs({ contributes: { languages: ["x"] } }, ">=0.20.0"), /"contributes" needs Mahfouz 0\.21\.0.*older apps reject the manifest/);
+});
+
+test("roles: a manifest declares up to 4 distinct role names, from Mahfouz 0.21.0", () => {
+  const errs = (roles, mahfouz = ">=0.21.0") => validate({ ...minimal("p", { mahfouz }), roles }).join("\n");
+  assert.equal(MAX_ROLES, 4);
+  assert.equal(errs(["note-decryptor"]), "");
+  assert.equal(errs([]), "");
+  assert.match(errs("note-decryptor"), /roles must be an array/);
+  assert.match(errs(["Note Decryptor"]), /roles "Note Decryptor" must be a lowercase letter/);
+  assert.match(errs(["1-role"]), /roles "1-role" must be a lowercase letter/);
+  assert.match(errs(["r".repeat(33)]), /must be a lowercase letter/);
+  assert.match(errs(["a", "a"]), /roles lists "a" twice/);
+  assert.match(errs(["a", "b", "c", "d", "e"]), /roles lists more than 4/);
+  // A capability: an app that ignored it would hand out nothing, so it keeps its own floor.
+  assert.match(errs(["note-decryptor"], ">=0.20.0"), /"roles" needs Mahfouz 0\.21\.0/);
+});
+
+test("configFile: never one of the app's own .config/ files", () => {
+  for (const name of RESERVED_CONFIG_FILES) {
+    assert.match(validate({ ...minimal("p", { mahfouz: ">=0.12.0" }), configFile: name }).join("\n"), /not one of the app's own/, name);
+  }
+});
+
+test("registry roles: each grant read strictly, as roles.rs's RoleGrant", () => {
+  const errs = (roles) => validateRegistry({ schema: 1, name: "acme", roles }).join("\n");
+  const grant = { plugin: "encryption", method: "decrypt", configFile: "encryption.md", unlocksVault: true };
+  assert.equal(errs({ "note-decryptor": grant }), "");
+  assert.equal(errs({ "note-decryptor": { plugin: "keys", method: "open" } }), "");
+  assert.equal(errs({ "note-decryptor": { ...grant, configFile: null } }), "");
+  assert.match(errs([]), /roles must map role names to grants/);
+  assert.match(errs({ "Not A Role": grant }), /a role name is a lowercase letter/);
+  assert.match(errs({ r: 5 }), /must be \{ plugin, method/);
+  assert.match(errs({ r: { ...grant, surprise: true } }), /unknown field "surprise"/);
+  assert.match(errs({ r: { ...grant, plugin: "mahfouz/encryption" } }), /plugin must be a plugin id/);
+  assert.match(errs({ r: { ...grant, method: undefined } }), /method must be/);
+  assert.match(errs({ r: { ...grant, configFile: "settings.md" } }), /configFile must be/);
+  assert.match(errs({ r: { ...grant, unlocksVault: "yes" } }), /unlocksVault must be true or false/);
+  assert.match(errs({ r: { ...grant, unlocksVault: null } }), /unlocksVault must be true or false/);
+});
+
+test("registry roles: the granted plugin declares the role and keeps the grant's config file", async () => {
+  const run = async (manifest, roles) => {
+    const root = tempRegistry({ enc: { manifest } }, { info: { roles } });
+    try {
+      return (await check(root, { log: quiet })).join("\n");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const holder = minimal("enc", { mahfouz: ">=0.21.0", configFile: "enc.md", roles: ["note-decryptor"] });
+  const grant = { plugin: "enc", method: "decrypt", configFile: "enc.md", unlocksVault: true };
+  assert.equal(await run(holder, { "note-decryptor": grant }), "");
+  assert.match(await run(holder, { "note-decryptor": { ...grant, plugin: "keys" } }), /plugin "keys" isn't in this registry/);
+  assert.match(await run({ ...holder, roles: [] }, { "note-decryptor": grant }), /must declare "note-decryptor" in its roles/);
+  assert.match(await run({ ...holder, configFile: "other.md" }, { "note-decryptor": grant }), /must keep configFile "enc\.md"/);
 });
