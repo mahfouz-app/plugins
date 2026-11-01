@@ -432,6 +432,52 @@ export function hardenImages(win, webappBase) {
   proto.image = local;
 }
 
+// ---- web fonts -------------------------------------------------------------
+//
+// A cell's `fontSource` style (draw.io's web font setting, often a Google
+// Fonts URL), a label's `data-font-src` attribute and the file's `extFonts`
+// make the viewer add that stylesheet or @font-face to the page, a request
+// every time the note renders. All three go through `Graph.isValidFontUrl`
+// (from `Graph.addFont` and `getCustomFonts`), which takes any http(s) URL.
+// Only an inline font or one of the plugin's own files is loaded; the cell
+// keeps its `fontFamily`, so a font installed on this device still draws by
+// name, and any other falls back to the viewer's default.
+
+/**
+ * Whether a font `url` may be loaded: an inline (`data:`) font, or a URL
+ * that resolves against `documentBase` (as the viewer's <style> and <link>
+ * do) to a file under `webappBase` (absolute, ending in "/").
+ */
+export function isLocalFontUrl(url, documentBase, webappBase) {
+  // The URL parser drops these before it reads the scheme (draw.io's own
+  // check does the same).
+  const value = String(url ?? "").replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\n\r]/g, "");
+  if (!value) return false;
+  if (/^data:/i.test(value)) return true;
+  try {
+    return new URL(value, documentBase).href.startsWith(webappBase);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Wraps `win.Graph.isValidFontUrl` (once) so it also requires
+ * `isLocalFontUrl`. Throws when the check is missing, so a viewer that could
+ * load remote fonts never draws.
+ */
+export function hardenFonts(win, webappBase) {
+  const Graph = win.Graph;
+  const original = Graph?.isValidFontUrl;
+  if (typeof original !== "function") throw new Error("draw.io's font check didn't load");
+  if (original.mahfouzLocal) return;
+  const local = function (url) {
+    return isLocalFontUrl(url, win.document.baseURI, webappBase) && original.call(this, url);
+  };
+  local.mahfouzLocal = true;
+  Graph.isValidFontUrl = local;
+}
+
 /**
  * The globals that tell draw.io's viewer where its own files are, all under
  * `webappBase` (absolute, ending in "/"), set before the viewer loads. Its
@@ -486,13 +532,15 @@ function loadViewerScript(baseUrl) {
   viewerScript = new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = `${baseUrl}${WEBAPP}js/viewer.min.js`;
-    // Nothing draws until labels get the second pass and images are kept
-    // local. A viewer that can't have them stays failed: loading the same
-    // script again wouldn't help.
+    // Nothing draws until labels get the second pass and images and fonts
+    // are kept local. A viewer that can't have them stays failed: loading
+    // the same script again wouldn't help.
     script.onload = () => {
       try {
+        const webappBase = new URL(`${baseUrl}${WEBAPP}`, document.baseURI).href;
         hardenLabelSanitizer(window);
-        hardenImages(window, new URL(`${baseUrl}${WEBAPP}`, document.baseURI).href);
+        hardenImages(window, webappBase);
+        hardenFonts(window, webappBase);
         resolve();
       } catch (err) {
         reject(err);
