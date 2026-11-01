@@ -19,6 +19,9 @@ import {
   hardenImages,
   isLocalFontUrl,
   hardenLabelSanitizer,
+  hardenEditorFrame,
+  sameOriginWindow,
+  EDITOR_LABEL_PURIFY_CONFIG,
   localImageSrc,
   viewerPaths,
   isInlineImageSrc,
@@ -155,6 +158,7 @@ function session(overrides = {}) {
     post: (m) => log.posted.push(m),
     close: () => (log.closed += 1),
     onError: (m) => log.errors.push(m),
+    prepare: overrides.prepare,
     debounceMs: 10,
   });
   return { s, log, body: () => body };
@@ -726,6 +730,88 @@ test("the preview's caption counts the images it left out", () => {
   assert.equal(droppedImagesCaption(0), null);
   assert.equal(droppedImagesCaption(1), "1 image from the web isn’t shown in previews.");
   assert.equal(droppedImagesCaption(2), "2 images from the web aren’t shown in previews.");
+});
+
+// ---- the editor tab's labels ---------------------------------------------------
+
+test("an editor that can't be hardened never gets the diagram, and nothing it sends is saved", async () => {
+  const { s, log } = session({
+    prepare: () => {
+      throw new Error("draw.io's label sanitizer didn't load");
+    },
+  });
+  await s.handle({ event: "init" });
+  assert.deepEqual(log.posted, []);
+  assert.match(log.errors[0], /can't be opened safely: draw.io's label sanitizer didn't load/);
+  await s.handle({ event: "autosave", xml: "<empty/>" });
+  await s.handle({ event: "save", xml: "<empty/>" });
+  await s.flush();
+  await wait(30);
+  assert.deepEqual(log.written, []);
+  await s.handle({ event: "exit" });
+  assert.equal(log.closed, 1);
+});
+
+test("init hardens the editor before the diagram is sent", async () => {
+  const order = [];
+  const { s, log } = session({ prepare: () => order.push("prepare") });
+  await s.handle({ event: "init" });
+  assert.deepEqual(order, ["prepare"]);
+  assert.equal(log.posted.length, 1);
+});
+
+test("the editor's labels are drawn through the strict pass, and edited through draw.io's alone", () => {
+  const { win, calls } = fakeLabelWindow();
+  hardenLabelSanitizer(win, EDITOR_LABEL_PURIFY_CONFIG, { skipEditing: true });
+  assert.equal(win.Graph.sanitizeHtml("<b>x</b>"), "strict(drawio(<b>x</b>))");
+  assert.equal(win.Graph.sanitizeHtml("<b>x</b>", false), "strict(drawio(<b>x</b>))");
+  assert.equal(calls.sanitize[0].config, EDITOR_LABEL_PURIFY_CONFIG);
+  // The cell editor's value is what draw.io saves as the label.
+  assert.equal(win.Graph.sanitizeHtml("<a href='x' class='c'>x</a>", true), "drawio(<a href='x' class='c'>x</a>)");
+  assert.equal(calls.sanitize.length, 2);
+});
+
+test("the preview's pass still cleans what the viewer edits", () => {
+  const { win } = fakeLabelWindow();
+  hardenLabelSanitizer(win);
+  assert.equal(win.Graph.sanitizeHtml("x", true), "strict(drawio(x))");
+});
+
+test("the editor's pass is the preview's plus links to safe places", () => {
+  const { ALLOWED_TAGS, ALLOWED_ATTR, ALLOWED_URI_REGEXP } = EDITOR_LABEL_PURIFY_CONFIG;
+  assert.deepEqual(ALLOWED_TAGS, [...LABEL_PURIFY_CONFIG.ALLOWED_TAGS, "a"]);
+  assert.deepEqual(ALLOWED_ATTR, [...LABEL_PURIFY_CONFIG.ALLOWED_ATTR, "href"]);
+  assert.equal(EDITOR_LABEL_PURIFY_CONFIG.ALLOW_DATA_ATTR, false);
+  for (const attr of ["class", "id", "title", "xlink:href", "srcset", "formaction"]) assert.ok(!ALLOWED_ATTR.includes(attr), attr);
+  for (const href of ["https://example.com", "http://example.com", "mailto:a@b.c", "#top", "data:page/id,abc", "data:action/json,{}"]) {
+    assert.ok(ALLOWED_URI_REGEXP.test(href), href);
+  }
+  for (const href of ["javascript:alert(1)", "data:text/html,<b>", "vbscript:x", "file:///etc/passwd", "//evil.example", "relative/path"]) {
+    assert.ok(!ALLOWED_URI_REGEXP.test(href), href);
+  }
+});
+
+test("only a frame the app can reach is hardened", () => {
+  const { win, calls } = fakeLabelWindow();
+  win.document = {};
+  const original = win.Graph.sanitizeHtml;
+  hardenEditorFrame({ contentWindow: win });
+  assert.notEqual(win.Graph.sanitizeHtml, original);
+  assert.equal(win.Graph.sanitizeHtml("x", true), "drawio(x)");
+  assert.equal(calls.factory.length, 1);
+
+  // A cross-origin frame (desktop's localhost server) throws on access.
+  const crossOrigin = {
+    get document() {
+      throw new Error("SecurityError");
+    },
+  };
+  assert.equal(sameOriginWindow({ contentWindow: crossOrigin }), null);
+  assert.doesNotThrow(() => hardenEditorFrame({ contentWindow: crossOrigin }));
+  assert.equal(sameOriginWindow({ contentWindow: null }), null);
+
+  // Same origin but draw.io's sanitizer is missing: refuse.
+  assert.throws(() => hardenEditorFrame({ contentWindow: { document: {}, Graph: {} } }), /sanitizer didn't load/);
 });
 
 const APP_PAGE = "http://127.0.0.1:4100/";

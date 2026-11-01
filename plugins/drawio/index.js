@@ -86,7 +86,9 @@ export function countDrawioBlocksBefore(body, pos) {
  * on an explicit save, and {event:"exit"} to leave.
  *
  * DOM-free so it can be tested: `post` sends to the iframe, `close` closes
- * the tab, `onError`/`onSaved` report save outcomes. Autosaves are
+ * the tab, `onError`/`onSaved` report save outcomes. `prepare` runs on
+ * `init`, before the diagram is sent; when it throws, the diagram is never
+ * loaded and nothing the editor sends is saved. Autosaves are
  * debounced; `flush()` saves a pending one right away (tab closing or
  * unmounting — switching tabs unmounts too, so nothing is ever dropped).
  */
@@ -98,9 +100,13 @@ export function createEditorSession({
   close,
   onError,
   onSaved = () => {},
+  prepare = () => {},
   debounceMs = AUTOSAVE_DEBOUNCE_MS,
 }) {
   let pending = null;
+  // Set when `prepare` failed: the editor holds an empty diagram, which must
+  // never replace the block.
+  let refused = false;
   // The body is read once up front, and `init` waits for it rather than
   // racing it.
   const initialXml = readBody().then((body) => extractDrawioBlockAt(body, index));
@@ -126,6 +132,13 @@ export function createEditorSession({
   const handle = async (msg) => {
     if (!msg || typeof msg !== "object") return;
     if (msg.event === "init") {
+      try {
+        prepare();
+      } catch (err) {
+        refused = true;
+        onError(`The diagram editor can't be opened safely: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
       let xml = "";
       try {
         xml = await initialXml;
@@ -133,6 +146,8 @@ export function createEditorSession({
         onError(`Couldn't read the diagram: ${err instanceof Error ? err.message : String(err)}`);
       }
       post({ action: "load", xml, autosave: 1 });
+    } else if (refused) {
+      if (msg.event === "exit") close();
     } else if (msg.event === "autosave" && msg.xml) {
       if (pending) clearTimeout(pending.timer);
       const xml = msg.xml;
@@ -248,12 +263,27 @@ export function isInlineImageSrc(src) {
 }
 
 /**
- * Wraps `win.Graph.sanitizeHtml` (once) so its output gets the second pass.
- * Every label, tooltip and the publish export go through it. Throws when
- * draw.io's sanitizer or DOMPurify is missing or unsupported, so a viewer
- * that can't clean labels never draws.
+ * The editor tab's second pass: the preview's, plus links. A label's link
+ * stays clickable in the editor when it goes to the web, an email address,
+ * an anchor, or one of draw.io's own page and action links.
  */
-export function hardenLabelSanitizer(win) {
+export const EDITOR_LABEL_PURIFY_CONFIG = {
+  ...LABEL_PURIFY_CONFIG,
+  ALLOWED_TAGS: [...LABEL_PURIFY_CONFIG.ALLOWED_TAGS, "a"],
+  ALLOWED_ATTR: [...LABEL_PURIFY_CONFIG.ALLOWED_ATTR, "href"],
+  ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|#|data:(?:page\/id|action\/json),)/i,
+};
+
+/**
+ * Wraps `win.Graph.sanitizeHtml` (once) so its output gets the second pass
+ * with `config`. Every label, tooltip and the publish export go through it.
+ * With `skipEditing`, a call for the cell editor (`editing` true), whose
+ * result draw.io saves as the label, gets draw.io's sanitizer alone, so
+ * editing a label never drops its markup. Throws when draw.io's sanitizer or
+ * DOMPurify is missing or unsupported, so a viewer that can't clean labels
+ * never draws.
+ */
+export function hardenLabelSanitizer(win, config = LABEL_PURIFY_CONFIG, { skipEditing = false } = {}) {
   const Graph = win.Graph;
   const original = Graph?.sanitizeHtml;
   if (typeof original !== "function") throw new Error("draw.io's label sanitizer didn't load");
@@ -266,10 +296,37 @@ export function hardenLabelSanitizer(win) {
     if (node.nodeName?.toUpperCase() === "IMG" && !isInlineImageSrc(node.getAttribute("src"))) node.remove();
   });
   const strict = function (value, editing) {
-    return purify.sanitize(original.call(this, value, editing), LABEL_PURIFY_CONFIG);
+    const cleaned = original.call(this, value, editing);
+    return skipEditing && editing ? cleaned : purify.sanitize(cleaned, config);
   };
   strict.mahfouzStrict = true;
   Graph.sanitizeHtml = strict;
+}
+
+/**
+ * The editor iframe's window when the app can reach into it, or null. On
+ * the web the editor is served from the app's own origin (by the service
+ * worker, which a frame sandboxed without allow-same-origin bypasses), so a
+ * gap in draw.io's sanitizer would run as the app: its labels get the
+ * editor pass. On desktop it's a separate localhost origin, already apart
+ * from the app, and out of reach.
+ */
+export function sameOriginWindow(frame) {
+  try {
+    const win = frame.contentWindow;
+    // Reading a cross-origin frame's document throws.
+    return win && win.document ? win : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Hardens the editor iframe's labels when it shares the app's origin;
+ * throws as `hardenLabelSanitizer` does, so the diagram is never loaded
+ * into an editor that can't clean it. */
+export function hardenEditorFrame(frame) {
+  const win = sameOriginWindow(frame);
+  if (win) hardenLabelSanitizer(win, EDITOR_LABEL_PURIFY_CONFIG, { skipEditing: true });
 }
 
 // ---- images in shapes ------------------------------------------------------
@@ -688,6 +745,7 @@ function createEditorTab(host) {
         writeBody: ctx.writeBody,
         post: (msg) => frame.contentWindow?.postMessage(JSON.stringify(msg), "*"),
         close: ctx.close,
+        prepare: () => hardenEditorFrame(frame),
         // draw.io's own UI has already said "saved", so a failure must be
         // impossible to miss: shown above the editor, and in the console.
         onError(message) {
