@@ -148,7 +148,7 @@ function session(overrides = {}) {
   let body = overrides.body ?? twoBlocks;
   const s = createEditorSession({
     index: overrides.index ?? 1,
-    readBody: async () => body,
+    readBody: overrides.readBody ?? (async () => body),
     writeBody:
       overrides.writeBody ??
       (async (next) => {
@@ -748,6 +748,29 @@ test("an editor that can't be hardened never gets the diagram, and nothing it se
   await s.flush();
   await wait(30);
   assert.deepEqual(log.written, []);
+  await s.handle({ event: "exit" });
+  assert.equal(log.closed, 1);
+});
+
+test("an editor whose note can't be read never gets an empty diagram, and nothing it sends is saved", async () => {
+  let reads = 0;
+  const { s, log, body } = session({
+    readBody: async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("folder access lapsed");
+      return twoBlocks;
+    },
+  });
+  await s.handle({ event: "init" });
+  assert.deepEqual(log.posted, []);
+  assert.match(log.errors[0], /Couldn't read the diagram: folder access lapsed/);
+  // A later read would succeed, so a save that got through would replace the block.
+  await s.handle({ event: "autosave", xml: "<empty/>" });
+  await wait(30);
+  await s.handle({ event: "save", xml: "<empty/>" });
+  await s.flush();
+  assert.deepEqual(log.written, []);
+  assert.equal(body(), twoBlocks);
   await s.handle({ event: "exit" });
   assert.equal(log.closed, 1);
 });

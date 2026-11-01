@@ -87,8 +87,9 @@ export function countDrawioBlocksBefore(body, pos) {
  *
  * DOM-free so it can be tested: `post` sends to the iframe, `close` closes
  * the tab, `onError`/`onSaved` report save outcomes. `prepare` runs on
- * `init`, before the diagram is sent; when it throws, the diagram is never
- * loaded and nothing the editor sends is saved. Autosaves are
+ * `init`, before the diagram is sent; when it throws, or the note can't be
+ * read, the diagram is never loaded and nothing the editor sends is saved,
+ * so an empty editor can't save over the block. Autosaves are
  * debounced; `flush()` saves a pending one right away (tab closing or
  * unmounting — switching tabs unmounts too, so nothing is ever dropped).
  */
@@ -104,12 +105,16 @@ export function createEditorSession({
   debounceMs = AUTOSAVE_DEBOUNCE_MS,
 }) {
   let pending = null;
-  // Set when `prepare` failed: the editor holds an empty diagram, which must
-  // never replace the block.
+  // Set when `prepare` failed or the first read did: the editor holds an
+  // empty diagram, which must never replace the block.
   let refused = false;
   // The body is read once up front, and `init` waits for it rather than
-  // racing it.
-  const initialXml = readBody().then((body) => extractDrawioBlockAt(body, index));
+  // racing it. A failure is handled there; this keeps it from being reported
+  // as unhandled before `init` arrives.
+  const initialXml = Promise.resolve()
+    .then(readBody)
+    .then((body) => extractDrawioBlockAt(body, index));
+  initialXml.catch(() => {});
 
   const save = async (xml) => {
     try {
@@ -139,11 +144,13 @@ export function createEditorSession({
         onError(`The diagram editor can't be opened safely: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
-      let xml = "";
+      let xml;
       try {
         xml = await initialXml;
       } catch (err) {
+        refused = true;
         onError(`Couldn't read the diagram: ${err instanceof Error ? err.message : String(err)}`);
+        return;
       }
       post({ action: "load", xml, autosave: 1 });
     } else if (refused) {
