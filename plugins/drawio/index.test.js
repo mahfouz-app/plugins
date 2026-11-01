@@ -15,7 +15,9 @@ import {
   DROPPED_IMAGE_ATTR,
   DROPPED_IMAGE_TITLE,
   exportDiagramSvg,
+  hardenFonts,
   hardenImages,
+  isLocalFontUrl,
   hardenLabelSanitizer,
   localImageSrc,
   viewerPaths,
@@ -724,4 +726,60 @@ test("the preview's caption counts the images it left out", () => {
   assert.equal(droppedImagesCaption(0), null);
   assert.equal(droppedImagesCaption(1), "1 image from the web isn’t shown in previews.");
   assert.equal(droppedImagesCaption(2), "2 images from the web aren’t shown in previews.");
+});
+
+const APP_PAGE = "http://127.0.0.1:4100/";
+
+test("only an inline font or one of the plugin's own files counts as local", () => {
+  for (const url of [
+    "data:font/woff2;base64,AAAA",
+    `${WEBAPP_BASE}fonts/a.woff2`,
+    "mahfouz/drawio/webapp/drawio-31.4.6/src/main/webapp/fonts/a.woff2",
+  ]) {
+    assert.equal(isLocalFontUrl(url, APP_PAGE, WEBAPP_BASE), true, url);
+  }
+  for (const url of [
+    "https://fonts.googleapis.com/css?family=Architects+Daughter",
+    "https://tracker.example/f.woff2",
+    "http://127.0.0.1:4100/other/font.woff2",
+    "fonts/a.woff2",
+    "//tracker.example/f.woff2",
+    " https://tracker.example/f.woff2",
+    "ht\ttps://tracker.example/f.woff2",
+    `${WEBAPP_BASE}../../../../../../evil.woff2`,
+    "",
+    null,
+  ]) {
+    assert.equal(isLocalFontUrl(url, APP_PAGE, WEBAPP_BASE), false, String(url));
+  }
+});
+
+function fakeFontWindow() {
+  const checked = [];
+  const original = (url) => {
+    checked.push(url);
+    return !/^file:/i.test(url);
+  };
+  return { win: { Graph: { isValidFontUrl: original }, document: { baseURI: APP_PAGE } }, checked };
+}
+
+test("draw.io's font check refuses a remote font and still runs its own checks", () => {
+  const { win, checked } = fakeFontWindow();
+  hardenFonts(win, WEBAPP_BASE);
+  // fontSource=… (a Google font), data-font-src and extFonts all ask here.
+  assert.equal(win.Graph.isValidFontUrl("https://fonts.googleapis.com/css?family=Architects+Daughter"), false);
+  assert.deepEqual(checked, [], "a remote font never reaches draw.io's check");
+  assert.equal(win.Graph.isValidFontUrl("data:font/woff2;base64,AAAA"), true);
+  assert.equal(win.Graph.isValidFontUrl(`${WEBAPP_BASE}fonts/a.woff2`), true);
+  assert.deepEqual(checked, ["data:font/woff2;base64,AAAA", `${WEBAPP_BASE}fonts/a.woff2`]);
+});
+
+test("fonts are hardened once, and a viewer without the font check fails instead of drawing", () => {
+  const { win } = fakeFontWindow();
+  hardenFonts(win, WEBAPP_BASE);
+  const local = win.Graph.isValidFontUrl;
+  hardenFonts(win, WEBAPP_BASE);
+  assert.equal(win.Graph.isValidFontUrl, local);
+  assert.throws(() => hardenFonts({}, WEBAPP_BASE), /font check didn't load/);
+  assert.throws(() => hardenFonts({ Graph: {} }, WEBAPP_BASE), /font check didn't load/);
 });
