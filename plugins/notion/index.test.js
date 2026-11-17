@@ -18,10 +18,13 @@ import {
   notionId,
   notionIdFromUrl,
   safeUrl,
+  stableHash,
 } from "./index.js";
 
 const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/workspace.json", import.meta.url), "utf8"));
 const ids = Object.fromEntries(Object.entries(FIXTURE.ids).map(([k, v]) => [k, notionId(v)]));
+/** An attachment's ref: a hash of where it is, `block:<id>` or `property:<page>:<prop>:<index>`. */
+const fileRef = (where) => `f-${stableHash(where)}`;
 const B = (n) => `b0000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const json = { "content-type": "application/json" };
 const ok = (body) => ({ status: 200, headers: json, body });
@@ -85,12 +88,74 @@ function fakeClock() {
   return clock;
 }
 
-async function runImport({ overrides = {}, options = { comments: true }, signal = new AbortController().signal, onProgress } = {}) {
+/**
+ * The app's side of a streaming import, simplified: `scan`, then `run` with
+ * every root picked (or `roots`), each batch collected. `resume`: a cursor
+ * (or `{ cursor: null }`) and the source ids already in the vault.
+ */
+async function streamImport(importer, ctx, { roots, resume = null, written = [], stopAfter = Infinity } = {}) {
+  const scan = await importer.scan(ctx);
+  const batches = [];
+  const isWritten = new Set(written);
+  let stopped = false;
+  await importer.run({
+    ...ctx,
+    roots: roots ?? scan.roots.map((r) => r.sourceId),
+    resume,
+    isWritten: (id) => isWritten.has(id),
+    emit: async (batch) => {
+      if (stopped) throw Object.assign(new Error("stopped"), { name: "ImportStoppedError" });
+      assert.doesNotThrow(() => JSON.stringify(batch.cursor));
+      batches.push(batch);
+      if (batches.filter((b) => b.pages.length > 0).length >= stopAfter) stopped = true;
+    },
+    flush: async () => {
+      if (stopped) throw Object.assign(new Error("stopped"), { name: "ImportStoppedError" });
+    },
+  });
+  return { scan, batches };
+}
+
+/** The batches as a nested plan (pages under their parent, a database's rows its children), as the app writes them. */
+function planOf(scan, batches) {
+  const byId = new Map();
+  const pages = [];
+  const order = [];
+  for (const b of batches) {
+    for (const node of b.pages) {
+      const { parent, hasChildren, ...rest } = node;
+      const known = byId.get(node.sourceId);
+      // Emitted again on a resume (a database): kept once.
+      if (known) continue;
+      const page = { ...rest, children: [] };
+      byId.set(node.sourceId, page);
+      order.push({ page, parent });
+    }
+  }
+  for (const { page, parent } of order) {
+    if (parent === null) pages.push(page);
+    else if (byId.has(parent)) byId.get(parent).children.push(page);
+    else pages.push(page);
+  }
+  const people = [...scan.people];
+  for (const b of batches) for (const p of b.people ?? []) if (!people.some((x) => x.id === p.id)) people.push(p);
+  return {
+    version: 1,
+    pages,
+    attachments: batches.flatMap((b) => b.attachments),
+    people,
+    warnings: [...scan.warnings, ...batches.flatMap((b) => b.warnings ?? [])],
+    links: Object.assign({}, ...batches.map((b) => b.links ?? {})),
+    closed: batches.flatMap((b) => b.closed ?? []),
+  };
+}
+
+async function runImport({ overrides = {}, options = { comments: true }, signal = new AbortController().signal, onProgress, roots, resume, written, stopAfter } = {}) {
   const clock = fakeClock();
   const http = fakeHttp(overrides, { clock });
   const progress = [];
   const importer = createNotionImporter({ sleep: clock.sleep, now: clock.now, timeZone: "UTC" });
-  const plan = await importer.prepare({
+  const ctx = {
     http,
     signal,
     options,
@@ -98,8 +163,9 @@ async function runImport({ overrides = {}, options = { comments: true }, signal 
       progress.push(detail);
       onProgress?.(detail, percent);
     },
-  });
-  return { plan, http, clock, progress, importer };
+  };
+  const { scan, batches } = await streamImport(importer, ctx, { roots, resume, written, stopAfter });
+  return { plan: planOf(scan, batches), scan, batches, http, clock, progress, importer };
 }
 
 const find = (pages, title) => {
@@ -210,7 +276,8 @@ function assertValidPlan(plan, { outside = false } = {}) {
     for (const m of t.matchAll(REF_RE)) {
       const [, , , kind, id] = m;
       assert.match(id, REF_ID_RE);
-      if (kind === "page") assert.ok(outside || sourceIds.has(id), `page ref ${id} is imported`);
+      // A page the import doesn't write comes with its Notion URL to fall back on.
+      if (kind === "page") assert.ok(outside || sourceIds.has(id) || /^https:\/\/www\.notion\.so\//.test(plan.links?.[id]?.url ?? ""), `page ref ${id} is imported or has a fallback`);
       else if (kind === "file") assert.ok(files.has(id), `file ref ${id} is listed`);
       else if (kind === "person") assert.ok(people.has(id), `person ref ${id} is listed`);
       else assert.fail(`unknown reference kind ${kind}`);
@@ -232,7 +299,9 @@ test("activate registers the Notion importer, or explains why it can't", () => {
     ["page", "text", undefined],
     ["comments", "switch", true],
   ]);
-  assert.equal(typeof imp.prepare, "function");
+  assert.equal(imp.apiVersion, 2);
+  assert.equal(typeof imp.scan, "function");
+  assert.equal(typeof imp.run, "function");
 
   const toasts = [];
   activate({ toast: (m, kind) => toasts.push([m, kind]) });
@@ -420,7 +489,7 @@ test("cancelling stops the import between requests", async () => {
   let atAbort = null;
   const importer = createNotionImporter({ sleep: clock.sleep, now: clock.now, timeZone: "UTC" });
   await assert.rejects(
-    importer.prepare({
+    streamImport(importer, {
       http,
       signal: controller.signal,
       options: { comments: true },
@@ -506,7 +575,7 @@ test("every block type becomes Markdown, or a warning", async () => {
       "Left",
       "Right",
       `[Guide](${guide})`,
-      "![A diagram](mahfouz-import:file/file-1)",
+      `![A diagram](mahfouz-import:file/${fileRef(`block:${notionId(B(20))}`)})`,
       "[report.pdf](https://example.com/report.pdf)",
       "[https://example.com/bookmark](https://example.com/bookmark)",
       "[Video](https://example.com/embed)",
@@ -590,8 +659,8 @@ test("mentions: people and pages become references, dates local text, links link
       "[Guest Person](mahfouz-import:person/e0000000000040008000000000000001) " +
       // A database mention lands on its first data source's database.
       `[Tasks](mahfouz-import:page/${ids.ds1}) ` +
-      // A page outside the import links back to Notion.
-      "[Elsewhere](https://www.notion.so/f0000000000040008000000000000001) " +
+      // A page outside the import: a reference the app falls back to Notion's URL for.
+      "[Elsewhere](mahfouz-import:page/f0000000000040008000000000000001) " +
       "2025-10-13 04:15 2025-10-12 [x \\[repo\\]](https://github.com/x) \\@Today"
   );
   // Someone the users list didn't have is a person by the mention's name.
@@ -681,7 +750,7 @@ test("databases: one per data source, typed columns, row attributes; a linked da
   assert.equal(docs.Estimate, "3");
   assert.equal(docs.Done, "true");
   assert.equal(docs.Owner, `[Jane Doe](mahfouz-import:person/${ids.jane})`);
-  assert.equal(docs.Files, "[spec.pdf](mahfouz-import:file/file-2)");
+  assert.equal(docs.Files, `[spec.pdf](mahfouz-import:file/${fileRef(`property:${ids.row1}:fl:0`)})`);
   assert.equal(docs.Score, "6");
   assert.equal(docs.Link, "https://example.com");
   assert.equal(docs.Created, "2025-10-01T09:00:00.000Z");
@@ -713,8 +782,9 @@ test("property lists past 25 items are paged through the property endpoint", asy
   assert.ok(keys.includes(`GET /pages/${FIXTURE.ids.row1}/properties/rl?start_cursor=rel-2`));
   const related = find(plan.pages, "Write docs").attributes.rl;
   assert.equal(related.length, 26);
-  // Pages outside the import are links back to Notion; the one inside, a reference.
-  assert.equal(related[0], "https://www.notion.so/20000000000040008000000000000001");
+  // Every one a reference: a page outside the import is labelled with its Notion URL, and falls back to it.
+  assert.equal(related[0], "[https://www.notion.so/20000000000040008000000000000001](mahfouz-import:page/20000000000040008000000000000001)");
+  assert.deepEqual(plan.links["20000000000040008000000000000001"], { url: "https://www.notion.so/20000000000040008000000000000001" });
   assert.equal(related[25], `[Plan launch](mahfouz-import:page/${ids.row2})`);
 });
 
@@ -871,13 +941,113 @@ test("without the user-info capability, people come from mentions and comments",
   assert.equal(plan.people.find((p) => p.id === ids.bob).email, undefined);
 });
 
+// ---- streaming and resuming
+
+/** The source ids of every page the batches hold, in emit order. */
+const emitted = (batches) => batches.flatMap((b) => b.pages.map((p) => p.sourceId));
+
+test("streaming: pages go parent first, one emit each, with a JSON cursor; a database closes after its rows", async () => {
+  const { batches, scan } = await runImport();
+  assert.deepEqual(
+    scan.roots.map((r) => r.kind),
+    scan.roots.map((r) => (r.sourceId === ids.ds1 || r.sourceId === ids.ds2 ? "database" : "page"))
+  );
+  const seen = new Set();
+  for (const b of batches) {
+    assert.ok(b.pages.length <= 1);
+    assert.ok(JSON.stringify(b.cursor).length < 1024 * 1024);
+    for (const p of b.pages) {
+      assert.ok(p.parent === null || seen.has(p.parent), `${p.title}'s parent comes first`);
+      assert.equal(typeof p.hasChildren, "boolean");
+      seen.add(p.sourceId);
+    }
+  }
+  // Nothing is emitted twice in one run.
+  assert.equal(new Set(emitted(batches)).size, emitted(batches).length);
+  // Each data source closes once, after its last row.
+  for (const ds of [ids.ds1, ids.ds2]) {
+    const at = batches.findIndex((b) => b.closed?.includes(ds));
+    assert.ok(at >= 0, "closed");
+    const rows = batches.flatMap((b, i) => b.pages.filter((p) => p.parent === ds).map(() => i));
+    assert.ok(rows.every((i) => i < at));
+  }
+  // A page with sub-pages says so.
+  const plan = planOf(scan, batches);
+  for (const b of batches) for (const p of b.pages) if (find(plan.pages, p.title)?.children.length) assert.equal(p.hasChildren, true, p.title);
+});
+
+test("only the picked roots are imported, and no shared page outside them", async () => {
+  const full = await runImport();
+  const pick = full.scan.roots.find((r) => r.kind === "page");
+  const { plan, batches } = await runImport({ roots: [pick.sourceId] });
+  assert.deepEqual(plan.pages.map((p) => p.sourceId), [pick.sourceId]);
+  assert.ok(emitted(batches).length < emitted(full.batches).length);
+});
+
+/** An import stopped after `n` emits with pages, as the app keeps it: what's written, and the last cursor. */
+async function stoppedAt(n) {
+  const first = await runImport({ stopAfter: n });
+  const written = emitted(first.batches);
+  const cursor = [...first.batches].reverse().find((b) => b.pages.length > 0).cursor;
+  return { first, written, cursor };
+}
+
+test("resuming from a cursor carries on where it stopped: every page once, and no page read again", async () => {
+  const full = await runImport();
+  for (const n of [1, 3, 6, 9]) {
+    const { first, written, cursor } = await stoppedAt(n);
+    const second = await runImport({ resume: { cursor }, written });
+    const again = emitted(second.batches).filter((id) => written.includes(id));
+    // Only a database being read when it stopped is emitted again (the app matches its columns).
+    for (const id of again) assert.ok([ids.ds1, ids.ds2].includes(id), `${id} emitted again`);
+    assert.deepEqual(new Set([...written, ...emitted(second.batches)]), new Set(emitted(full.batches)), `stopped after ${n}`);
+    // A page already written isn't read again.
+    const readBlocks = (http) => http.keys().filter((k) => /^GET \/blocks\/.*\/children/.test(k));
+    for (const id of written.filter((id) => ![ids.ds1, ids.ds2].includes(id))) {
+      const page = all(planOf(first.scan, first.batches).pages).find((p) => p.sourceId === id);
+      if (page && !page.database) assert.ok(!readBlocks(second.http).some((k) => k.includes(`/blocks/${id.slice(0, 8)}`) && k.includes(id.slice(20))), `${page.title} read again`);
+    }
+  }
+});
+
+test("resuming without a cursor walks again, skipping what's written", async () => {
+  const full = await runImport();
+  const { written } = await stoppedAt(5);
+  const second = await runImport({ resume: { cursor: null }, written });
+  const again = emitted(second.batches).filter((id) => written.includes(id));
+  for (const id of again) assert.ok([ids.ds1, ids.ds2].includes(id), `${id} emitted again`);
+  assert.deepEqual(new Set([...written, ...emitted(second.batches)]), new Set(emitted(full.batches)));
+});
+
+test("a cursor from another workspace, roots or version is read as none", async () => {
+  const full = await runImport();
+  const { written, cursor } = await stoppedAt(4);
+  for (const bad of [{ ...cursor, account: "elsewhere" }, { ...cursor, roots: "x" }, { ...cursor, v: 99 }, "junk"]) {
+    const second = await runImport({ resume: { cursor: bad }, written });
+    assert.deepEqual(new Set([...written, ...emitted(second.batches)]), new Set(emitted(full.batches)));
+  }
+});
+
+test("attachment refs are the same in every run", async () => {
+  const a = await runImport();
+  const b = await runImport();
+  assert.deepEqual(a.plan.attachments.map((x) => x.ref), b.plan.attachments.map((x) => x.ref));
+  assert.equal(new Set(a.plan.attachments.map((x) => x.ref)).size, a.plan.attachments.length);
+  for (const x of a.plan.attachments) assert.match(x.ref, /^f-[0-9a-f]{32}$/);
+});
+
+test("a stopped run returns quietly once the app refuses an emit", async () => {
+  const { batches } = await runImport({ stopAfter: 2 });
+  assert.equal(batches.filter((b) => b.pages.length > 0).length, 2);
+});
+
 // ---- attachments
 
 test("attachments re-resolve an expired URL from the block or property, after prepare", async () => {
   const { plan, http } = await runImport();
   const [image, spec] = plan.attachments;
-  assert.deepEqual([image.ref, image.filenameHint], ["file-1", "diagram.png"]);
-  assert.deepEqual([spec.ref, spec.filenameHint], ["file-2", "spec.pdf"]);
+  assert.deepEqual([image.ref, image.filenameHint], [fileRef(`block:${notionId(B(20))}`), "diagram.png"]);
+  assert.deepEqual([spec.ref, spec.filenameHint], [fileRef(`property:${ids.row1}:fl:0`), "spec.pdf"]);
   const before = http.calls.length;
   assert.deepEqual(await image.resolve(), { url: "https://prod-files-secure.s3.us-west-2.amazonaws.com/ws/diagram.png?X-Amz-Signature=new", method: "GET" });
   assert.deepEqual(await spec.resolve(), { url: "https://prod-files-secure.s3.us-west-2.amazonaws.com/ws/spec.pdf?X-Amz-Signature=new", method: "GET" });

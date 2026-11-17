@@ -1,19 +1,31 @@
-// Notion import for Mahfouz (mahfouz/notion): a source in the Import
-// dialog. It only reads a Notion workspace through Notion's API and returns
-// an `ImportPlan` (api.ts): plain data the app turns into notes, `files/`
-// and `.config/attributes.md` in one commit. The plugin never writes to the
-// vault and never sees the integration token: the app keeps it in its
-// native side and attaches it (as `secret: "token"`) only to api.notion.com.
+// Notion import for Mahfouz (mahfouz/notion): a streaming source in the
+// Import dialog (the app's importer API version 2). `scan` lists the
+// top-level pages and databases shared with the integration; `run` walks the
+// ones picked and hands the app each page as it's read (`ctx.emit`), which
+// the app commits in batches. The plugin only reads Notion's API: it never
+// writes to the vault and never sees the integration token (the app keeps it
+// in its native side and attaches it, as `secret: "token"`, only to
+// api.notion.com).
 //
-// What the plan's bodies hold is ordinary Markdown with three kinds of
-// reference links the app rewrites (refs.ts in the app):
+// Resuming: every emit carries a cursor, the walk's stack of pages and
+// databases still to read (small: ids and titles). Resumed from one, the walk
+// carries on where the last committed batch left it; without one it walks
+// again from the roots, skipping what `ctx.isWritten` reports. A database
+// still being read is read again on a resume and emitted again before its
+// remaining rows, so the app matches its columns.
+//
+// Bodies hold ordinary Markdown with three kinds of reference links the app
+// rewrites (refs.ts in the app):
 //   [text](mahfouz-import:page/<id>)    a page or database of the import
 //   [text](mahfouz-import:file/<ref>)   an attachment (`![…]` embeds it)
 //   [text](mahfouz-import:person/<id>)  someone, mapped to @login or a name
 // Ids are Notion's UUIDs without dashes (32 hex digits); attachment refs are
-// `file-<n>`. Notion's own text never produces one of these: every Markdown
-// character in it is escaped, and in plain-text places (attributes,
-// comments) the `mahfouz-import:` scheme is broken with a zero-width space.
+// `f-` and a hash of where the file is (a block, or a page's property), the
+// same in every run. Every page reference comes with a fallback (`links`):
+// its Notion URL and title, for a page the import never writes. Notion's own
+// text never produces a reference: every Markdown character in it is
+// escaped, and in plain-text places (attributes, comments) the
+// `mahfouz-import:` scheme is broken with a zero-width space.
 //
 // Ship as one file: the app doesn't refresh a plugin's relative imports on
 // update until it restarts.
@@ -32,6 +44,24 @@ const PROPERTY_ITEMS_LIMIT = 25;
 const MAX_DEPTH = 40;
 /** A cached file URL this close to its expiry is fetched again. */
 const URL_FRESH_MS = 10 * 60 * 1000;
+/** The shape of the cursor this build writes; another (an older build's) is read as none. */
+const CURSOR_VERSION = 1;
+/** A cursor past this, as JSON, isn't kept (the app takes up to 1 MB): a resume then walks again. */
+const MAX_CURSOR_CHARS = 900 * 1024;
+
+/** 32 hex digits from `s` (four 32-bit FNV-1a hashes, seeded apart): an attachment ref the same in every run. */
+export function stableHash(s) {
+  let out = "";
+  for (const seed of [0x811c9dc5, 0x01000193, 0x9e3779b9, 0x85ebca6b]) {
+    let h = seed >>> 0;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    out += h.toString(16).padStart(8, "0");
+  }
+  return out;
+}
 
 // Private-use markers that never survive into the plan (stripped from
 // Notion's text on the way in): a page reference the final pass resolves
@@ -53,6 +83,8 @@ export function activate(host) {
 
 /** The importer the Import dialog lists. `deps` (tests): `sleep`, `now`, `timeZone`, `minInterval`. */
 export function createNotionImporter(deps = {}) {
+  // One pace for the scan, the run and the attachments' re-resolves.
+  const shared = { ...deps, limiter: deps.limiter ?? { nextAt: 0, chain: Promise.resolve() } };
   return {
     id: "notion",
     label: "Notion",
@@ -72,7 +104,9 @@ export function createNotionImporter(deps = {}) {
       },
       { id: "comments", label: "Include comments", hint: "Slower: one more request for every block", default: true },
     ],
-    prepare: (ctx) => new NotionImport(ctx, deps).run(),
+    apiVersion: 2,
+    scan: (ctx) => new NotionImport(ctx, shared).scan(),
+    run: (ctx) => new NotionImport(ctx, shared).run(),
   };
 }
 
@@ -108,6 +142,12 @@ export function idFromLink(link) {
     if (id && peek) id = notionId(peek[1]);
   }
   return id ? `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}` : null;
+}
+
+/** A plan id (32 hex digits) as the UUID Notion's API names it by; anything else as it is. */
+function uuid(id) {
+  const s = String(id ?? "");
+  return /^[0-9a-f]{32}$/.test(s) ? `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20)}` : s;
 }
 
 function abortError() {
@@ -394,7 +434,7 @@ class NotionImport {
     this.deps = deps;
     this.timeZone = deps.timeZone;
     this.now = deps.now ?? Date.now;
-    const limiter = { nextAt: 0, chain: Promise.resolve() };
+    const limiter = deps.limiter ?? { nextAt: 0, chain: Promise.resolve() };
     const common = { sleep: deps.sleep, now: deps.now, minInterval: deps.minInterval, limiter };
     this.api = createClient(ctx.http, { ...common, signal: ctx.signal });
     // Attachments resolve after `prepare` returned, once the user confirmed.
@@ -405,8 +445,17 @@ class NotionImport {
     this.people = new Map();
     this.attachments = [];
     this.titles = new Map();
-    this.imported = new Set();
     this.aliases = new Map();
+    this.databases = new Map();
+    this.attachmentRefs = new Set();
+    this.sentAttachments = 0;
+    this.sentPeople = new Set();
+    this.sentWarnings = new Set();
+    this.pendingLinks = new Map();
+    this.stack = [];
+    this.leftovers = false;
+    this.fromCursor = false;
+    this.stopped = false;
     this.visited = new Set();
     this.searchedPages = new Map();
     this.searchedSources = new Map();
@@ -435,10 +484,19 @@ class NotionImport {
     this.progress(`Page ${this.done} of about ${total}: ${oneLine(title) || "Untitled"}`, Math.min(99, Math.floor((this.done / total) * 100)));
   }
 
-  async run() {
+  // ---- scan and run
+
+  /**
+   * What `scan` and `run` both read first: the token, the people, and the
+   * roots (the linked page, or the shared pages and databases whose parent
+   * isn't shared), each `{ kind, sourceId, title, frame }`.
+   */
+  async discover() {
     this.progress("Checking the token…");
-    await this.api.call("GET", "/users/me");
+    const me = await this.api.call("GET", "/users/me");
     throwIfAborted(this.ctx.signal);
+    // Which workspace this is: a cursor from another one isn't resumed.
+    this.account = oneLine(me?.bot?.workspace_id ?? me?.bot?.workspace_name ?? "") || null;
 
     this.progress("Reading the workspace's people…");
     const users = await this.api.listAll("GET", "/users", { allow: [403] });
@@ -447,11 +505,15 @@ class NotionImport {
         "The integration can't read the workspace's members (it lacks the \"Read user information\" capability): people are imported by the names Notion shows, without emails."
       );
     } else for (const u of users) this.person(u);
+    if (this.includeComments) {
+      this.warn(
+        "Notion's API only gives unresolved comments, and anchors each one to a whole block: resolved threads aren't imported, and a comment on part of a block covers the whole block."
+      );
+    }
 
-    const pages = [];
     if (this.link) {
-      pages.push(...(await this.importLinked(this.link)));
-      return this.planOf(pages);
+      this.roots = [await this.linkedRoot(this.link)];
+      return;
     }
 
     this.progress("Finding the pages shared with the integration…");
@@ -461,7 +523,12 @@ class NotionImport {
       if (o.object === "page") this.searchedPages.set(notionId(o.id), o);
       else if (o.object === "data_source") {
         this.searchedSources.set(notionId(o.id), o);
-        if (o.parent?.database_id) this.databaseIds.add(notionId(o.parent.database_id));
+        const dbId = o.parent?.database_id;
+        if (dbId) {
+          this.databaseIds.add(notionId(dbId));
+          // A reference to the database lands on its (first) data source.
+          if (!this.aliases.has(notionId(dbId))) this.aliases.set(notionId(dbId), notionId(o.id));
+        }
       } else if (o.object === "database") this.databaseIds.add(notionId(o.id));
     }
     if (this.searchedPages.size === 0 && this.searchedSources.size === 0 && this.databaseIds.size === 0) {
@@ -470,38 +537,23 @@ class NotionImport {
       );
     }
     this.estimate = this.searchedPages.size;
-
-    const roots = await this.findRoots();
-    for (const root of roots) pages.push(...(await this.importRoot(root)));
-    // Anything shared that the walk didn't reach (a parent's block that
-    // couldn't be read, say) still comes in, as a root of its own.
-    for (const [id, page] of this.searchedPages) if (!this.visited.has(id)) pages.push(...(await this.importRoot({ kind: "page", object: page })));
-    for (const [id, source] of this.searchedSources) {
-      if (!this.visited.has(id)) pages.push(...(await this.importRoot({ kind: "database", id: source.parent?.database_id ?? source.id, source })));
-    }
-
-    return this.planOf(pages);
+    this.roots = (await this.findRoots()).map((root) => this.rootOf(root));
   }
 
-  /** The plan of `pages`, the import's roots. */
-  planOf(pages) {
-    if (this.includeComments && this.commentsReadable) {
-      this.warn(
-        "Notion's API only gives unresolved comments, and anchors each one to a whole block: resolved threads aren't imported, and a comment on part of a block covers the whole block."
-      );
+  /** A root of `findRoots` (or the linked page) as the scan lists it, with the frame that walks it. */
+  rootOf(root) {
+    if (root.kind === "page") {
+      const id = notionId(root.object.id);
+      const title = this.titleOf(root.object) || "Untitled";
+      return { kind: "page", sourceId: id, title, frame: { k: "page", id, parent: null, hint: title } };
     }
-    for (const p of pages) this.finish(p);
-    return {
-      version: 1,
-      pages,
-      attachments: this.attachments,
-      people: [...this.people.values()],
-      warnings: [...this.warnings],
-    };
+    const dbKey = notionId(root.id);
+    const title = this.plainTitle(root.source?.title) || root.title || "Untitled database";
+    return { kind: "database", sourceId: this.aliases.get(dbKey) ?? dbKey, title, frame: { k: "db", id: dbKey, parent: null, hint: title } };
   }
 
-  /** The page or database `link` names and everything under it, as the import's one root. */
-  async importLinked(link) {
+  /** The page or database `link` names, as the import's one root. */
+  async linkedRoot(link) {
     const id = idFromLink(link);
     if (!id) throw new Error("That isn't a Notion page link. Copy it from the page's ••• menu → Copy link.");
     this.progress("Reading the linked page…");
@@ -513,11 +565,16 @@ class NotionImport {
       if (parent === "data_source_id" || parent === "database_id") {
         this.warn("The link is to a row of a database: its properties aren't imported. Link the database to import its rows with their properties.");
       }
-      return this.importRoot({ kind: "page", object: page });
+      this.searchedPages.set(notionId(page.id), page);
+      return this.rootOf({ kind: "page", object: page });
     }
     if (!page) {
       const db = await this.api.call("GET", `/databases/${id}`, { allow: [400, 403, 404] });
-      if (db?.object === "database" && !db.in_trash && !db.archived) return this.importRoot({ kind: "database", id });
+      if (db?.object === "database" && !db.in_trash && !db.archived) {
+        const first = Array.isArray(db.data_sources) ? db.data_sources[0] : null;
+        if (first?.id) this.aliases.set(notionId(id), notionId(first.id));
+        return this.rootOf({ kind: "database", id, title: this.plainTitle(db.title) });
+      }
       found = db;
     }
     throw new Error(
@@ -525,6 +582,299 @@ class NotionImport {
         ? "The linked page is in Notion's trash."
         : "Notion hasn't shared this page with the integration. In Notion, open the page, then ••• → Connections → add the integration."
     );
+  }
+
+  /** The review's list: the roots, the people and what won't come over. */
+  async scan() {
+    await this.discover();
+    return {
+      roots: this.roots.map(({ kind, sourceId, title }) => ({ kind, sourceId, title })),
+      people: [...this.people.values()],
+      warnings: [...this.warnings],
+      ...(this.account ? { fingerprint: this.account } : {}),
+    };
+  }
+
+  /**
+   * Walks the picked roots, depth first, emitting each page as it's read.
+   * The walk is a stack of frames (`page`, `db`: a database, `src`: one of
+   * its data sources, read with its rows); the stack is the cursor.
+   */
+  async run() {
+    const ctx = this.ctx;
+    await this.discover();
+    // The scan showed these already.
+    for (const id of this.people.keys()) this.sentPeople.add(id);
+    for (const w of this.warnings) this.sentWarnings.add(w);
+
+    const picked = Array.isArray(ctx.roots) ? new Set(ctx.roots) : null;
+    const roots = this.roots.filter((r) => !picked || picked.has(r.sourceId));
+    const rootKey = roots.map((r) => r.sourceId).sort().join(",");
+    const cursor = ctx.resume?.cursor;
+    const resumable =
+      cursor && typeof cursor === "object" && cursor.v === CURSOR_VERSION && cursor.account === this.account && cursor.link === this.link && cursor.roots === rootKey && Array.isArray(cursor.stack);
+    if (resumable) {
+      this.stack = cursor.stack;
+      this.leftovers = cursor.leftovers === true;
+      this.estimate = Math.max(this.estimate, Number(cursor.estimate) || 0);
+      this.done = Number(cursor.done) || 0;
+      this.fromCursor = true;
+    } else {
+      this.stack = roots.map((r) => r.frame).reverse();
+      // Shared pages the walk doesn't reach come in as roots of their own, when every root was picked.
+      this.leftovers = !this.link && roots.length === this.roots.length;
+    }
+    this.rootKey = rootKey;
+
+    try {
+      while (this.stack.length > 0 || this.leftovers) {
+        throwIfAborted(ctx.signal);
+        if (this.stack.length === 0) {
+          this.leftovers = false;
+          this.stack = this.leftoverFrames().reverse();
+          continue;
+        }
+        const frame = this.stack[this.stack.length - 1];
+        if (frame.k === "page") await this.pageFrame(frame);
+        else if (frame.k === "db") await this.databaseFrame(frame);
+        else await this.sourceFrame(frame);
+      }
+      // What's left to say (a warning raised by the last page's children, say).
+      await this.emit([], {});
+      try {
+        await ctx.flush();
+      } catch (err) {
+        this.stopped = true;
+        throw err;
+      }
+    } catch (err) {
+      // The app stopped the run (Stop, a failed commit): nothing more to hand it.
+      if (this.stopped) return;
+      throw err;
+    }
+  }
+
+  /** The shared pages and data sources no walk reached, as root frames. */
+  leftoverFrames() {
+    const frames = [];
+    for (const [id, page] of this.searchedPages) {
+      if (!this.visited.has(id) && !this.ctx.isWritten?.(id)) frames.push({ k: "page", id, parent: null, hint: this.titleOf(page) || "Untitled" });
+    }
+    for (const [id, source] of this.searchedSources) {
+      if (this.visited.has(id) || this.ctx.isWritten?.(id)) continue;
+      const dbKey = notionId(source.parent?.database_id ?? source.id);
+      if (!frames.some((f) => f.k === "db" && f.id === dbKey)) frames.push({ k: "db", id: dbKey, parent: null, hint: this.plainTitle(source.title) });
+    }
+    return frames;
+  }
+
+  /**
+   * Hands the app `pages` with everything they need that it hasn't had:
+   * attachments, people, warnings, link fallbacks, and the cursor (`stack`:
+   * the walk's stack as of after these pages; default `this.stack`).
+   */
+  async emit(pages, { closed, stack } = {}) {
+    const attachments = this.attachments.slice(this.sentAttachments);
+    this.sentAttachments = this.attachments.length;
+    const people = [...this.people.values()].filter((p) => !this.sentPeople.has(p.id));
+    for (const p of people) this.sentPeople.add(p.id);
+    const warnings = [...this.warnings].filter((w) => !this.sentWarnings.has(w));
+    for (const w of warnings) this.sentWarnings.add(w);
+    const links = Object.fromEntries(this.pendingLinks);
+    this.pendingLinks.clear();
+    if (pages.length === 0 && !closed && attachments.length === 0 && people.length === 0 && warnings.length === 0) return;
+    const state = {
+      v: CURSOR_VERSION,
+      account: this.account,
+      link: this.link,
+      roots: this.rootKey,
+      stack: stack ?? this.stack,
+      leftovers: this.leftovers,
+      estimate: this.estimate,
+      done: this.done,
+    };
+    let cursor = JSON.parse(JSON.stringify(state));
+    if (JSON.stringify(cursor).length > MAX_CURSOR_CHARS) cursor = null;
+    const batch = { pages, attachments, cursor, estimate: Math.max(this.estimate, this.done) };
+    if (people.length > 0) batch.people = people;
+    if (warnings.length > 0) batch.warnings = warnings;
+    if (closed) batch.closed = closed;
+    if (Object.keys(links).length > 0) batch.links = links;
+    try {
+      await this.ctx.emit(batch);
+    } catch (err) {
+      this.stopped = true;
+      throw err;
+    }
+  }
+
+  // ---- the walk
+
+  /** The frames for a page's sub-pages and databases, in order. */
+  childFrames(id, render) {
+    return render.children.map((child) =>
+      child.type === "child_page"
+        ? { k: "page", id: notionId(child.id), parent: id, hint: oneLine(child.child_page?.title) || "Untitled" }
+        : { k: "db", id: notionId(child.id), parent: id, hint: oneLine(child.child_database?.title) }
+    );
+  }
+
+  /** A page (not a database row): emitted, then its sub-pages and databases pushed. */
+  async pageFrame(frame) {
+    this.stack.pop();
+    if (this.visited.has(frame.id)) return;
+    this.visited.add(frame.id);
+    const page = this.searchedPages.get(frame.id) ?? { id: uuid(frame.id) };
+    const read = await this.readPage(page, frame.hint, frame.parent);
+    this.stack.push(...read.frames.reverse());
+    if (read.node) await this.emit([read.node]);
+  }
+
+  /**
+   * A page or row read: its node (null when the app already has it: then
+   * only its children are read) and its children's frames.
+   */
+  async readPage(page, titleHint, parent, row = null) {
+    const id = notionId(page.id);
+    const title = this.titleOf(page) || oneLine(titleHint) || "Untitled";
+    this.titles.set(id, title);
+    if (this.ctx.isWritten?.(id)) {
+      // Already in the vault. Resumed from a cursor, its children are on the
+      // stack already; walking again, they're read from its blocks.
+      if (this.fromCursor) return { node: null, frames: [] };
+      const render = this.renderBody(await this.fetchTree(page.id, 0));
+      return { node: null, frames: this.childFrames(id, render) };
+    }
+    if (page.icon || page.cover) this.warn("Page icons and covers aren't imported.");
+    this.tick(title);
+    const render = this.renderBody(await this.fetchTree(page.id, 0));
+    let body = render.body;
+    if (row?.extra.length) body = [body, ...row.extra].filter(Boolean).join("\n\n");
+    const node = { sourceId: id, parent, hasChildren: render.children.length > 0, title, body, attributes: row?.attributes ?? {} };
+    if (this.includeComments) {
+      const comments = await this.commentsFor(page.id, render);
+      if (comments.length > 0) node.comments = comments;
+    }
+    return { node: this.finish(node), frames: this.childFrames(id, render) };
+  }
+
+  /** A database: replaced on the stack by its data sources, each one Mahfouz database. */
+  async databaseFrame(frame) {
+    this.stack.pop();
+    const dbKey = frame.id;
+    if (this.visited.has(dbKey)) return;
+    this.visited.add(dbKey);
+    const db = await this.readDatabase(dbKey);
+    if (db === null) {
+      this.warn(
+        `The database "${oneLine(frame.hint) || "Untitled"}" was skipped: it's a linked database (Notion's API can't read those) or it isn't shared with the integration.`
+      );
+      return;
+    }
+    if (db.in_trash || db.archived) return;
+    const dbTitle = this.plainTitle(db.title) || oneLine(frame.hint) || "Untitled database";
+    this.titles.set(dbKey, dbTitle);
+    const sources = Array.isArray(db.data_sources) ? db.data_sources : [];
+    if (sources.length > 1) this.warn(`"${dbTitle}" has ${sources.length} data sources in Notion; each became a database of its own.`);
+    const frames = [];
+    for (const [i, ref] of sources.entries()) {
+      const dsKey = notionId(ref.id);
+      if (i === 0 && !this.aliases.has(dbKey)) this.aliases.set(dbKey, dsKey);
+      frames.push({ k: "src", id: dsKey, db: dbKey, parent: frame.parent, multi: sources.length > 1, index: i, hint: oneLine(ref.name), dbTitle });
+    }
+    this.stack.push(...frames.reverse());
+  }
+
+  /** A database's object, read once per run; a data source found by search stands in for one Notion won't give. */
+  async readDatabase(dbKey) {
+    if (this.databases.has(dbKey)) return this.databases.get(dbKey);
+    let db = await this.api.call("GET", `/databases/${uuid(dbKey)}`, { allow: [403, 404] });
+    if (db === null) {
+      const source = this.searchedSources.get(dbKey);
+      if (source) db = { id: uuid(dbKey), title: source.title, data_sources: [{ id: source.id, name: this.plainTitle(source.title) }] };
+    }
+    this.databases.set(dbKey, db);
+    return db;
+  }
+
+  /**
+   * A data source: its rows read and its columns worked out, the database
+   * emitted, then each row not in the vault yet; the database is closed
+   * once its rows are all emitted. It stays on the stack until then, so a
+   * resume reads it again (and emits it again: the app matches its columns).
+   */
+  async sourceFrame(frame) {
+    const dsKey = frame.id;
+    const leave = (pending = []) => {
+      this.stack.pop();
+      this.stack.push(...pending.reverse());
+    };
+    if (this.visited.has(dsKey)) return leave();
+    this.visited.add(dsKey);
+    const source = this.searchedSources.get(dsKey) ?? (await this.api.call("GET", `/data_sources/${uuid(dsKey)}`, { allow: [403, 404] }));
+    if (!source) {
+      this.warn(`A data source of "${frame.dbTitle}" isn't shared with the integration, so it was skipped.`);
+      return leave();
+    }
+    const name = frame.multi ? this.plainTitle(source.title) || frame.hint || `${frame.dbTitle} ${frame.index + 1}` : frame.dbTitle;
+    this.titles.set(dsKey, name);
+    this.progress(`Reading the rows of ${name}…`);
+    const rows = ((await this.api.listAll("POST", `/data_sources/${uuid(dsKey)}/query`, { allow: [403, 404] })) ?? []).filter(
+      (r) => r && !r.in_trash && !r.archived && r.object !== "data_source"
+    );
+    for (const r of rows) {
+      if (!this.searchedPages.has(notionId(r.id)) && !this.ctx.isWritten?.(notionId(r.id))) this.estimate++;
+      // Known before any row is emitted: a row linking a later one is labelled with its title.
+      const title = this.titleOf(r);
+      if (title) this.titles.set(notionId(r.id), title);
+    }
+
+    // Every row's values, with long lists paged in full: the columns are final once the database is emitted.
+    const schema = Object.values(source.properties ?? {}).filter((p) => p && typeof p === "object");
+    const raw = [];
+    for (const row of rows) {
+      throwIfAborted(this.ctx.signal);
+      const values = new Map();
+      for (const pv of Object.values(row.properties ?? {})) {
+        if (pv?.id !== undefined) values.set(pv.id, await this.fullProperty(row.id, pv));
+      }
+      raw.push({ row, values });
+    }
+    const columns = this.columnsOf(schema, raw, name, dsKey);
+    const subItems = this.subItemsOf(columns, raw, name);
+    const db = await this.readDatabase(frame.db);
+    const node = {
+      sourceId: dsKey,
+      parent: frame.parent,
+      hasChildren: rows.length > 0,
+      title: name,
+      body: this.richMd(db?.description),
+      attributes: {},
+      database: { columns: columns.flatMap((c) => c.out), ...(subItems ? { subItems: { key: subItems } } : {}) },
+    };
+    const below = this.stack.slice(0, -1);
+    await this.emit([this.finish(node)]);
+
+    // The rows' sub-pages wait until the rows are all emitted.
+    const pending = [];
+    for (const { row, values } of raw) {
+      throwIfAborted(this.ctx.signal);
+      const rowId = notionId(row.id);
+      if (this.visited.has(rowId)) continue;
+      this.visited.add(rowId);
+      const attributes = {};
+      const extra = [];
+      for (const col of columns) {
+        const pv = values.get(col.prop.id);
+        if (pv !== undefined) this.cellValue(col, pv, row, attributes, extra);
+      }
+      const read = await this.readPage(row, null, dsKey, { attributes, extra });
+      pending.push(...read.frames);
+      // Resumed from here: this source again (its rows written by then are skipped), then the sub-pages found so far.
+      if (read.node) await this.emit([read.node], { stack: [...below, ...[...pending].reverse(), frame] });
+    }
+    leave(pending);
+    await this.emit([], { closed: [dsKey] });
   }
 
   // ---- the tree
@@ -591,58 +941,12 @@ class NotionImport {
     return roots;
   }
 
-  async importRoot(root) {
-    if (root.kind === "page") {
-      const page = await this.importPage(root.object, null);
-      return page ? [page] : [];
-    }
-    return this.importDatabase(root.id, null);
-  }
-
   /** A page's title: its `title`-typed property, whatever it's named. */
   titleOf(page) {
     for (const prop of Object.values(page?.properties ?? {})) {
       if (prop?.type === "title") return oneLine((prop.title ?? []).map((t) => t?.plain_text ?? "").join(""));
     }
     return null;
-  }
-
-  /**
-   * One page (or database row) and everything under it. `row`: the
-   * attributes and extra body lines a database gives it. Null when the page
-   * was already imported.
-   */
-  async importPage(page, titleHint, row = null) {
-    const id = notionId(page.id);
-    if (this.visited.has(id)) return null;
-    this.visited.add(id);
-    const title = this.titleOf(page) || oneLine(titleHint) || "Untitled";
-    this.titles.set(id, title);
-    this.imported.add(id);
-    if (page.icon || page.cover) this.warn("Page icons and covers aren't imported.");
-    this.tick(title);
-
-    const blocks = await this.fetchTree(page.id, 0);
-    const render = this.renderBody(blocks);
-    let body = render.body;
-    if (row?.extra.length) body = [body, ...row.extra].filter(Boolean).join("\n\n");
-
-    const children = [];
-    for (const child of render.children) {
-      if (child.type === "child_page") {
-        const known = this.searchedPages.get(notionId(child.id));
-        const sub = await this.importPage(known ?? { id: child.id }, child.child_page?.title);
-        if (sub) children.push(sub);
-      } else {
-        children.push(...(await this.importDatabase(child.id, child.child_database?.title)));
-      }
-    }
-    const out = { sourceId: id, title, body, attributes: row?.attributes ?? {}, children };
-    if (this.includeComments) {
-      const comments = await this.commentsFor(page.id, render);
-      if (comments.length > 0) out.comments = comments;
-    }
-    return out;
   }
 
   /** A block's children, recursively, each with `children` set (a synced copy's from its original). */
@@ -689,96 +993,8 @@ class NotionImport {
 
   // ---- databases
 
-  /** A database: one Mahfouz database (a page whose children are rows) per data source. */
-  async importDatabase(databaseId, titleHint) {
-    const dbKey = notionId(databaseId);
-    if (this.visited.has(dbKey)) return [];
-    this.visited.add(dbKey);
-    let db = await this.api.call("GET", `/databases/${databaseId}`, { allow: [403, 404] });
-    if (db === null) {
-      // A data source found by search whose id stood in for its database.
-      const source = this.searchedSources.get(dbKey);
-      if (source) db = { id: databaseId, title: source.title, data_sources: [{ id: source.id, name: this.plainTitle(source.title) }] };
-    }
-    if (db === null) {
-      this.warn(
-        `The database "${oneLine(titleHint) || "Untitled"}" was skipped: it's a linked database (Notion's API can't read those) or it isn't shared with the integration.`
-      );
-      return [];
-    }
-    if (db.in_trash || db.archived) return [];
-    const dbTitle = this.plainTitle(db.title) || oneLine(titleHint) || "Untitled database";
-    this.titles.set(dbKey, dbTitle);
-    const sources = Array.isArray(db.data_sources) ? db.data_sources : [];
-    const out = [];
-    for (const [i, ref] of sources.entries()) {
-      const dsKey = notionId(ref.id);
-      if (this.visited.has(dsKey)) continue;
-      this.visited.add(dsKey);
-      const source = this.searchedSources.get(dsKey) ?? (await this.api.call("GET", `/data_sources/${ref.id}`, { allow: [403, 404] }));
-      if (!source) {
-        this.warn(`A data source of "${dbTitle}" isn't shared with the integration, so it was skipped.`);
-        continue;
-      }
-      const name = sources.length > 1 ? this.plainTitle(source.title) || oneLine(ref.name) || `${dbTitle} ${i + 1}` : dbTitle;
-      if (out.length === 0) this.aliases.set(dbKey, dsKey);
-      out.push(await this.importDataSource(source, name, db));
-    }
-    if (sources.length > 1) {
-      this.warn(`"${dbTitle}" has ${sources.length} data sources in Notion; each became a database of its own.`);
-    }
-    return out;
-  }
-
   plainTitle(rich) {
     return oneLine((rich ?? []).map((t) => t?.plain_text ?? "").join(""));
-  }
-
-  async importDataSource(source, name, db) {
-    const id = notionId(source.id);
-    this.titles.set(id, name);
-    this.imported.add(id);
-    this.progress(`Reading the rows of ${name}…`);
-    const rows = ((await this.api.listAll("POST", `/data_sources/${source.id}/query`, { allow: [403, 404] })) ?? []).filter(
-      (r) => r && !r.in_trash && !r.archived && r.object !== "data_source"
-    );
-    for (const r of rows) if (!this.searchedPages.has(notionId(r.id))) this.estimate++;
-
-    // Every row's values, with long lists paged in full.
-    const schema = Object.values(source.properties ?? {}).filter((p) => p && typeof p === "object");
-    const raw = [];
-    for (const row of rows) {
-      throwIfAborted(this.ctx.signal);
-      const values = new Map();
-      for (const pv of Object.values(row.properties ?? {})) {
-        if (pv?.id !== undefined) values.set(pv.id, await this.fullProperty(row.id, pv));
-      }
-      raw.push({ row, values });
-    }
-
-    const columns = this.columnsOf(schema, raw, name, id);
-    const children = [];
-    for (const { row, values } of raw) {
-      const attributes = {};
-      const extra = [];
-      for (const col of columns) {
-        const pv = values.get(col.prop.id);
-        if (pv === undefined) continue;
-        this.cellValue(col, pv, row, attributes, extra);
-      }
-      const page = await this.importPage(row, null, { attributes, extra });
-      if (page) children.push(page);
-    }
-    const description = this.richMd(db?.description);
-    const subItems = this.subItemsOf(columns, raw, name);
-    return {
-      sourceId: id,
-      title: name,
-      body: description,
-      attributes: {},
-      children,
-      database: { columns: columns.flatMap((c) => c.out), ...(subItems ? { subItems: { key: subItems } } : {}) },
-    };
   }
 
   /** A property value with every item, fetched from the property endpoint when the page object truncated it. */
@@ -1100,7 +1316,11 @@ class NotionImport {
 
   /** Records a Notion-hosted file; returns its ref. `locator` says how to fetch a fresh URL. */
   addAttachment(locator, file, name) {
-    const ref = `file-${this.attachments.length + 1}`;
+    const where = locator.kind === "block" ? `block:${notionId(locator.blockId)}` : `property:${notionId(locator.pageId)}:${locator.propId}:${locator.index}`;
+    const ref = `f-${stableHash(where)}`;
+    // Listed once, however often a page names it.
+    if (this.attachmentRefs.has(ref)) return ref;
+    this.attachmentRefs.add(ref);
     const url = file?.file?.url ?? file?.file_upload?.url ?? null;
     const expiry = Date.parse(file?.file?.expiry_time ?? file?.file_upload?.expiry_time ?? "");
     const hint = oneLine(name) || (url ? nameFromUrl(url) : "") || "file";
@@ -1138,7 +1358,7 @@ class NotionImport {
     }
     if (f?.type === "file" || f?.type === "file_upload") {
       const ref = this.addAttachment(locator, f, f.name);
-      const text = label || escapeText(oneLine(f.name) || this.attachments[this.attachments.length - 1].filenameHint);
+      const text = label || escapeText(oneLine(f.name) || this.attachments.find((a) => a.ref === ref)?.filenameHint || "file");
       return `${embed ? "!" : ""}[${text}](mahfouz-import:file/${ref})`;
     }
     return "";
@@ -1482,44 +1702,49 @@ class NotionImport {
     return out;
   }
 
-  // ---- the last pass
+  // ---- references, as a page is emitted
 
-  /** Resolves the plan's page references and fills in titles, once every page is known. */
-  finish(page) {
-    page.body = this.fixRefs(page.body, "body");
-    for (const [k, v] of Object.entries(page.attributes)) {
-      page.attributes[k] = Array.isArray(v) ? v.map((s) => this.fixRefs(s, "plain")) : this.fixRefs(v, "plain");
+  /** `node` with its page references resolved and its titles filled in; returns it. */
+  finish(node) {
+    node.body = this.fixRefs(node.body, "body");
+    for (const [k, v] of Object.entries(node.attributes)) {
+      node.attributes[k] = Array.isArray(v) ? v.map((s) => this.fixRefs(s, "plain")) : this.fixRefs(v, "plain");
     }
-    for (const c of page.comments ?? []) for (const e of c.entries) e.text = this.fixRefs(e.text, "plain");
-    for (const child of page.children) this.finish(child);
+    for (const c of node.comments ?? []) for (const e of c.entries) e.text = this.fixRefs(e.text, "plain");
+    return node;
   }
 
+  /** The best title known for a page or database now, or null. */
+  knownTitle(id) {
+    const target = this.aliases.get(id) ?? id;
+    return this.titles.get(target) ?? this.titles.get(id) ?? this.searchTitle(target) ?? this.searchTitle(id) ?? null;
+  }
+
+  /**
+   * `text` with each page reference pointed at what the import writes for
+   * it (a database's first data source) and labelled with the best title
+   * known now. The app links it once that page lands; each comes with a
+   * fallback for a page the import never writes: its Notion URL and title.
+   */
   fixRefs(text, context) {
-    if (typeof text !== "string" || !/[\uE000-\uE002]/.test(text)) return text;
-    const resolve = (id) => this.aliases.get(id) ?? id;
-    const knownTitle = (id) => this.titles.get(resolve(id)) ?? this.titles.get(id) ?? this.searchTitle(id) ?? null;
-    const fill = (id) => {
-      const title = knownTitle(id) ?? "Untitled";
-      return context === "body" ? escapeText(title) : plainLabel(title);
+    if (typeof text !== "string" || !/[-]/.test(text)) return text;
+    const label = (id) => {
+      const title = this.knownTitle(id);
+      if (title) return context === "body" ? escapeText(title) : plainLabel(title);
+      return /^[0-9a-f]{32}$/.test(id) ? (context === "body" ? escapeText(`https://www.notion.so/${id}`) : `https://www.notion.so/${id}`) : "Untitled";
     };
     return text
-      .replace(/\uE002\[((?:\\.|[^\\[\]\n])*)\]\(mahfouz-import:page\/([0-9a-z-]{1,64})\)/g, (_, label, id) => {
-        const target = resolve(id);
-        // A label that is only a title still to fill in.
-        const bare = /^\uE000([0-9a-z-]{1,64})\uE001$/.exec(label);
-        if (this.imported.has(target)) return `[${bare ? fill(bare[1]) : label}](mahfouz-import:page/${target})`;
-        // Not part of the import: a link back to Notion in a body; elsewhere
-        // the title, or that link's URL when the title isn't known.
-        const url = /^[0-9a-f]{32}$/.test(id) ? `https://www.notion.so/${id}` : null;
-        const title = bare ? knownTitle(bare[1]) : null;
-        if (context === "body") {
-          const text = bare ? (title ? escapeText(title) : url && escapeText(url)) : label;
-          return url ? `[${text}](${url})` : text || "Untitled";
-        }
-        if (bare) return title ? plainText(oneLine(title)) : url ?? "Untitled";
-        return `[${label}](mahfouz-import:page/${target})`;
+      .replace(/\[((?:\\.|[^\\[\]\n])*)\]\(mahfouz-import:page\/([0-9a-z-]{1,64})\)/g, (_, text, id) => {
+        const target = this.aliases.get(id) ?? id;
+        const title = this.knownTitle(id);
+        const fallback = {};
+        if (/^[0-9a-f]{32}$/.test(id)) fallback.url = `https://www.notion.so/${id}`;
+        if (title) fallback.title = title;
+        if (Object.keys(fallback).length > 0) this.pendingLinks.set(target, fallback);
+        const bare = /^([0-9a-z-]{1,64})$/.exec(text);
+        return `[${bare ? label(bare[1]) : text}](mahfouz-import:page/${target})`;
       })
-      .replace(/\uE000([0-9a-z-]{1,64})\uE001/g, (_, id) => fill(id))
+      .replace(/([0-9a-z-]{1,64})/g, (_, id) => label(id))
       .replace(PRIVATE_RE, "");
   }
 

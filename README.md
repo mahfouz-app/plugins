@@ -18,7 +18,7 @@ as the `mahfouz` registry. Other registries use the same layout and can be added
 | `mahfouz/slidev` | **Present** a note as a [Slidev](https://sli.dev) deck, in a tab or full screen (`Mod+Alt+Enter`), followed by its child notes (unless it has `no_slides_children: true`), with each wikilink to a note in the deck jumping to that note's first slide, styled by the vault's slides template (`.config/slides.md`) when it has one, and export it as **PowerPoint** (editable `.pptx`, which Google Slides imports) | Node.js 24.21.0 (~50 MB), then Slidev, its default theme and playwright-chromium with `npm ci` from the committed lockfile. No Node.js needed. macOS, Linux and Windows (x64 and Apple Silicon/arm64) |
 | `mahfouz/pdf` | **PDF** in the Export dialog, rendered by Slidev | Nothing of its own; depends on `mahfouz/slidev` |
 | `mahfouz/lfs` | Puts a managed `git-lfs` on git's PATH, so a vault can store media as Git LFS pointers | git-lfs 3.8.0, macOS (Apple Silicon and Intel) |
-| `mahfouz/notion` | **Notion** in the Import dialog: pages, sub-pages, databases (with typed columns and sub-items), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.27.0 |
+| `mahfouz/notion` | **Notion** in the Import dialog, written as it reads and resumable: pages, sub-pages, databases (with typed columns and sub-items), tasks, comments, mentions and files from a Notion workspace, through Notion's API with an internal integration token. Desktop only | Nothing; needs Mahfouz 0.27.0 |
 | `mahfouz/encryption` | Encrypts notes end to end with GPG, so only you and the people you choose can read them. Desktop only (macOS) | Its `git-crypt` sidecar binary (built in this repo, see below), macOS (Apple Silicon and Intel). Needs GPG and Mahfouz 0.21.0 (the first release that gives it the `note-decryptor` role, which `registry.json` grants it) |
 
 `npm test` runs the plugins' tests and the registry checker's with `node --test` (no
@@ -490,6 +490,24 @@ bodies (no title heading), attributes, children, database columns and structured
 the attachments, people and warnings. References use the `mahfouz-import:` link scheme —
 `[text](mahfouz-import:page/<id>)`, `…:file/<ref>`, `…:person/<id>` — and the app rewrites them
 into wikilinks, `/files/…` paths and `@login`s. Never emit one from your source's own text.
+
+A **streaming importer** (`apiVersion: 2`, `"mahfouz": ">=0.27.0"`) has `scan(ctx)` and
+`run(ctx)` instead of `prepare`, so pages reach the vault as they're read, and an interrupted
+import can resume:
+
+- `scan` returns `{ roots, people, warnings, fingerprint? }` quickly: the top-level pages and
+  databases (`{ sourceId, title, kind, estimate? }`) the review lets the user pick from.
+- `run` walks the picked roots (`ctx.roots`) and calls `await ctx.emit(batch)` as it goes. A batch
+  is `{ pages, attachments, people?, warnings?, closed?, links?, estimate?, cursor }`. Its pages are
+  flat `ImportNode`s (`parent` is a source id, or `null` for a root; `hasChildren`), parent first.
+  `closed` lists the databases whose rows are all emitted. `links` gives a reference's fallback (a
+  URL and title) for a page the import may never write. The app commits about 50 notes at a time.
+  `emit` rejects once the run has stopped; return then. Call `await ctx.flush()` at the end.
+- `cursor` is plain JSON (at most 1 MB) saying where the walk is. Resuming, `ctx.resume` is
+  `{ cursor }` from the last batch committed in full, or `{ cursor: null }` to walk again. Either
+  way, skip each page `ctx.isWritten(sourceId)` reports. Emit a database again before its
+  remaining rows, so the app matches its columns.
+- Attachment `ref`s and `sourceId`s must be the same in every run.
 
 - `credential: { label, helpUrl, secretName }` puts a secret field in the dialog. The value goes
   straight to the app's native side and stays in memory until the app quits; the plugin never sees
