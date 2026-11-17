@@ -770,7 +770,7 @@ class NotionImport {
       if (page) children.push(page);
     }
     const description = this.richMd(db?.description);
-    const subItems = this.subItemsOf(columns, raw);
+    const subItems = this.subItemsOf(columns, raw, name);
     return {
       sourceId: id,
       title: name,
@@ -918,11 +918,12 @@ class NotionImport {
   /**
    * The key of the self-relation column holding each row's parent (Notion's
    * "Parent item"), or null. Notion's API doesn't say which relation is the
-   * sub-items one, so: of a pair of self-relation columns, the side whose
-   * name says "parent" and whose partner's doesn't; else the side where no
-   * row links more than one row while some row of its partner does.
+   * sub-items one, so it's the one pair of self-relation columns whose one
+   * side's name says "parent" (and its partner's doesn't) and where no row
+   * links more than one parent. Nothing is guessed from link counts alone:
+   * a pair like "Blocked by" / "Blocking" fits them as well.
    */
-  subItemsOf(columns, raw) {
+  subItemsOf(columns, raw, dbName) {
     const pairs = [];
     for (const c of columns) {
       if (c.kind !== "self") continue;
@@ -930,11 +931,15 @@ class NotionImport {
       if (partner && partner !== c) pairs.push([c, partner]);
     }
     const isParent = (c) => /\bparent\b/i.test(oneLine(c.prop.name));
-    const named = pairs.find(([c, p]) => isParent(c) && !isParent(p));
-    if (named) return named[0].out[0].key;
     const most = (c) => Math.max(0, ...raw.map((r) => r.values.get(c.prop.id)?.relation?.length ?? 0));
-    const counted = pairs.find(([c, p]) => most(c) === 1 && most(p) > 1);
-    return counted ? counted[0].out[0].key : null;
+    const named = pairs.filter(([c, p]) => isParent(c) && !isParent(p));
+    const fits = named.filter(([c]) => most(c) <= 1);
+    if (fits.length === 1) return fits[0][0].out[0].key;
+    if (named.length > 0) {
+      const which = named.map(([c]) => `"${oneLine(c.prop.name)}"`).join(", ");
+      this.warn(`${which} of "${dbName}" ${named.length === 1 ? "isn't" : "aren't"} imported as sub-items: ${fits.length > 1 ? "more than one relation could hold them" : "a row links more than one parent"}. ${named.length === 1 ? "It stays a relation" : "They stay relations"}, without the Tree view.`);
+    }
+    return null;
   }
 
   dateKind(dates) {

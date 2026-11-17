@@ -774,10 +774,22 @@ test("sub-items: the Parent item / Sub-item pair is a paired self-relation, rows
   assert.deepEqual(find(plan.pages, "Old idea").attributes.si, [ref(kids[0], "First step"), ref(kids[1], "Second step")]);
 });
 
-test("sub-items: renamed columns are told apart by how many rows each side links", async () => {
-  const { plan } = await subItemsImport({ names: ["Up", "Down"] });
+test("sub-items: a pair whose names don't say parent gets no sub-items, as Blocked by / Blocking", async () => {
+  for (const names of [["Up", "Down"], ["Blocked by", "Blocking"]]) {
+    const { plan } = await subItemsImport({ names });
+    assertValidPlan(plan);
+    const archive = find(plan.pages, "Archive");
+    assert.equal(archive.database.subItems, undefined, names.join(" / "));
+    assert.equal(archive.database.columns.find((c) => c.key === "pi").self.reverse, "si");
+  }
+});
+
+test("sub-items: a parent side that links more than one row isn't taken, and says so", async () => {
+  // "Parent of" holds the children: the row "Old idea" links two.
+  const { plan } = await subItemsImport({ names: ["Child of", "Parent of"] });
   assertValidPlan(plan);
-  assert.deepEqual(find(plan.pages, "Archive").database.subItems, { key: "pi" });
+  assert.equal(find(plan.pages, "Archive").database.subItems, undefined);
+  assert.ok(plan.warnings.some((w) => /"Parent of" of "Archive" isn't imported as sub-items: a row links more than one parent/.test(w)), plan.warnings.join("\n"));
 });
 
 test("a one-way relation to the database's own rows is a one-way self-relation, with no sub-items", async () => {
