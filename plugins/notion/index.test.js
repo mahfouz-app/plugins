@@ -90,27 +90,49 @@ function fakeClock() {
 
 /**
  * The app's side of a streaming import, simplified: `scan`, then `run` with
- * every root picked (or `roots`), each batch collected. `resume`: a cursor
- * (or `{ cursor: null }`) and the source ids already in the vault.
+ * every root picked (or `roots`), each batch collected and checked as the
+ * app's `checkBatch` checks it (a refused batch rejects `emit` with an
+ * `ImportPlanError`, which doesn't stop the run). `resume`: a cursor (or
+ * `{ cursor: null }`) and the source ids already in the vault. `stopAfter`:
+ * the app stops the run after that many emits with pages, as Stop does
+ * (the signal aborts, then `emit` and `flush` reject with an AbortError).
+ * `refuse(batch)`: true refuses that batch.
  */
-async function streamImport(importer, ctx, { roots, resume = null, written = [], stopAfter = Infinity } = {}) {
+async function streamImport(importer, ctx, { roots, resume = null, written = [], stopAfter = Infinity, refuse = () => false } = {}) {
   const scan = await importer.scan(ctx);
   const batches = [];
   const isWritten = new Set(written);
-  let stopped = false;
+  const emittedIds = new Set();
+  const stopper = new AbortController();
+  const signal = ctx.signal ? AbortSignal.any([ctx.signal, stopper.signal]) : stopper.signal;
+  const stoppedError = () => Object.assign(new Error("The import was stopped."), { name: "AbortError" });
+  const planError = (msg) => Object.assign(new Error(msg), { name: "ImportPlanError" });
   await importer.run({
     ...ctx,
+    signal,
     roots: roots ?? scan.roots.map((r) => r.sourceId),
     resume,
     isWritten: (id) => isWritten.has(id),
     emit: async (batch) => {
-      if (stopped) throw Object.assign(new Error("stopped"), { name: "ImportStoppedError" });
-      assert.doesNotThrow(() => JSON.stringify(batch.cursor));
+      if (stopper.signal.aborted) throw stoppedError();
+      // The app's checkBatch, in what concerns the plugin.
+      if (batch.cursor === undefined) throw planError("A batch's cursor is undefined.");
+      if (new TextEncoder().encode(JSON.stringify(batch.cursor)).length > 1024 * 1024) throw planError("The cursor is over 1 MB.");
+      const inBatch = new Set();
+      for (const page of batch.pages) {
+        if (typeof page.hasChildren !== "boolean") throw planError(`${page.title}: hasChildren isn't a boolean.`);
+        if (inBatch.has(page.sourceId)) throw planError(`${page.title} is in the batch twice.`);
+        const parentKnown = page.parent === null || inBatch.has(page.parent) || emittedIds.has(page.parent) || isWritten.has(page.parent);
+        if (!parentKnown) throw planError(`${page.title}'s parent comes later, or never.`);
+        inBatch.add(page.sourceId);
+      }
+      if (refuse(batch)) throw planError("Refused.");
+      for (const id of inBatch) emittedIds.add(id);
       batches.push(batch);
-      if (batches.filter((b) => b.pages.length > 0).length >= stopAfter) stopped = true;
+      if (batches.filter((b) => b.pages.length > 0).length >= stopAfter) stopper.abort();
     },
     flush: async () => {
-      if (stopped) throw Object.assign(new Error("stopped"), { name: "ImportStoppedError" });
+      if (stopper.signal.aborted) throw stoppedError();
     },
   });
   return { scan, batches };
@@ -150,7 +172,7 @@ function planOf(scan, batches) {
   };
 }
 
-async function runImport({ overrides = {}, options = { comments: true }, signal = new AbortController().signal, onProgress, roots, resume, written, stopAfter } = {}) {
+async function runImport({ overrides = {}, options = { comments: true }, signal = new AbortController().signal, onProgress, roots, resume, written, stopAfter, refuse } = {}) {
   const clock = fakeClock();
   const http = fakeHttp(overrides, { clock });
   const progress = [];
@@ -164,7 +186,7 @@ async function runImport({ overrides = {}, options = { comments: true }, signal 
       onProgress?.(detail, percent);
     },
   };
-  const { scan, batches } = await streamImport(importer, ctx, { roots, resume, written, stopAfter });
+  const { scan, batches } = await streamImport(importer, ctx, { roots, resume, written, stopAfter, refuse });
   return { plan: planOf(scan, batches), scan, batches, http, clock, progress, importer };
 }
 
@@ -488,7 +510,8 @@ test("cancelling stops the import between requests", async () => {
   const http = fakeHttp({}, { clock });
   let atAbort = null;
   const importer = createNotionImporter({ sleep: clock.sleep, now: clock.now, timeZone: "UTC" });
-  await assert.rejects(
+  // The app aborts the signal to stop a run: the importer returns quietly.
+  await assert.doesNotReject(
     streamImport(importer, {
       http,
       signal: controller.signal,
@@ -499,8 +522,7 @@ test("cancelling stops the import between requests", async () => {
           atAbort = http.calls.length;
         }
       },
-    }),
-    (err) => err.name === "AbortError"
+    })
   );
   assert.ok(atAbort > 0);
   assert.equal(http.calls.length, atAbort, "no request after the abort");
@@ -1039,6 +1061,31 @@ test("attachment refs are the same in every run", async () => {
 test("a stopped run returns quietly once the app refuses an emit", async () => {
   const { batches } = await runImport({ stopAfter: 2 });
   assert.equal(batches.filter((b) => b.pages.length > 0).length, 2);
+});
+
+test("a refused batch fails the run instead of ending it quietly", async () => {
+  let n = 0;
+  await assert.rejects(runImport({ refuse: (b) => b.pages.length > 0 && ++n === 3 }), { name: "ImportPlanError" });
+});
+
+test("resuming from a cursor still walks the sub-pages of a page an earlier import wrote", async () => {
+  // "Guide" gets a sub-page, "Steps"; the run is stopped while Guide waits on the stack.
+  const guide = FIXTURE.ids.child;
+  const stepsId = "10000000-0000-4000-8000-0000000000aa";
+  const blocks = structuredClone(FIXTURE.routes[`GET /blocks/${guide}/children`].body);
+  const sub = structuredClone(FIXTURE.routes[`GET /blocks/${FIXTURE.ids.root}/children`].body.results.find((b) => b.type === "child_page"));
+  Object.assign(sub, { id: stepsId, parent: { type: "page_id", page_id: guide }, child_page: { title: "Steps" } });
+  blocks.results.push(sub);
+  const overrides = { [`GET /blocks/${guide}/children`]: ok(blocks), [`GET /blocks/${stepsId}/children`]: ok(emptyList) };
+  const first = await runImport({ overrides, stopAfter: 1 });
+  const cursor = [...first.batches].reverse().find((b) => b.pages.length > 0).cursor;
+  assert.ok(cursor.stack.some((f) => f.k === "page" && f.id === notionId(guide)), "Guide is still on the stack");
+  // An earlier import (Guide's own link, say) wrote Guide, but not Steps.
+  const written = [...emitted(first.batches), notionId(guide)];
+  const second = await runImport({ overrides, resume: { cursor }, written });
+  const steps = second.batches.flatMap((b) => b.pages).find((p) => p.sourceId === notionId(stepsId));
+  assert.ok(steps, "Steps is imported");
+  assert.equal(steps.parent, notionId(guide));
 });
 
 // ---- attachments

@@ -46,8 +46,8 @@ const MAX_DEPTH = 40;
 const URL_FRESH_MS = 10 * 60 * 1000;
 /** The shape of the cursor this build writes; another (an older build's) is read as none. */
 const CURSOR_VERSION = 1;
-/** A cursor past this, as JSON, isn't kept (the app takes up to 1 MB): a resume then walks again. */
-const MAX_CURSOR_CHARS = 900 * 1024;
+/** A cursor past this many UTF-8 bytes, as JSON, isn't kept (the app takes up to 1 MB): a resume then walks again. */
+const MAX_CURSOR_BYTES = 900 * 1024;
 
 /** 32 hex digits from `s` (four 32-bit FNV-1a hashes, seeded apart): an attachment ref the same in every run. */
 export function stableHash(s) {
@@ -64,8 +64,8 @@ export function stableHash(s) {
 }
 
 // Private-use markers that never survive into the plan (stripped from
-// Notion's text on the way in): a page reference the final pass resolves
-// (P_REF), and a page title it fills in (T_OPEN id T_CLOSE).
+// Notion's text on the way in): a page reference labelled as its page is
+// emitted (P_REF), and a page title filled in then (T_OPEN id T_CLOSE).
 const T_OPEN = "\uE000";
 const T_CLOSE = "\uE001";
 const P_REF = "\uE002";
@@ -75,7 +75,7 @@ const PRIVATE_RE = /[\uE000-\uE002]/g;
 
 export function activate(host) {
   if (typeof host.registerImporter !== "function" || !host.http) {
-    host.toast("Importing from Notion needs Mahfouz 0.12.0 or later, on the desktop app.", "error");
+    host.toast("Importing from Notion needs Mahfouz 0.27.0 or later, on the desktop app.", "error");
     return;
   }
   host.registerImporter(createNotionImporter());
@@ -302,7 +302,7 @@ export class NotionError extends Error {
 /**
  * Notion's API through `http` (the app's `ctx.http`). Requests are spaced
  * `minInterval` apart through `limiter` (shared by every client of one
- * import, so attachment re-resolves after `prepare` keep to the same pace),
+ * import, so attachment re-resolves keep to the walk's pace),
  * 429 is retried after its `Retry-After`, and 502/503/504 with exponential
  * backoff. `signal` stops it between requests.
  */
@@ -437,7 +437,7 @@ class NotionImport {
     const limiter = deps.limiter ?? { nextAt: 0, chain: Promise.resolve() };
     const common = { sleep: deps.sleep, now: deps.now, minInterval: deps.minInterval, limiter };
     this.api = createClient(ctx.http, { ...common, signal: ctx.signal });
-    // Attachments resolve after `prepare` returned, once the user confirmed.
+    // Attachments resolve when the app downloads them, after the batch that lists them is emitted.
     this.resolveApi = createClient(ctx.http, common);
     this.includeComments = ctx.options?.comments !== false;
     this.link = typeof ctx.options?.page === "string" ? ctx.options.page.trim() : "";
@@ -454,7 +454,6 @@ class NotionImport {
     this.pendingLinks = new Map();
     this.stack = [];
     this.leftovers = false;
-    this.fromCursor = false;
     this.stopped = false;
     this.visited = new Set();
     this.searchedPages = new Map();
@@ -502,7 +501,7 @@ class NotionImport {
     const users = await this.api.listAll("GET", "/users", { allow: [403] });
     if (users === null) {
       this.warn(
-        "The integration can't read the workspace's members (it lacks the \"Read user information\" capability): people are imported by the names Notion shows, without emails."
+        "The integration can't read the workspace's members (it lacks the \"Read user information\" capability): people are imported by the names Notion shows, without emails, and can't be given GitHub logins in the review."
       );
     } else for (const u of users) this.person(u);
     if (this.includeComments) {
@@ -526,8 +525,10 @@ class NotionImport {
         const dbId = o.parent?.database_id;
         if (dbId) {
           this.databaseIds.add(notionId(dbId));
-          // A reference to the database lands on its (first) data source.
-          if (!this.aliases.has(notionId(dbId))) this.aliases.set(notionId(dbId), notionId(o.id));
+          // A reference to the database lands on its data source with the lowest
+          // id, the same whatever order search returns them in.
+          const known = this.aliases.get(notionId(dbId));
+          if (!known || notionId(o.id) < known) this.aliases.set(notionId(dbId), notionId(o.id));
         }
       } else if (o.object === "database") this.databaseIds.add(notionId(o.id));
     }
@@ -618,7 +619,6 @@ class NotionImport {
       this.leftovers = cursor.leftovers === true;
       this.estimate = Math.max(this.estimate, Number(cursor.estimate) || 0);
       this.done = Number(cursor.done) || 0;
-      this.fromCursor = true;
     } else {
       this.stack = roots.map((r) => r.frame).reverse();
       // Shared pages the walk doesn't reach come in as roots of their own, when every root was picked.
@@ -644,12 +644,12 @@ class NotionImport {
       try {
         await ctx.flush();
       } catch (err) {
-        this.stopped = true;
+        if (ctx.signal?.aborted) this.stopped = true;
         throw err;
       }
     } catch (err) {
       // The app stopped the run (Stop, a failed commit): nothing more to hand it.
-      if (this.stopped) return;
+      if (this.stopped || ctx.signal?.aborted) return;
       throw err;
     }
   }
@@ -693,8 +693,8 @@ class NotionImport {
       estimate: this.estimate,
       done: this.done,
     };
-    let cursor = JSON.parse(JSON.stringify(state));
-    if (JSON.stringify(cursor).length > MAX_CURSOR_CHARS) cursor = null;
+    const json = JSON.stringify(state);
+    const cursor = new TextEncoder().encode(json).length > MAX_CURSOR_BYTES ? null : JSON.parse(json);
     const batch = { pages, attachments, cursor, estimate: Math.max(this.estimate, this.done) };
     if (people.length > 0) batch.people = people;
     if (warnings.length > 0) batch.warnings = warnings;
@@ -703,7 +703,8 @@ class NotionImport {
     try {
       await this.ctx.emit(batch);
     } catch (err) {
-      this.stopped = true;
+      // Only the app stopping the run is a quiet end; a refused batch is an error to report.
+      if (this.ctx.signal?.aborted) this.stopped = true;
       throw err;
     }
   }
@@ -725,6 +726,8 @@ class NotionImport {
     if (this.visited.has(frame.id)) return;
     this.visited.add(frame.id);
     const page = this.searchedPages.get(frame.id) ?? { id: uuid(frame.id) };
+    // A page frame is popped before its page is emitted, so a written one was
+    // written by an earlier import: its children are read from its blocks.
     const read = await this.readPage(page, frame.hint, frame.parent);
     this.stack.push(...read.frames.reverse());
     if (read.node) await this.emit([read.node]);
@@ -732,16 +735,16 @@ class NotionImport {
 
   /**
    * A page or row read: its node (null when the app already has it: then
-   * only its children are read) and its children's frames.
+   * only its children are read) and its children's frames. `childrenQueued`:
+   * a row this run emitted before it was stopped, whose children's frames are
+   * on the resumed stack already.
    */
-  async readPage(page, titleHint, parent, row = null) {
+  async readPage(page, titleHint, parent, row = null, childrenQueued = false) {
     const id = notionId(page.id);
     const title = this.titleOf(page) || oneLine(titleHint) || "Untitled";
     this.titles.set(id, title);
     if (this.ctx.isWritten?.(id)) {
-      // Already in the vault. Resumed from a cursor, its children are on the
-      // stack already; walking again, they're read from its blocks.
-      if (this.fromCursor) return { node: null, frames: [] };
+      if (childrenQueued) return { node: null, frames: [] };
       const render = this.renderBody(await this.fetchTree(page.id, 0));
       return { node: null, frames: this.childFrames(id, render) };
     }
@@ -779,7 +782,7 @@ class NotionImport {
     const frames = [];
     for (const [i, ref] of sources.entries()) {
       const dsKey = notionId(ref.id);
-      if (i === 0 && !this.aliases.has(dbKey)) this.aliases.set(dbKey, dsKey);
+      if (!this.aliases.has(dbKey) || dsKey < this.aliases.get(dbKey)) this.aliases.set(dbKey, dsKey);
       frames.push({ k: "src", id: dsKey, db: dbKey, parent: frame.parent, multi: sources.length > 1, index: i, hint: oneLine(ref.name), dbTitle });
     }
     this.stack.push(...frames.reverse());
@@ -855,7 +858,10 @@ class NotionImport {
     const below = this.stack.slice(0, -1);
     await this.emit([this.finish(node)]);
 
-    // The rows' sub-pages wait until the rows are all emitted.
+    // The rows' sub-pages wait until the rows are all emitted. `emitted`: the
+    // rows this run emitted, kept in the cursor's copy of this frame, so a
+    // resume knows their sub-pages' frames are below it already.
+    const emitted = new Set(Array.isArray(frame.emitted) ? frame.emitted : []);
     const pending = [];
     for (const { row, values } of raw) {
       throwIfAborted(this.ctx.signal);
@@ -868,10 +874,13 @@ class NotionImport {
         const pv = values.get(col.prop.id);
         if (pv !== undefined) this.cellValue(col, pv, row, attributes, extra);
       }
-      const read = await this.readPage(row, null, dsKey, { attributes, extra });
+      const read = await this.readPage(row, null, dsKey, { attributes, extra }, emitted.has(rowId));
       pending.push(...read.frames);
-      // Resumed from here: this source again (its rows written by then are skipped), then the sub-pages found so far.
-      if (read.node) await this.emit([read.node], { stack: [...below, ...[...pending].reverse(), frame] });
+      if (read.node) {
+        emitted.add(rowId);
+        // Resumed from here: this source again (its rows written by then are skipped), then the sub-pages found so far.
+        await this.emit([read.node], { stack: [...below, ...[...pending].reverse(), { ...frame, emitted: [...emitted] }] });
+      }
     }
     leave(pending);
     await this.emit([], { closed: [dsKey] });
@@ -1307,7 +1316,7 @@ class NotionImport {
     return `[${label}](mahfouz-import:person/${id})`;
   }
 
-  /** A page reference the final pass resolves; with no `text`, the page's title is filled in then. */
+  /** A page reference, labelled when its page is emitted; with no `text`, the page's title is filled in then. */
   pageRef(rawId, text, context) {
     const id = notionId(rawId);
     const label = text ? (context === "body" ? escapeText(oneLine(text)) : plainLabel(text)) : `${T_OPEN}${id}${T_CLOSE}`;
