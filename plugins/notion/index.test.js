@@ -170,7 +170,17 @@ function assertValidPlan(plan, { outside = false } = {}) {
     if (p.database) {
       for (const c of p.database.columns) {
         assert.equal(typeof c.key, "string");
-        assert.ok(["text", "number", "checkbox", "url", "email", "phone", "date", "datetime", "select", "multiselect", "attachment"].includes(c.type), c.type);
+        assert.ok(["text", "number", "checkbox", "url", "email", "phone", "date", "datetime", "select", "multiselect", "attachment", "relation"].includes(c.type), c.type);
+        // Only a relation between the database's own rows; a pair names each other back.
+        assert.equal(c.type === "relation", c.self !== undefined, `${c.key}: self goes with relation only`);
+        if (c.self?.oneWay) assert.ok(c.self.reverse === undefined && c.self.reverseLabel === undefined);
+        const other = c.self?.reverse !== undefined ? p.database.columns.find((o) => o.key === c.self.reverse) : undefined;
+        if (other) assert.equal(other.self?.reverse, c.key, `${c.key}'s reverse names it back`);
+      }
+      const sub = p.database.subItems;
+      if (sub) {
+        const named = p.database.columns.find((c) => c.key === sub.key);
+        assert.ok(named?.self && (named.self.oneWay || (named.self.reverse !== undefined && named.self.reverse !== named.key)), "sub-items name a one-way or paired self-relation");
       }
       const keys = new Set(p.database.columns.map((c) => c.key));
       for (const row of p.children) for (const k of Object.keys(row.attributes)) assert.ok(keys.has(k), `row attribute ${k} has a column`);
@@ -234,7 +244,8 @@ test("the manifest lists Notion's hosts and binds the token to the API only", ()
   const m = JSON.parse(readFileSync(new URL("./plugin.json", import.meta.url), "utf8"));
   assert.deepEqual(m.network.hosts, ["api.notion.com", "prod-files-secure.s3.us-west-2.amazonaws.com", "file.notion.so"]);
   assert.deepEqual(m.secrets, { token: { hosts: ["api.notion.com"] } });
-  assert.equal(m.mahfouz, ">=0.12.0");
+  // Self-relation columns and sub-items in a plan: an older app refuses them.
+  assert.equal(m.mahfouz, ">=0.27.0");
 });
 
 // ---- requests
@@ -647,7 +658,7 @@ test("databases: one per data source, typed columns, row attributes; a linked da
       ["Estimate", "number", undefined],
       ["Done", "checkbox", undefined],
       ["Owner", "text", undefined],
-      ["Related", "text", undefined],
+      ["Related", "relation", undefined],
       ["Files", "attachment", undefined],
       ["Score", "number", undefined],
       ["Link", "url", undefined],
@@ -683,7 +694,7 @@ test("databases: one per data source, typed columns, row attributes; a linked da
 
   const launch = byLabel(find(plan.pages, "Plan launch"));
   // A date-only value in a datetime column is local midnight; empty values are left out.
-  assert.deepEqual(launch, { Status: "Not started", Due: "2025-11-01T00:00", Done: "false", Related: `[Write docs](mahfouz-import:page/${ids.row1})` });
+  assert.deepEqual(launch, { Status: "Not started", Due: "2025-11-01T00:00", Done: "false", Related: [`[Write docs](mahfouz-import:page/${ids.row1})`] });
 
   for (const w of [
     'The "Click" column (button) of "Open" isn\'t imported.',
@@ -700,11 +711,80 @@ test("property lists past 25 items are paged through the property endpoint", asy
   const keys = http.keys();
   assert.ok(keys.includes(`GET /pages/${FIXTURE.ids.row1}/properties/rl`));
   assert.ok(keys.includes(`GET /pages/${FIXTURE.ids.row1}/properties/rl?start_cursor=rel-2`));
-  const related = find(plan.pages, "Write docs").attributes.rl.split(", ");
+  const related = find(plan.pages, "Write docs").attributes.rl;
   assert.equal(related.length, 26);
   // Pages outside the import are links back to Notion; the one inside, a reference.
   assert.equal(related[0], "https://www.notion.so/20000000000040008000000000000001");
   assert.equal(related[25], `[Plan launch](mahfouz-import:page/${ids.row2})`);
+});
+
+/**
+ * The fixture's second data source ("Archive") with Notion's sub-items: a
+ * "Parent item" / "Sub-item" relation pair (names given, or `names`), its
+ * one row ("Old idea") the parent of two new rows.
+ */
+async function subItemsImport({ names = ["Parent item", "Sub-item"] } = {}) {
+  const ds = FIXTURE.ids.ds2;
+  const search = structuredClone(FIXTURE.routes["POST /search?start_cursor=cursor-2"].body);
+  const source = search.results.find((r) => r.id === ds);
+  const dual = (name, id) => ({ type: "dual_property", dual_property: { synced_property_name: name, synced_property_id: id } });
+  source.properties[names[0]] = { id: "pi", name: names[0], type: "relation", relation: { data_source_id: ds, ...dual(names[1], "si") } };
+  source.properties[names[1]] = { id: "si", name: names[1], type: "relation", relation: { data_source_id: ds, ...dual(names[0], "pi") } };
+  const query = structuredClone(FIXTURE.routes[`POST /data_sources/${ds}/query`].body);
+  const parent = query.results[0];
+  const kid = (n, title) => {
+    const row = structuredClone(parent);
+    row.id = `30000000-0000-4000-8000-00000000000${n}`;
+    row.properties.Title.title = [{ type: "text", text: { content: title, link: null }, plain_text: title, href: null }];
+    row.properties[names[0]] = { id: "pi", type: "relation", relation: [{ id: parent.id }], has_more: false };
+    row.properties[names[1]] = { id: "si", type: "relation", relation: [], has_more: false };
+    return row;
+  };
+  const kids = [kid(1, "First step"), kid(2, "Second step")];
+  parent.properties[names[0]] = { id: "pi", type: "relation", relation: [], has_more: false };
+  parent.properties[names[1]] = { id: "si", type: "relation", relation: kids.map((k) => ({ id: k.id })), has_more: false };
+  query.results.push(...kids);
+  const { plan } = await runImport({
+    overrides: {
+      "POST /search?start_cursor=cursor-2": ok(search),
+      [`POST /data_sources/${ds}/query`]: ok(query),
+      ...Object.fromEntries(kids.map((k) => [`GET /blocks/${k.id}/children`, ok(emptyList)])),
+    },
+  });
+  return { plan, parent, kids };
+}
+
+test("sub-items: the Parent item / Sub-item pair is a paired self-relation, rows stay flat, and the parent side is the database's sub-items", async () => {
+  const { plan, parent, kids } = await subItemsImport();
+  assertValidPlan(plan);
+  const archive = find(plan.pages, "Archive");
+  assert.deepEqual(
+    archive.database.columns.filter((c) => c.type === "relation"),
+    [
+      { key: "pi", label: "Parent item", type: "relation", self: { reverse: "si" } },
+      { key: "si", label: "Sub-item", type: "relation", self: { reverse: "pi" } },
+    ]
+  );
+  assert.deepEqual(archive.database.subItems, { key: "pi" });
+  // Every row is still a row of the database, none nested in another.
+  assert.deepEqual(archive.children.map((r) => r.title), ["Old idea", "First step", "Second step"]);
+  for (const r of archive.children) assert.deepEqual(r.children, []);
+  const ref = (row, title) => `[${title}](mahfouz-import:page/${notionId(row.id)})`;
+  assert.deepEqual(find(plan.pages, "First step").attributes.pi, [ref(parent, "Old idea")]);
+  assert.deepEqual(find(plan.pages, "Old idea").attributes.si, [ref(kids[0], "First step"), ref(kids[1], "Second step")]);
+});
+
+test("sub-items: renamed columns are told apart by how many rows each side links", async () => {
+  const { plan } = await subItemsImport({ names: ["Up", "Down"] });
+  assertValidPlan(plan);
+  assert.deepEqual(find(plan.pages, "Archive").database.subItems, { key: "pi" });
+});
+
+test("a one-way relation to the database's own rows is a one-way self-relation, with no sub-items", async () => {
+  const { plan } = await runImport();
+  const open = find(plan.pages, "Open");
+  assert.deepEqual(open.database.columns.find((c) => c.key === "rl").self, { oneWay: true });
+  assert.equal(open.database.subItems, undefined);
 });
 
 test("a long title or rich text is paged too, and its whole text kept", async () => {

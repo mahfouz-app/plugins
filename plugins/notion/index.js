@@ -756,7 +756,7 @@ class NotionImport {
       raw.push({ row, values });
     }
 
-    const columns = this.columnsOf(schema, raw, name);
+    const columns = this.columnsOf(schema, raw, name, id);
     const children = [];
     for (const { row, values } of raw) {
       const attributes = {};
@@ -770,13 +770,14 @@ class NotionImport {
       if (page) children.push(page);
     }
     const description = this.richMd(db?.description);
+    const subItems = this.subItemsOf(columns, raw);
     return {
       sourceId: id,
       title: name,
       body: description,
       attributes: {},
       children,
-      database: { columns: columns.flatMap((c) => c.out) },
+      database: { columns: columns.flatMap((c) => c.out), ...(subItems ? { subItems: { key: subItems } } : {}) },
     };
   }
 
@@ -800,8 +801,20 @@ class NotionImport {
    * title), typed from the property and, where Notion doesn't say (a
    * formula's result, a date's time), from the rows' values.
    */
-  columnsOf(schema, raw, dbName) {
+  columnsOf(schema, raw, dbName, sourceId) {
     const columns = [];
+    /** A relation property linking rows of this same data source. */
+    const isSelf = (p) => p?.type === "relation" && notionId(p.relation?.data_source_id) === sourceId;
+    /** A dual self-relation's other side in the schema, by id, else by name. */
+    const partnerOf = (p) => {
+      const dual = p.relation?.dual_property;
+      if (p.relation?.type !== "dual_property" || !dual) return null;
+      return (
+        schema.find((o) => o !== p && isSelf(o) && o.id === dual.synced_property_id) ??
+        schema.find((o) => o !== p && isSelf(o) && oneLine(o.name) === oneLine(dual.synced_property_name)) ??
+        null
+      );
+    };
     const valuesOf = (prop) => raw.map((r) => r.values.get(prop.id)).filter(Boolean);
     let snapshot = false;
     for (const prop of schema) {
@@ -813,9 +826,27 @@ class NotionImport {
       switch (prop.type) {
         case "title":
           continue;
+        case "relation": {
+          if (!isSelf(prop)) {
+            // A relation to another database: the linked pages, as text.
+            out = [col("text")];
+            break;
+          }
+          // A relation between this database's rows (Notion's sub-items
+          // among them): one-way, or paired with its other side.
+          const partner = partnerOf(prop);
+          const dual = prop.relation?.dual_property;
+          let self;
+          if (partner) self = { reverse: partner.id };
+          else if (prop.relation?.type === "dual_property" && dual) {
+            self = { reverse: `${prop.id} reverse`, reverseLabel: oneLine(dual.synced_property_name) || `${label} (reverse)` };
+          } else self = { oneWay: true };
+          out = [{ ...col("relation"), self }];
+          kind = "self";
+          break;
+        }
         case "rich_text":
         case "people":
-        case "relation":
         case "created_by":
         case "last_edited_by":
         case "unique_id":
@@ -884,6 +915,28 @@ class NotionImport {
     return columns;
   }
 
+  /**
+   * The key of the self-relation column holding each row's parent (Notion's
+   * "Parent item"), or null. Notion's API doesn't say which relation is the
+   * sub-items one, so: of a pair of self-relation columns, the side whose
+   * name says "parent" and whose partner's doesn't; else the side where no
+   * row links more than one row while some row of its partner does.
+   */
+  subItemsOf(columns, raw) {
+    const pairs = [];
+    for (const c of columns) {
+      if (c.kind !== "self") continue;
+      const partner = columns.find((o) => o.kind === "self" && o.prop.id === c.out[0].self.reverse);
+      if (partner && partner !== c) pairs.push([c, partner]);
+    }
+    const isParent = (c) => /\bparent\b/i.test(oneLine(c.prop.name));
+    const named = pairs.find(([c, p]) => isParent(c) && !isParent(p));
+    if (named) return named[0].out[0].key;
+    const most = (c) => Math.max(0, ...raw.map((r) => r.values.get(c.prop.id)?.relation?.length ?? 0));
+    const counted = pairs.find(([c, p]) => most(c) === 1 && most(p) > 1);
+    return counted ? counted[0].out[0].key : null;
+  }
+
   dateKind(dates) {
     return dates.some((d) => d && (/T/.test(d.start ?? "") || /T/.test(d.end ?? ""))) ? "datetime" : "date";
   }
@@ -929,8 +982,11 @@ class NotionImport {
         return set(main.key, typeof v === "string" ? plainText(oneLine(v)) : undefined);
       case "people":
         return set(main.key, (v ?? []).map((u) => this.personRef(u, "plain")).join(", "));
-      case "relation":
-        return set(main.key, (v ?? []).map((r) => this.pageRef(r?.id, null, "plain")).join(", "));
+      case "relation": {
+        const refs = (v ?? []).filter((r) => r?.id).map((r) => this.pageRef(r.id, null, "plain"));
+        // A self-relation's value is the list of rows it links.
+        return set(main.key, col.kind === "self" ? refs : refs.join(", "));
+      }
       case "created_by":
       case "last_edited_by":
         return set(main.key, v ? this.personRef(v, "plain") : undefined);
