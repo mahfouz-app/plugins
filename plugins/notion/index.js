@@ -428,6 +428,17 @@ function codeSpan(text, inCell) {
 
 // ---- the import ---------------------------------------------------------------------
 
+// Without Notion's "Read user information" capability, `/users` answers 403
+// and people arrive without emails (often without names): the review can't
+// match them to GitHub logins. The scan says so in the review's People
+// section (`peopleNote`; an app without it shows nothing), and
+// the app offers to map the people the import names after the review.
+const PEOPLE_NOTE = {
+  text: "Notion didn't share your workspace's members. The integration doesn't have the \"Read user information including email addresses\" capability, so people can't be matched to GitHub logins here. Turn it on under Capabilities in the integration's settings, then scan again. Or import now and map people afterwards.",
+  url: "https://www.notion.so/profile/integrations",
+  urlLabel: "Open Notion integrations",
+};
+
 class NotionImport {
   constructor(ctx, deps) {
     this.ctx = ctx;
@@ -464,6 +475,7 @@ class NotionImport {
     this.done = 0;
     this.estimate = 0;
     this.commentsReadable = true;
+    this.peopleNote = null;
   }
 
   warn(text) {
@@ -501,9 +513,7 @@ class NotionImport {
     this.progress("Reading the workspace's people…");
     const users = await this.api.listAll("GET", "/users", { allow: [403] });
     if (users === null) {
-      this.warn(
-        "The integration can't read the workspace's members (it lacks the \"Read user information\" capability): people are imported by the names Notion shows, without emails, and can't be given GitHub logins in the review."
-      );
+      this.peopleNote = PEOPLE_NOTE;
     } else for (const u of users) this.person(u);
     if (this.includeComments) {
       this.warn(
@@ -593,6 +603,7 @@ class NotionImport {
       roots: this.roots.map(({ kind, sourceId, title }) => ({ kind, sourceId, title })),
       people: [...this.people.values()],
       warnings: [...this.warnings],
+      ...(this.peopleNote ? { peopleNote: this.peopleNote } : {}),
       ...(this.account ? { fingerprint: this.account } : {}),
     };
   }
