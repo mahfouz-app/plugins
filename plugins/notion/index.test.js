@@ -102,6 +102,7 @@ async function streamImport(importer, ctx, { roots, resume = null, written = [],
   const scan = await importer.scan(ctx);
   const batches = [];
   const isWritten = new Set(written);
+  let checks = 0;
   const emittedIds = new Set();
   const stopper = new AbortController();
   const signal = ctx.signal ? AbortSignal.any([ctx.signal, stopper.signal]) : stopper.signal;
@@ -112,7 +113,11 @@ async function streamImport(importer, ctx, { roots, resume = null, written = [],
     signal,
     roots: roots ?? scan.roots.map((r) => r.sourceId),
     resume,
-    isWritten: (id) => isWritten.has(id),
+    // A walk that never ends spins without yielding to a timer: this ends it instead.
+    isWritten: (id) => {
+      if (++checks > 100_000) throw new Error("isWritten was asked 100000 times: the walk doesn't end.");
+      return isWritten.has(id);
+    },
     emit: async (batch) => {
       if (stopper.signal.aborted) throw stoppedError();
       // The app's checkBatch, in what concerns the plugin.
@@ -584,17 +589,64 @@ test("a database only the search found brings its rows in with it, not as loose 
     assert.ok(parent && [ids.ds1, ids.ds2].includes(parent.sourceId), `row ${row} sits in its database`);
     assert.ok(Object.keys(found[0].attributes).length > 0, `row ${row} keeps its properties`);
   }
-  // Stopped anywhere in the leftovers, a resume brings in the rest, and no row as a loose page.
-  const full = emitted((await runImport({ overrides: { [key]: children } })).batches);
-  for (let n = 1; n < 12; n++) {
+  // Stopped anywhere, a resume brings in the rest, and no row as a loose page in either run.
+  const fullBatches = (await runImport({ overrides: { [key]: children } })).batches;
+  const full = emitted(fullBatches);
+  const loose = (batches) => batches.flatMap((b) => b.pages).filter((p) => [ids.row1, ids.row2, ids.row3].includes(p.sourceId) && p.parent === null);
+  let midLeftovers = false;
+  for (let n = 1; n < fullBatches.filter((b) => b.pages.length > 0).length; n++) {
     const first = await runImport({ overrides: { [key]: children }, stopAfter: n });
     const written = emitted(first.batches);
     const cursor = [...first.batches].reverse().find((b) => b.pages.length > 0).cursor;
+    if (cursor.leftovers && cursor.stack.some((f) => f.k === "src")) midLeftovers = true;
     const second = await runImport({ overrides: { [key]: children }, resume: { cursor }, written });
     assert.deepEqual(new Set([...written, ...emitted(second.batches)]), new Set(full), `stopped after ${n}`);
-    const loose = second.batches.flatMap((b) => b.pages).filter((p) => [ids.row1, ids.row2, ids.row3].includes(p.sourceId) && p.parent === null);
-    assert.deepEqual(loose, [], `stopped after ${n}`);
+    assert.deepEqual([...loose(first.batches), ...loose(second.batches)], [], `stopped after ${n}`);
   }
+  assert.ok(midLeftovers, "some stop lands while a leftover database is being read");
+});
+
+test("a database in a page the walk missed stays in that page", async () => {
+  // Guide drops out of the root's children, and holds the Tasks database: both are left over.
+  const rootKey = `GET /blocks/${FIXTURE.ids.root}/children`;
+  const rootChildren = structuredClone(FIXTURE.routes[rootKey]);
+  rootChildren.body.results = rootChildren.body.results.filter((b) => b.id !== FIXTURE.ids.db && b.id !== FIXTURE.ids.child);
+  const guideKey = `GET /blocks/${FIXTURE.ids.child}/children`;
+  const guideChildren = structuredClone(FIXTURE.routes[guideKey]);
+  guideChildren.body.results.push({ object: "block", id: FIXTURE.ids.db, type: "child_database", has_children: false, child_database: { title: "Tasks" }, parent: { type: "page_id", page_id: FIXTURE.ids.child } });
+  const inGuide = { type: "page_id", page_id: FIXTURE.ids.child };
+  const overrides = { [rootKey]: rootChildren, [guideKey]: guideChildren };
+  for (const k of ["POST /search", "POST /search?start_cursor=cursor-2"]) {
+    const route = structuredClone(FIXTURE.routes[k]);
+    for (const o of route.body.results) if (o.object === "data_source") o.database_parent = inGuide;
+    overrides[k] = route;
+  }
+  const dbKey = `GET /databases/${FIXTURE.ids.db}`;
+  overrides[dbKey] = structuredClone(FIXTURE.routes[dbKey]);
+  overrides[dbKey].body.parent = inGuide;
+
+  const { plan } = await runImport({ overrides });
+  assertValidPlan(plan);
+  const guide = plan.pages.find((p) => p.sourceId === ids.child);
+  assert.ok(guide, "Guide comes in as a root of its own");
+  assert.deepEqual(guide.children.map((p) => p.sourceId), [ids.ds1, ids.ds2]);
+  assert.deepEqual(find(plan.pages, "Open").children.map((p) => p.title), ["Write docs", "Plan launch"]);
+  assert.ok(!plan.pages.some((p) => [ids.ds1, ids.ds2, ids.row1, ids.row2, ids.row3].includes(p.sourceId)), "nothing of Tasks at the root");
+});
+
+test("a row whose database can't be read still comes in, as a page of its own", async () => {
+  const key = `GET /blocks/${FIXTURE.ids.root}/children`;
+  const children = structuredClone(FIXTURE.routes[key]);
+  children.body.results = children.body.results.filter((b) => !(b.type === "child_database" && b.id === FIXTURE.ids.db));
+  const overrides = { [key]: children, [`GET /databases/${FIXTURE.ids.db}`]: { status: 404, headers: json, body: { object: "error", code: "object_not_found" } } };
+  const { plan, batches } = await runImport({ overrides });
+  assertValidPlan(plan);
+  for (const row of [ids.row1, ids.row2, ids.row3]) {
+    const found = batches.flatMap((b) => b.pages).filter((p) => p.sourceId === row);
+    assert.equal(found.length, 1, `row ${row} imported once`);
+    assert.equal(found[0].parent, null, `row ${row} is a root`);
+  }
+  assert.ok(plan.warnings.some((w) => w.includes("was skipped")), "the unreadable database is named");
 });
 
 // ---- blocks
