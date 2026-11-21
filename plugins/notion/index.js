@@ -460,6 +460,7 @@ class NotionImport {
     this.searchedSources = new Map();
     this.databaseIds = new Set();
     this.blockOwners = new Map();
+    this.dbParents = new Map();
     this.done = 0;
     this.estimate = 0;
     this.commentsReadable = true;
@@ -630,8 +631,9 @@ class NotionImport {
       while (this.stack.length > 0 || this.leftovers) {
         throwIfAborted(ctx.signal);
         if (this.stack.length === 0) {
-          this.leftovers = false;
           this.stack = this.leftoverFrames().reverse();
+          // Another pass, for what's under these frames that their walk doesn't reach.
+          this.leftovers = this.stack.length > 0;
           continue;
         }
         const frame = this.stack[this.stack.length - 1];
@@ -654,18 +656,57 @@ class NotionImport {
     }
   }
 
-  /** The shared pages and data sources no walk reached, as root frames. */
+  /**
+   * The shared pages and databases no walk reached, as root frames: only the
+   * topmost of them, those whose parent isn't itself waiting here, databases
+   * first. Walking them reaches what's under them (a database in a missed
+   * page stays in that page; a searched row comes in with its database and
+   * its properties), and `run` asks again until nothing is left. A row whose
+   * database couldn't be read then comes in as a page of its own.
+   */
   leftoverFrames() {
-    const frames = [];
-    for (const [id, page] of this.searchedPages) {
-      if (!this.visited.has(id) && !this.ctx.isWritten?.(id)) frames.push({ k: "page", id, parent: null, hint: this.titleOf(page) || "Untitled" });
-    }
+    const databases = [];
+    const seen = new Set();
     for (const [id, source] of this.searchedSources) {
-      if (this.visited.has(id) || this.ctx.isWritten?.(id)) continue;
-      const dbKey = notionId(source.parent?.database_id ?? source.id);
-      if (!frames.some((f) => f.k === "db" && f.id === dbKey)) frames.push({ k: "db", id: dbKey, parent: null, hint: this.plainTitle(source.title) });
+      const dbKey = this.dbKeyOf(source);
+      if (seen.has(dbKey) || !this.unreached(id) || this.visited.has(dbKey)) continue;
+      seen.add(dbKey);
+      if (!this.leftoverParent(this.dbParents.get(dbKey))) databases.push({ k: "db", id: dbKey, parent: null, hint: this.plainTitle(source.title) });
     }
-    return frames;
+    const pages = [];
+    for (const [id, page] of this.searchedPages) {
+      if (this.unreached(id) && !this.leftoverParent(page.parent)) pages.push({ k: "page", id, parent: null, hint: this.titleOf(page) || "Untitled" });
+    }
+    return [...databases, ...pages];
+  }
+
+  /** Whether a searched page or data source is still to import: not walked this run, nor written by an earlier one. */
+  unreached(id) {
+    return !this.visited.has(id) && !this.ctx.isWritten?.(id);
+  }
+
+  /** The key a data source's database frame walks under. */
+  dbKeyOf(source) {
+    return notionId(source.parent?.database_id ?? source.id);
+  }
+
+  /** Whether `parent` (a Notion parent) is a leftover still to walk, which will reach its child. */
+  leftoverParent(parent) {
+    switch (parent?.type) {
+      case "page_id":
+        return this.searchedPages.has(notionId(parent.page_id)) && this.unreached(notionId(parent.page_id));
+      case "data_source_id": {
+        const source = this.searchedSources.get(notionId(parent.data_source_id));
+        return source !== undefined && this.unreached(notionId(source.id)) && !this.visited.has(this.dbKeyOf(source));
+      }
+      case "block_id": {
+        // Cached while finding the roots; a block that couldn't be read holds nothing waiting.
+        const owner = this.blockOwners.get(notionId(parent.block_id));
+        return owner != null && owner.type !== "block_id" && this.leftoverParent(owner);
+      }
+      default:
+        return false;
+    }
   }
 
   /**
@@ -945,6 +986,7 @@ class NotionImport {
       seenDatabases.add(notionId(dbId));
       let dbParent = source.database_parent;
       if (!dbParent) dbParent = (await this.api.call("GET", `/databases/${dbId}`, { allow: [403, 404] }))?.parent;
+      this.dbParents.set(notionId(dbId), dbParent);
       if (!(await this.parentInSet(dbParent))) roots.push({ kind: "database", id: dbId, source });
     }
     return roots;
