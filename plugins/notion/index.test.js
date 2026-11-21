@@ -1036,10 +1036,18 @@ test("without the comments capability: a warning, and no more tries", async () =
   assert.ok(plan.warnings.some((w) => w.includes('"Read comments" capability')));
 });
 
+test("with the user-info capability, the review gets no people note", async () => {
+  const { scan } = await runImport();
+  assert.equal(scan.peopleNote, undefined);
+});
+
 test("without the user-info capability, people come from mentions and comments", async () => {
-  const { plan } = await runImport({ overrides: { "GET /users": { status: 403, headers: json, body: { object: "error", code: "restricted_resource" } } } });
+  const { plan, scan } = await runImport({ overrides: { "GET /users": { status: 403, headers: json, body: { object: "error", code: "restricted_resource" } } } });
   assertValidPlan(plan);
-  assert.ok(plan.warnings.some((w) => w.includes('"Read user information" capability')));
+  // The review's People section says what's missing and links to the settings.
+  assert.match(scan.peopleNote.text, /"Read user information including email addresses"/);
+  assert.equal(scan.peopleNote.url, "https://www.notion.so/profile/integrations");
+  assert.ok(!plan.warnings.some((w) => w.includes("Read user information")));
   // Bob only appears in a comment's display name and a mention.
   assert.equal(plan.people.find((p) => p.id === ids.bob).name, "Bob Stone");
   assert.equal(plan.people.find((p) => p.id === ids.bob).email, undefined);
