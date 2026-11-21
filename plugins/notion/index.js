@@ -654,16 +654,27 @@ class NotionImport {
     }
   }
 
-  /** The shared pages and data sources no walk reached, as root frames. */
+  /**
+   * The shared data sources and pages no walk reached, as root frames. The
+   * databases go first, in a pass of their own: a searched page that's one
+   * of their rows then comes in with its database and its properties. The
+   * next pass takes the pages still unvisited, a row whose database couldn't
+   * be read among them.
+   */
   leftoverFrames() {
     const frames = [];
-    for (const [id, page] of this.searchedPages) {
-      if (!this.visited.has(id) && !this.ctx.isWritten?.(id)) frames.push({ k: "page", id, parent: null, hint: this.titleOf(page) || "Untitled" });
-    }
     for (const [id, source] of this.searchedSources) {
       if (this.visited.has(id) || this.ctx.isWritten?.(id)) continue;
       const dbKey = notionId(source.parent?.database_id ?? source.id);
-      if (!frames.some((f) => f.k === "db" && f.id === dbKey)) frames.push({ k: "db", id: dbKey, parent: null, hint: this.plainTitle(source.title) });
+      if (this.visited.has(dbKey)) continue;
+      if (!frames.some((f) => f.id === dbKey)) frames.push({ k: "db", id: dbKey, parent: null, hint: this.plainTitle(source.title) });
+    }
+    if (frames.length > 0) {
+      this.leftovers = true;
+      return frames;
+    }
+    for (const [id, page] of this.searchedPages) {
+      if (!this.visited.has(id) && !this.ctx.isWritten?.(id)) frames.push({ k: "page", id, parent: null, hint: this.titleOf(page) || "Untitled" });
     }
     return frames;
   }

@@ -567,6 +567,36 @@ test("a page whose parent block can't be read is still imported, as a root", asy
   assert.deepEqual(plan.pages.map((p) => p.title), ["Team Wiki", "In a column", "Loose page"]);
 });
 
+test("a database only the search found brings its rows in with it, not as loose pages", async () => {
+  // The root no longer lists the Tasks database: only the search reaches it and its rows.
+  const key = `GET /blocks/${FIXTURE.ids.root}/children`;
+  const children = structuredClone(FIXTURE.routes[key]);
+  children.body.results = children.body.results.filter((b) => !(b.type === "child_database" && b.id === FIXTURE.ids.db));
+  const { plan } = await runImport({ overrides: { [key]: children } });
+  assertValidPlan(plan);
+  const pages = all(plan.pages);
+  // Tasks has two data sources: each is a database of its own.
+  for (const ds of [ids.ds1, ids.ds2]) assert.ok(pages.find((p) => p.sourceId === ds)?.database, `Tasks' source ${ds} is imported`);
+  for (const row of [ids.row1, ids.row2, ids.row3]) {
+    const found = pages.filter((p) => p.sourceId === row);
+    assert.equal(found.length, 1, `row ${row} imported once`);
+    const parent = pages.find((p) => p.children.includes(found[0]));
+    assert.ok(parent && [ids.ds1, ids.ds2].includes(parent.sourceId), `row ${row} sits in its database`);
+    assert.ok(Object.keys(found[0].attributes).length > 0, `row ${row} keeps its properties`);
+  }
+  // Stopped anywhere in the leftovers, a resume brings in the rest, and no row as a loose page.
+  const full = emitted((await runImport({ overrides: { [key]: children } })).batches);
+  for (let n = 1; n < 12; n++) {
+    const first = await runImport({ overrides: { [key]: children }, stopAfter: n });
+    const written = emitted(first.batches);
+    const cursor = [...first.batches].reverse().find((b) => b.pages.length > 0).cursor;
+    const second = await runImport({ overrides: { [key]: children }, resume: { cursor }, written });
+    assert.deepEqual(new Set([...written, ...emitted(second.batches)]), new Set(full), `stopped after ${n}`);
+    const loose = second.batches.flatMap((b) => b.pages).filter((p) => [ids.row1, ids.row2, ids.row3].includes(p.sourceId) && p.parent === null);
+    assert.deepEqual(loose, [], `stopped after ${n}`);
+  }
+});
+
 // ---- blocks
 
 test("every block type becomes Markdown, or a warning", async () => {
